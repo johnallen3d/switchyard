@@ -7,8 +7,8 @@
 //! through switchyard-core (live status first, then the worktree check). It
 //! acts on Enter, ctrl-r and the "ask" confirm the way the config's
 //! tab_picker mode does, through core's actions and `rex do session.select`,
-//! then stays open, showing the outcome and refreshing. Escape or ctrl-c
-//! closes it. The registry is on the Mac; elsewhere it shows tabs only.
+//! then stays open, showing the outcome and refreshing. It also refreshes
+//! every few seconds on its own. Escape or ctrl-c closes it. The registry is on the Mac; elsewhere it shows tabs only.
 
 use std::sync::mpsc::{self, Receiver};
 use std::thread;

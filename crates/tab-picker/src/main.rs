@@ -46,7 +46,7 @@ mod standalone;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use model::{Session, State, Tab, Task, age, link, now, parse_rows, parse_tasks, urgency, work_dir};
@@ -221,6 +221,9 @@ struct App {
     note: Option<(String, bool)>,
     /// Standalone fetches, as the float's pastes would carry them.
     fetch: Option<Receiver<String>>,
+    /// When a standalone picker fetches again on its own, once the last
+    /// fetch has finished.
+    next_fetch: Option<Instant>,
 }
 
 impl App {
@@ -251,6 +254,7 @@ impl App {
             standalone: false,
             note: None,
             fetch: None,
+            next_fetch: None,
         }
     }
 
@@ -1254,6 +1258,9 @@ impl App {
 
 // ---------------------------------------------------------------- standalone
 
+/// How long a standalone picker waits after a fetch before the next.
+const REFRESH: Duration = Duration::from_secs(5);
+
 impl App {
     /// Fetch the rows and tasks again, keeping what is shown until they come.
     fn refetch(&mut self) {
@@ -1263,10 +1270,31 @@ impl App {
         self.fetch = Some(standalone::fetch());
     }
 
+    /// Fetch again quietly when REFRESH has passed since the last fetch.
+    /// The tasks stay as they are, so their live status is skipped for the
+    /// worktree check's, which carries it too.
+    fn refresh(&mut self) {
+        if self.fetch.is_none() && self.next_fetch.is_some_and(|at| Instant::now() >= at) {
+            self.next_fetch = None;
+            self.fetch = Some(standalone::fetch());
+        }
+    }
+
     /// Fetched data that has arrived, taken as the float takes pastes.
     fn take_fetched(&mut self) {
         let Some(rx) = &self.fetch else { return };
-        let got: Vec<String> = rx.try_iter().collect();
+        let mut got = Vec::new();
+        let done = loop {
+            match rx.try_recv() {
+                Ok(text) => got.push(text),
+                Err(TryRecvError::Empty) => break false,
+                Err(TryRecvError::Disconnected) => break true,
+            }
+        };
+        if done {
+            self.fetch = None;
+            self.next_fetch = Some(Instant::now() + REFRESH);
+        }
         for text in got {
             self.paste(&text);
         }
@@ -1462,11 +1490,14 @@ and the body: KIND rows (or error and a message), live and tasks
 (rex-spawn --tasks JSON), or tasks-error.
 
 Run bare from a terminal (or as rex-inbox, on the agents view), it fetches
-the tabs and tasks itself and acts on Enter and ctrl-r, staying open until
-Escape or ctrl-c.";
+the tabs and tasks itself, again every few seconds, and acts on Enter and
+ctrl-r, staying open until Escape or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
+        if app.standalone {
+            app.refresh();
+        }
         app.take_fetched();
         app.now = now();
         term.draw(|f| app.draw(f))?;
