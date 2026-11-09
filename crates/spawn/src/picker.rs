@@ -1,7 +1,7 @@
 //! The new-session picker (see main.rs for the modes). It lists the catalog's
 //! projects and the zoxide folders of one host, and reports a pick in the
 //! terminal title: a plain session in the highlighted folder or project
-//! (kind `session`), or agent work in a catalog project (kind `agent`) with
+//! (kind `session`), or agent work in a catalog project or Git folder (kind `agent`) with
 //! a name, harness and optional prompt. Titles are
 //! `rex-new:session/HOST/PATH` and `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF]`,
 //! the fields hex encoded.
@@ -414,6 +414,12 @@ impl App {
         }
     }
 
+    /// Catalog work may use its auto pool; a folder only exists on the
+    /// host whose folders are listed.
+    fn agent_host(&self) -> &str {
+        if self.folder().is_some() { self.listed() } else { &self.hosts[self.host] }
+    }
+
     /// The work name as typed.
     fn name_text(&self) -> String {
         self.name.lines().concat()
@@ -437,15 +443,14 @@ impl App {
         match self.kind {
             Kind::Session => format!("session/{}/{}", hex(self.listed()), hex(&path)),
             Kind::Agent => {
-                let Some(project) = self.project() else { return String::new() };
                 let name = self.name_text();
                 if name_problem(&name).is_some() {
                     return String::new();
                 }
                 let mut pick = format!(
                     "agent/{}/{}/{}/{}",
-                    hex(&self.hosts[self.host]),
-                    hex(&project.path),
+                    hex(self.agent_host()),
+                    hex(&path),
                     hex(&name),
                     HARNESSES[self.harness]
                 );
@@ -1007,7 +1012,7 @@ impl App {
                     pool(project).iter().map(|h| if h == CONFIG { "Mac".to_string() } else { h.clone() }).collect();
                 if hosts.len() == 1 { hosts[0].clone() } else { format!("least busy of {}", hosts.join(", ")) }
             }
-            (AUTO, None) => "auto".to_string(),
+            (AUTO, None) => self.listed().to_string(),
             (h, _) => h.to_string(),
         };
         let mut left = pill(
@@ -1066,8 +1071,8 @@ impl App {
                         "spawn"
                     } else if !self.prompt_saved {
                         "spawn (prompt not saved)"
-                    } else if self.folder().is_some() {
-                        "spawn (needs a project)"
+                    } else if self.target_path().is_none() {
+                        "spawn (pick a folder)"
                     } else {
                         "spawn (name it first)"
                     };
@@ -1251,8 +1256,8 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         return standalone_open(term, app);
     }
     app.save_prompt();
-    let Some(project) = app.project().cloned() else {
-        app.note = Some(("agent work needs a catalog project".into(), true));
+    let Some(path) = app.target_path() else {
+        app.note = Some(("pick a project or Git folder first".into(), true));
         return Ok(false);
     };
     let name = app.name_text();
@@ -1268,10 +1273,11 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         app.note = Some(("the prompt couldn't be saved".into(), true));
         return Ok(false);
     };
-    let host = app.hosts.get(app.host).cloned().unwrap_or_else(|| AUTO.into());
-    app.note = Some((format!("Spawning {}/{name} on {host}…", project.name), false));
+    let host = app.agent_host().to_string();
+    let label = folders::home_relative(&path);
+    app.note = Some((format!("Spawning {label}/{name} on {host}…"), false));
     term.draw(|f| app.draw(f))?;
-    match launch(&host, &project.path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), None) {
+    match launch(&host, &path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), None) {
         // Launched: close even if the tab can't be shown, so a second Enter
         // doesn't spawn the work twice.
         Ok((host, session, window)) => {
@@ -1279,7 +1285,7 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
             Ok(true)
         }
         Err(e) => {
-            log(&format!("standalone launch of {}/{name} failed: {e}", project.name));
+            log(&format!("standalone launch of {label}/{name} failed: {e}"));
             app.note = Some((e, true));
             Ok(false)
         }
@@ -1405,4 +1411,64 @@ fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app() -> App {
+        let mut app = App::new(Kind::Agent, vec![Project {
+            profile: "personal".into(), path: "~/catalog/repo".into(),
+            clone_url: "unused".into(), name: "repo".into(), hosts: vec![],
+        }], "config-host".into(), String::new(), vec!["folder-host".into()]);
+        // Supply deterministic folders; no prompts, tasks or tabs are written.
+        app.here = "picker-host".into();
+        app.loads.insert("picker-host".into(), Load::Ready(folders::parse("/repos/local")));
+        app.loads.insert("folder-host".into(), Load::Ready(folders::parse("/repos/remote")));
+        app.name.insert_str("folder-work");
+        app.refilter();
+        app
+    }
+
+    #[test]
+    fn folder_pick_reports_path_and_its_host_under_auto() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}", hex("picker-host"), hex("/repos/local"), hex("folder-work"), HARNESSES[0]));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(!app.launch_requested, "float still dispatches Enter through Lua");
+        app.standalone = true;
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.launch_requested);
+    }
+
+    #[test]
+    fn remote_folder_and_prompt_keep_the_selected_host() {
+        let mut app = app();
+        app.host = app.hosts.iter().position(|h| h == "folder-host").unwrap();
+        app.query = "remote".into();
+        app.refilter();
+        app.prompt.insert_str("do the work");
+        app.prompt_ref = "picker-host:test-prompt".into();
+        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}/{}", hex("folder-host"), hex("/repos/remote"), hex("folder-work"), HARNESSES[0], hex(&app.prompt_ref)));
+        app.prompt_saved = false;
+        assert!(app.pick().is_empty());
+    }
+
+    #[test]
+    fn catalog_pick_keeps_auto_and_folder_still_requires_name() {
+        let mut app = app();
+        app.query = "repo".into();
+        app.refilter();
+        assert_eq!(app.agent_host(), AUTO);
+        assert!(app.pick().starts_with(&format!("agent/{}/", hex(AUTO))));
+        app.query = "local".into();
+        app.refilter();
+        app.name.clear();
+        assert!(app.pick().is_empty());
+        app.kind = Kind::Session;
+        assert_eq!(app.pick(), format!("session/{}/{}", hex("picker-host"), hex("/repos/local")));
+    }
 }

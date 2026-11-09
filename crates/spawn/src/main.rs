@@ -5,7 +5,7 @@
 //! - Picker (default): runs in the float on the focused session's host. It
 //!   lists the catalog's projects and the zoxide folders of one host (ctrl-o
 //!   chooses the host), and takes either a plain session in the highlighted
-//!   folder or project, or agent work in a catalog project: a name, a
+//!   folder or project, or agent work in a catalog project or Git folder: a name, a
 //!   harness (ctrl-t, Claude by default) and an optional prompt. ctrl-s
 //!   switches the kind; `--kind` starts it (cmd+shift+n: session, ctrl+cmd+n:
 //!   agent). The picker reports the choice in the terminal title as
@@ -25,7 +25,9 @@
 //!   ID, as a session pick's action needs (see core's `folders`).
 //! - `--launch HOST PATH NAME HARNESS [PROMPT_REF]`: runs on the config host
 //!   (the Mac), which can reach every Rex host. HOST `auto` picks from the
-//!   project's host pool (see core's `hosts::pool`), least busy first. Reads the prompt
+//!   project's host pool (see core's `hosts::pool`), least busy first. A Git
+//!   folder outside the catalog uses its explicit host and primary checkout.
+//!   Reads the prompt
 //!   from the picker's host, finds or creates the project's session on
 //!   the host, opens a tab running `--run` there, deletes the prompt file,
 //!   records the task (see core's `tasks`), and prints
@@ -79,7 +81,8 @@ gives the config host's label and its zoxide folders, one per line. Bare,
 from a shell on the config host, the picker runs standalone: Enter opens
 the pick itself and shows its tab. --open finds or creates the session for
 DIR on HOST and prints its ID. --launch collects the prompt,
-opens the work's tab on HOST (auto: the least busy dev host), records the
+opens the work's tab on HOST (auto: the catalog project's least busy host;
+Git folders use their listed host and primary checkout), records the
 task, and prints HOST<TAB>SESSION_ID<TAB>WINDOW_ID. --run sets up the
 worktree and runs the harness in the current tab, starting AGENT_SESSION
 with PROMPT as its first message or resuming it. --tasks checks recorded tasks against their

@@ -60,15 +60,18 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         id if !id.is_empty() => id,
         _ => newest_session(&task).ok_or_else(|| format!("{label}: no agent session found on {host}"))?,
     };
-    let project = catalog()?
+    // Folder tasks have no catalog entry. Their recorded repository is the
+    // primary checkout, which remains after the task worktree is archived.
+    let path = catalog()?
         .into_iter()
-        .find(|p| p.name == field("project"))
-        .ok_or_else(|| format!("{} is no longer in the project catalog", field("project")))?;
+        .find(|p| crate::folders::home_relative(&p.path) == crate::folders::home_relative(&field("repo")))
+        .map(|p| p.path)
+        .unwrap_or_else(|| field("repo"));
     let harness = match field("harness").as_str() {
         "" => "claude".to_string(),
         h => h.to_string(),
     };
-    let (host, session, window_id) = launch(host, &project.path, &field("name"), &harness, None, Some(&agent_session))?;
+    let (host, session, window_id) = launch(host, &path, &field("name"), &harness, None, Some((&agent_session, &field("profile"))))?;
     // The new task takes the ended one's place in the archive.
     let mut tasks = load_tasks()?;
     tasks.retain(|t| {

@@ -55,6 +55,9 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
     let repo = expand(path);
     let (branch, slug) = branch_and_slug(name);
     if !repo.exists() {
+        if clone_url.is_empty() {
+            return Err((format!("Git folder {path} no longer exists"), home()));
+        }
         status(&format!("Cloning {clone_url} into {path}"));
         if let Some(parent) = repo.parent() {
             let _ = std::fs::create_dir_all(parent);
