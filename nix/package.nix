@@ -1,35 +1,39 @@
-# Switchyard, the Rex float tools (one Cargo workspace in ./switchyard):
+# The Rex float tools, one Cargo workspace:
 #
 # - rex-tab-picker: the cmd+k picker for tabs, agents (also cmd+i) and ended
-#   tasks (./switchyard/lua/switchyard/tab-picker.lua).
-# - rex-spawn: the new-session picker (lua/switchyard/new.lua), which opens
-#   a plain session in a zoxide folder (cmd+shift+n) or starts agent work in
-#   a new worktree of a catalog project (ctrl+cmd+n) on a chosen host. Its
-#   --launch and --run modes do the work, and it holds the task registry and
-#   actions behind the tab picker's tasks.
+#   tasks (lua/switchyard/tab-picker.lua); rex-inbox is its standalone Agents
+#   view.
+# - rex-spawn: the new-session picker (lua/switchyard/new.lua), which opens a
+#   plain session in a zoxide folder or starts agent work in a new worktree of
+#   a catalog project on a chosen host. Its --launch and --run modes do the
+#   work, and it holds the task registry behind the tab picker's tasks.
 #
-# The floats run on whichever host the focused session lives on, and
-# rex-spawn's --run mode runs in the new tab on the target host, so this is
-# installed on every host even though the Rex config is Mac-only. The
-# palette, project catalog and dev hosts are read at runtime from the config
-# file ./switchyard-config.nix writes; import that wherever this is installed.
-{pkgs}: let
-  inherit (pkgs) lib;
-in
-  pkgs.rustPlatform.buildRustPackage {
-    pname = "switchyard";
-    version = "0.1.0";
-    src = lib.cleanSourceWith {
-      src = ./switchyard;
-      # The Rex Lua ships separately (./switchyard-rex.nix).
-      filter = path: _: !(builtins.elem (baseNameOf path) ["target" "lua"]);
-    };
-    cargoLock.lockFile = ./switchyard/Cargo.lock;
-    nativeBuildInputs = [pkgs.makeWrapper];
-    postInstall = ''
-      # The picker lists this host's folders with zoxide; rex and ssh stay the
-      # caller's.
-      wrapProgram $out/bin/rex-spawn --prefix PATH : ${lib.makeBinPath [pkgs.zoxide]}
-    '';
-    meta.mainProgram = "rex-spawn";
-  }
+# The Lua ships separately (the Home Manager module links it on the Mac).
+{
+  lib,
+  makeWrapper,
+  rustPlatform,
+  zoxide,
+}:
+rustPlatform.buildRustPackage {
+  pname = "switchyard";
+  version = "0.1.0";
+  src = lib.cleanSourceWith {
+    src = ../.;
+    filter = path: type:
+      (lib.cleanSourceFilter path type)
+      && !(builtins.elem (baseNameOf path) ["target" "lua" "nix" "flake.nix" "flake.lock" "README.md"]);
+  };
+  cargoLock.lockFile = ../Cargo.lock;
+  nativeBuildInputs = [makeWrapper];
+  postInstall = ''
+    # The picker lists this host's folders with zoxide; rex and ssh stay the
+    # caller's.
+    wrapProgram $out/bin/rex-spawn --prefix PATH : ${lib.makeBinPath [zoxide]}
+  '';
+  meta = {
+    description = "Rex float tools: tab picker, inbox and new-session picker";
+    mainProgram = "rex-spawn";
+    platforms = lib.platforms.unix;
+  };
+}

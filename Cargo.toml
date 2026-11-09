@@ -1,4 +1,4 @@
-# Switchyard: the Rex float tools (see ../switchyard.nix). Library crates
+# Switchyard: the Rex float tools (see nix/package.nix). Library crates
 # hold what the tools share; each binary crate is one tool.
 #
 #   crates/ui          palette, glyphs, chrome, list drawing, float protocol

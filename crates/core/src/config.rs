@@ -1,4 +1,4 @@
-//! Runtime settings, written by Home Manager (../../switchyard-config.nix) to
+//! Runtime settings, written by the Home Manager module (nix/module.nix) to
 //! `$XDG_CONFIG_HOME/switchyard/config.toml` (default `~/.config`): the
 //! project catalog, the dev hosts, the `auto` pools and the palette. Read once
 //! per process; the tools that need the catalog fail with a clear error when
