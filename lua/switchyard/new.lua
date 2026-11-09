@@ -161,3 +161,6 @@ rex.action{
 rex.bind("cmd+shift+n", "new_session")
 rex.bind("cmd+ctrl+n", "new_agent")
 rex.bind("new/enter", "new_go")
+-- Unbound Escape only leaves Rex's mode. Forward it so the picker closes
+-- on the first press, or asks before discarding a non-empty agent prompt.
+rex.bind("new/escape", "pane.send_key", { key = "escape" })
