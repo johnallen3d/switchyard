@@ -20,9 +20,14 @@ rustPlatform.buildRustPackage {
   version = "0.1.0";
   src = lib.cleanSourceWith {
     src = ../.;
-    filter = path: type:
+    # The Rex Lua ships separately (the Home Manager module), except
+    # host_rows.lua, which rex-tab-picker builds in.
+    filter = path: type: let
+      rel = lib.removePrefix "${toString ../.}/" (toString path);
+    in
       (lib.cleanSourceFilter path type)
-      && !(builtins.elem (baseNameOf path) ["target" "lua" "nix" "flake.nix" "flake.lock" "README.md"]);
+      && !(builtins.elem (baseNameOf path) ["target" "nix" "flake.nix" "flake.lock" "README.md"])
+      && (!lib.hasPrefix "lua" rel || builtins.elem rel ["lua" "lua/switchyard" "lua/switchyard/host_rows.lua"]);
   };
   cargoLock.lockFile = ../Cargo.lock;
   nativeBuildInputs = [makeWrapper];
