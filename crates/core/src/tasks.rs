@@ -17,7 +17,7 @@ use crate::sessions::newest_session;
 /// inbox: Claude's default transcript cleanup (`cleanupPeriodDays`).
 const ENDED_KEEP_SECS: u64 = 30 * 24 * 60 * 60;
 
-fn tasks_path() -> PathBuf {
+pub fn tasks_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/state"))
@@ -86,16 +86,40 @@ return table.concat(lines, "\n")
 
 /// A tab's live agent status: state, when it last changed (Unix seconds,
 /// 0 when unknown) and the agent's message.
-#[derive(Clone, Default)]
-struct TabStatus {
-    state: String,
-    at: u64,
-    msg: String,
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabStatus {
+    pub state: String,
+    pub at: u64,
+    pub msg: String,
+}
+
+/// A `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` line, as WINDOWS_SCRIPT
+/// prints them and host_rows.lua's W rows carry them after the W.
+pub fn parse_window_status(line: &str) -> (String, TabStatus) {
+    let mut f = line.split('\t');
+    let id = f.next().unwrap_or("").to_string();
+    let state = f.next().unwrap_or("").to_string();
+    let at = rfc3339_secs(f.next().unwrap_or("")).unwrap_or(0);
+    let msg = f.next().unwrap_or("").to_string();
+    (id, TabStatus { state, at, msg })
+}
+
+/// Give each open task its tab's live agent status (`status`, `status_at`,
+/// `status_msg`) from `live`, by window ID; a task whose tab isn't there
+/// keeps what it had.
+pub fn apply_live(tasks: &mut [serde_json::Value], live: &HashMap<String, TabStatus>) {
+    for task in tasks.iter_mut().filter(|t| t["ended_at"].is_null()) {
+        if let Some(status) = task["window_id"].as_str().and_then(|id| live.get(id)) {
+            task["status"] = status.state.clone().into();
+            task["status_at"] = status.at.into();
+            task["status_msg"] = status.msg.clone().into();
+        }
+    }
 }
 
 /// Seconds since the Unix epoch for an RFC 3339 timestamp such as
 /// `2026-11-07T15:40:18.294391-05:00`, as Rex reports status changes.
-fn rfc3339_secs(s: &str) -> Option<u64> {
+pub fn rfc3339_secs(s: &str) -> Option<u64> {
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
@@ -134,19 +158,7 @@ fn host_windows(host: &str) -> Option<HashMap<String, TabStatus>> {
         .ok()
         .filter(|o| o.status.success())?;
     let reply: String = serde_json::from_slice(&out.stdout).ok()?;
-    Some(
-        reply
-            .lines()
-            .map(|line| {
-                let mut f = line.split('\t');
-                let id = f.next().unwrap_or("").to_string();
-                let state = f.next().unwrap_or("").to_string();
-                let at = rfc3339_secs(f.next().unwrap_or("")).unwrap_or(0);
-                let msg = f.next().unwrap_or("").to_string();
-                (id, TabStatus { state, at, msg })
-            })
-            .collect(),
-    )
+    Some(reply.lines().map(parse_window_status).collect())
 }
 
 /// For each (repo, branch), the branch's worktree on `host` with its
@@ -157,24 +169,36 @@ fn host_windows(host: &str) -> Option<HashMap<String, TabStatus>> {
 /// hosts; their login shell is Fish), or locally for the config host.
 fn host_worktrees(host: &str, pairs: &[(String, String)]) -> Option<Vec<Option<Worktree>>> {
     // One line per pair: PATH<TAB>COUNT<TAB>FILE..., "-" for no worktree,
-    // "?" for no repo.
+    // "?" for no repo. Each repo's worktree list is read once, and the rest
+    // is shell builtins: starting processes is most of the cost, on macOS
+    // especially. Bash 3.2 (macOS's /bin/bash) runs it too.
     let mut script = String::from(
-        r#"while IFS="$(printf '\t')" read -r repo branch; do
-  if list=$(git -C "$repo" worktree list --porcelain 2>/dev/null); then
-    path=$(printf '%s\n' "$list" | awk -v want="branch refs/heads/$branch" '
-      /^worktree / { path = substr($0, 10) }
-      $0 == want { print path; found = 1; exit }
-      END { if (!found) print "-" }')
-    if [ "$path" = "-" ]; then
-      echo "-"
-    else
-      files=$(git -C "$path" status --porcelain 2>/dev/null | cut -c4-)
-      count=$(printf '%s' "$files" | grep -c .)
-      printf '%s\t%s\t%s\n' "$path" "$count" "$(printf '%s\n' "$files" | head -5 | paste -s -d '\t' -)"
-    fi
-  else
-    echo "?"
+        r#"repos=() lists=()
+while IFS=$'\t' read -r repo branch; do
+  list=
+  for i in "${!repos[@]}"; do
+    if [ "${repos[$i]}" = "$repo" ]; then list=${lists[$i]}; break; fi
+  done
+  if [ -z "$list" ]; then
+    list=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || list="?"
+    repos+=("$repo") lists+=("$list")
   fi
+  if [ "$list" = "?" ]; then echo "?"; continue; fi
+  path=- wt=
+  while IFS= read -r line; do
+    case $line in
+      "worktree "*) wt=${line#worktree } ;;
+      "branch refs/heads/$branch") path=$wt; break ;;
+    esac
+  done <<<"$list"
+  if [ "$path" = "-" ]; then echo "-"; continue; fi
+  count=0 files=
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    count=$((count + 1))
+    if [ "$count" -le 5 ]; then files=${files:+$files$'\t'}${line:3}; fi
+  done < <(git -C "$path" status --porcelain 2>/dev/null)
+  printf '%s\t%s\t%s\n' "$path" "$count" "$files"
 done <<'RSP_PAIRS'
 "#,
     );
@@ -235,13 +259,7 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
             live.extend(windows);
         }
     }
-    for task in tasks.iter_mut().filter(|t| t["ended_at"].is_null()) {
-        if let Some(status) = task["window_id"].as_str().and_then(|id| live.get(id)) {
-            task["status"] = status.state.clone().into();
-            task["status_at"] = status.at.into();
-            task["status_msg"] = status.msg.clone().into();
-        }
-    }
+    apply_live(&mut tasks, &live);
     Ok(tasks)
 }
 
@@ -271,9 +289,14 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
                 .filter(|t| checked(t) && field(t, "host") == host)
                 .map(|t| (field(t, "repo"), field(t, "branch")))
                 .collect();
+            // The tab listing (Rex) and the worktree check (SSH) don't depend
+            // on each other, so a host costs the slower of the two.
             std::thread::spawn(move || {
-                let windows = host_windows(&host);
-                let worktrees = host_worktrees(&host, &pairs);
+                let (windows, worktrees) = std::thread::scope(|s| {
+                    let windows = s.spawn(|| host_windows(&host));
+                    let worktrees = host_worktrees(&host, &pairs);
+                    (windows.join().ok().flatten(), worktrees)
+                });
                 (host, windows, worktrees)
             })
         })
@@ -342,13 +365,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
         save_tasks(&tasks)?;
     }
+    apply_live(&mut tasks, &live);
     for task in tasks.iter_mut() {
         let open = task["ended_at"].is_null();
-        if let Some(status) = task["window_id"].as_str().and_then(|id| live.get(id)).filter(|_| open) {
-            task["status"] = status.state.clone().into();
-            task["status_at"] = status.at.into();
-            task["status_msg"] = status.msg.clone().into();
-        }
         let key = format!("{}/{}", field(task, "host"), field(task, "window_id"));
         if let Some(w) = dirty.get(&key) {
             task["dirty_count"] = w.dirty.into();

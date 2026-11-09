@@ -84,6 +84,16 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
 }
 
 pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
+    let result = run_action(action, host, session, window);
+    // Even a failed archive may have changed the registry or closed the
+    // tab: have switchyard-server check now rather than at its next poll.
+    if action != "review" {
+        crate::server::refresh();
+    }
+    result
+}
+
+fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
     if action == "resume" {
         return resume(host, window);
     }

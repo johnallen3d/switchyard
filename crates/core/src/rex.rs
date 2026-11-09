@@ -1,5 +1,8 @@
 //! Calls to Rex servers and hosts: the rex CLI (no `-S` for the local
 //! server), Bash over SSH by Rex label, and the state log.
+//!
+//! SSH calls share one connection per host (see `ssh`): connecting costs
+//! about 100 ms to a dev host, more than most of the scripts sent over it.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -38,8 +41,8 @@ pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
         c.arg("-s");
         c
     } else {
-        let mut c = Command::new("ssh");
-        c.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, "bash -s"]);
+        let mut c = ssh(host);
+        c.arg("bash -s");
         c
     };
     let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
@@ -50,6 +53,55 @@ pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
         return None;
     }
     Some(out)
+}
+
+/// An ssh command to `host` (a Rex label, as the dev hosts are named in
+/// ~/.ssh/config) that never prompts, gives up connecting after 3 s, and
+/// shares a connection with the other calls to that host for a few minutes
+/// (ControlMaster), so only the first call in a while pays for connecting.
+/// The control sockets live in `runtime_dir`, whose short path keeps them
+/// under macOS's 104-byte socket path limit; without it, each call connects
+/// on its own. Like any ssh, it exits 255 when it can't connect.
+pub fn ssh(host: &str) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]);
+    if let Some(dir) = runtime_dir() {
+        // %C is a hash of the connection's host, port and user.
+        cmd.args(["-o", "ControlMaster=auto", "-o", "ControlPersist=180"])
+            .arg("-o")
+            .arg(format!("ControlPath={}/ssh-%C", dir.display()));
+    }
+    cmd.arg(host);
+    cmd
+}
+
+/// A directory only this user can use, for sockets: switchyard-server's and
+/// SSH's shared connections. `$XDG_RUNTIME_DIR/switchyard` where there is
+/// one (Linux), else `/tmp/switchyard-UID`: macOS's `$TMPDIR` is too long
+/// for socket paths. Created on first use; None when it can't be made or
+/// someone else owns it.
+pub fn runtime_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // SAFETY: getuid has no preconditions and can't fail.
+    let uid = unsafe { libc::getuid() };
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d).join("switchyard"),
+        None => PathBuf::from(format!("/tmp/switchyard-{uid}")),
+    };
+    if let Err(e) = std::fs::create_dir(&dir)
+        && e.kind() != std::io::ErrorKind::AlreadyExists
+    {
+        return None;
+    }
+    // /tmp is shared: refuse a directory (or a link) someone else made.
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() || meta.uid() != uid {
+        return None;
+    }
+    if meta.mode() & 0o077 != 0 {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    Some(dir)
 }
 
 /// Append a line to the state log the Lua action also uses

@@ -1,8 +1,10 @@
 # Home Manager module: the binaries on every host that enables it, the runtime
 # config (~/.config/switchyard/config.toml, read by crates/core/src/config.rs)
 # built from settings, and the Rex Lua linked to ~/.config/rex/switchyard
-# (Mac by default, where the Rex config lives). Settings edits only rewrite
-# the config file; they never rebuild the Rust package.
+# (Mac by default, where the Rex config lives), plus a user service running
+# switchyard-server there (launchd on the Mac; optional systemd on Linux).
+# Settings edits only rewrite the config file; they never rebuild the Rust
+# package.
 {
   config,
   lib,
@@ -11,7 +13,31 @@
 }: let
   cfg = config.programs.switchyard;
   toml = pkgs.formats.toml {};
-  inherit (lib) mkEnableOption mkIf mkOption types;
+  inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
+  inherit (pkgs.stdenv.hostPlatform) isDarwin isLinux;
+  home = config.home.homeDirectory;
+  # Services start with a bare PATH. The server runs rex (often outside Nix,
+  # in ~/.local/bin), ssh, git, bash and hostname, so give it the same
+  # lookup as the Rex Lua's util.user_path, then the system's.
+  servicePath = lib.concatStringsSep ":" (lib.unique [
+    "${home}/.local/bin"
+    "${config.home.profileDirectory}/bin"
+    "/etc/profiles/per-user/${config.home.username}/bin"
+    "/run/current-system/sw/bin"
+    "/nix/var/nix/profiles/default/bin"
+    "/usr/local/bin"
+    "/usr/bin"
+    "/bin"
+    "/usr/sbin"
+    "/sbin"
+  ]);
+  # The task registry and config.toml, where the shells would find them.
+  serviceEnv = {
+    PATH = servicePath;
+    XDG_CONFIG_HOME = config.xdg.configHome;
+    XDG_STATE_HOME = config.xdg.stateHome;
+  };
+  serverExe = lib.getExe' cfg.package "switchyard-server";
 in {
   options.programs.switchyard = {
     enable = mkEnableOption "switchyard, the Rex float tools";
@@ -31,6 +57,21 @@ in {
         Link the Rex actions to ~/.config/rex/switchyard, where a Rex init.lua
         can `require("switchyard")`.
       '';
+    };
+
+    server = {
+      enable = mkOption {
+        type = types.bool;
+        default = isDarwin;
+        defaultText = lib.literalExpression "pkgs.stdenv.hostPlatform.isDarwin";
+        description = ''
+          Keep switchyard-server running as a user service: a launchd agent on
+          macOS, a systemd user unit on Linux. The pickers and floats ask it
+          for rows and tasks and fall back to querying the hosts directly when
+          it isn't running, so this only makes them faster. Meant for the
+          config host (the Mac), which owns the task registry.
+        '';
+      };
     };
 
     settings = mkOption {
@@ -98,11 +139,40 @@ in {
     };
   };
 
-  config = mkIf cfg.enable {
-    home.packages = [cfg.package];
-    xdg.configFile = {
-      "switchyard/config.toml".source = toml.generate "switchyard-config.toml" cfg.settings;
-      "rex/switchyard" = mkIf cfg.rexLua {source = ../lua/switchyard;};
-    };
-  };
+  config = mkIf cfg.enable (mkMerge [
+    {
+      home.packages = [cfg.package];
+      xdg.configFile = {
+        "switchyard/config.toml".source = toml.generate "switchyard-config.toml" cfg.settings;
+        "rex/switchyard" = mkIf cfg.rexLua {source = ../lua/switchyard;};
+      };
+    }
+
+    (mkIf (cfg.server.enable && isDarwin) {
+      launchd.agents.switchyard-server = {
+        enable = true;
+        config = {
+          ProgramArguments = [serverExe];
+          EnvironmentVariables = serviceEnv;
+          RunAtLoad = true;
+          KeepAlive = true;
+          StandardOutPath = "${home}/Library/Logs/switchyard-server.log";
+          StandardErrorPath = "${home}/Library/Logs/switchyard-server.log";
+        };
+      };
+    })
+
+    (mkIf (cfg.server.enable && isLinux) {
+      systemd.user.services.switchyard-server = {
+        Unit.Description = "switchyard-server: Rex picker data kept current";
+        Service = {
+          ExecStart = serverExe;
+          Environment = lib.mapAttrsToList (k: v: "${k}=${v}") serviceEnv;
+          Restart = "always";
+          RestartSec = 5;
+        };
+        Install.WantedBy = ["default.target"];
+      };
+    })
+  ]);
 }

@@ -44,14 +44,15 @@ pub fn path() -> PathBuf {
 /// The config, or why it couldn't be read.
 pub fn load() -> Result<&'static Config, String> {
     static CONFIG: OnceLock<Result<Config, String>> = OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let path = path();
-            let text = std::fs::read_to_string(&path).map_err(|e| {
-                format!("can't read {} ({e}); Home Manager writes it, so activate this host's configuration", path.display())
-            })?;
-            toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
-        })
-        .as_ref()
-        .map_err(Clone::clone)
+    CONFIG.get_or_init(read).as_ref().map_err(Clone::clone)
+}
+
+/// The config as the file says now, for a long-running process (the
+/// server) that should notice an activation; `load` reads it once.
+pub fn read() -> Result<Config, String> {
+    let path = path();
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        format!("can't read {} ({e}); Home Manager writes it, so activate this host's configuration", path.display())
+    })?;
+    toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }

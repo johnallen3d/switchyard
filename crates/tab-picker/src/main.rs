@@ -4,8 +4,9 @@
 //! a background job on the config host types the data into it as bracketed
 //! pastes (see `protocol::DATA`), in any order:
 //!
-//! - `rows`: every tab across sessions and hosts (format in model.rs);
-//!   `error` when they couldn't be listed.
+//! - `rows`: every tab across sessions and hosts (format in model.rs),
+//!   with a note for each host that couldn't be listed, named in the
+//!   header; `error` when no host could.
 //! - `live`: `rex-spawn --tasks --live`, the task registry with each open
 //!   task's live agent status; never replaces `tasks`.
 //! - `tasks`: `rex-spawn --tasks`, the same after the worktree check.
@@ -46,10 +47,10 @@ mod standalone;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
-use model::{Session, State, Tab, Task, age, link, now, parse_rows, parse_tasks, urgency, work_dir};
+use model::{Session, State, Tab, Task, age, failed_hosts, link, now, parse_rows, parse_tasks, urgency, work_dir};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::crossterm::event::{
@@ -212,6 +213,8 @@ struct App {
     started: Instant,
     now: u64,
     load: Load,
+    /// Hosts whose tabs the last rows lack or have from earlier.
+    failed: Vec<String>,
     tasks_load: Tasks,
     /// Run from a shell rather than in the config's float: Enter, ctrl-r
     /// and Escape reach the picker, which acts on them itself.
@@ -219,11 +222,8 @@ struct App {
     /// The last standalone action's outcome (and whether it failed), shown
     /// in the footer until the next key.
     note: Option<(String, bool)>,
-    /// Standalone fetches, as the float's pastes would carry them.
-    fetch: Option<Receiver<String>>,
-    /// When a standalone picker fetches again on its own, once the last
-    /// fetch has finished.
-    next_fetch: Option<Instant>,
+    /// A standalone picker's data, as the float's pastes would carry it.
+    feed: Option<standalone::Feed>,
 }
 
 impl App {
@@ -250,11 +250,11 @@ impl App {
             started: Instant::now(),
             now: now(),
             load: Load::Waiting,
+            failed: Vec::new(),
             tasks_load: Tasks::Waiting,
             standalone: false,
             note: None,
-            fetch: None,
-            next_fetch: None,
+            feed: None,
         }
     }
 
@@ -266,9 +266,11 @@ impl App {
         match kind {
             "rows" => {
                 let (sessions, tabs) = parse_rows(body);
+                let failed = failed_hosts(body);
                 self.deliver(|app| {
                     app.sessions = sessions;
                     app.tabs = tabs;
+                    app.failed = failed;
                     app.load = Load::Ready;
                 });
             }
@@ -797,6 +799,11 @@ impl App {
         if let Tasks::Failed = self.tasks_load {
             chip("tabs only", p.muted);
         }
+        match self.failed.as_slice() {
+            [] => {}
+            [host] => chip(&format!("{host} failed"), p.love),
+            hosts => chip(&format!("{} hosts failed", hosts.len()), p.love),
+        }
         spans
     }
 
@@ -1258,42 +1265,32 @@ impl App {
 
 // ---------------------------------------------------------------- standalone
 
-/// How long a standalone picker waits after a fetch before the next.
-const REFRESH: Duration = Duration::from_secs(5);
-
 impl App {
-    /// Fetch the rows and tasks again, keeping what is shown until they come.
+    /// Start a standalone picker's data (see standalone::Feed).
+    fn start_feed(&mut self) {
+        self.feed = Some(standalone::Feed::start());
+    }
+
+    /// Ask for the data again after an action, keeping what is shown until
+    /// it comes.
     fn refetch(&mut self) {
         if !matches!(self.tasks_load, Tasks::Failed) {
             self.tasks_load = Tasks::Waiting;
         }
-        self.fetch = Some(standalone::fetch());
-    }
-
-    /// Fetch again quietly when REFRESH has passed since the last fetch.
-    /// The tasks stay as they are, so their live status is skipped for the
-    /// worktree check's, which carries it too.
-    fn refresh(&mut self) {
-        if self.fetch.is_none() && self.next_fetch.is_some_and(|at| Instant::now() >= at) {
-            self.next_fetch = None;
-            self.fetch = Some(standalone::fetch());
+        if let Some(feed) = &self.feed {
+            feed.poke();
         }
     }
 
-    /// Fetched data that has arrived, taken as the float takes pastes.
+    /// Data that has arrived, taken as the float takes pastes.
     fn take_fetched(&mut self) {
-        let Some(rx) = &self.fetch else { return };
+        let Some(feed) = &self.feed else { return };
         let mut got = Vec::new();
-        let done = loop {
-            match rx.try_recv() {
+        loop {
+            match feed.rx.try_recv() {
                 Ok(text) => got.push(text),
-                Err(TryRecvError::Empty) => break false,
-                Err(TryRecvError::Disconnected) => break true,
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
-        };
-        if done {
-            self.fetch = None;
-            self.next_fetch = Some(Instant::now() + REFRESH);
         }
         for text in got {
             self.paste(&text);
@@ -1459,6 +1456,20 @@ mod tests {
     }
 
     #[test]
+    fn failed_hosts_keep_the_other_rows_and_show_in_the_header() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        let chips = |app: &App| app.header_chips().iter().map(|s| s.content.to_string()).collect::<String>();
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\tshell\t~\nE\tmiller\tmiller: timed out\n");
+        assert!(matches!(app.load, Load::Ready));
+        assert_eq!((app.tabs.len(), app.failed.as_slice()), (1, ["miller".to_string()].as_slice()));
+        assert!(chips(&app).contains("miller failed"));
+        app.paste("rex-data:rows\nE\tmiller\tx\nE\tdrummer\tnot listed yet\n");
+        assert!(chips(&app).contains("2 hosts failed"));
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\n");
+        assert!(app.failed.is_empty() && !chips(&app).contains("failed"));
+    }
+
+    #[test]
     fn status_headings_render_without_changing_other_views() {
         let mut app = inbox();
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -1489,15 +1500,13 @@ once and takes the data from bracketed pastes of rex-data:KIND, a newline
 and the body: KIND rows (or error and a message), live and tasks
 (rex-spawn --tasks JSON), or tasks-error.
 
-Run bare from a terminal (or as rex-inbox, on the agents view), it fetches
-the tabs and tasks itself, again every few seconds, and acts on Enter and
-ctrl-r, staying open until Escape or ctrl-c.";
+Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
+tabs and tasks itself, from switchyard-server as they change when it runs,
+else directly every few seconds, and acts on Enter and ctrl-r, staying open
+until Escape or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
-        if app.standalone {
-            app.refresh();
-        }
         app.take_fetched();
         app.now = now();
         term.draw(|f| app.draw(f))?;
@@ -1592,7 +1601,7 @@ fn main() -> io::Result<()> {
     let mut app = App::new(current, view);
     if standalone {
         app.standalone = true;
-        app.refetch();
+        app.start_feed();
     }
     if let Some(input) = input {
         app.tasks_load = Tasks::Failed;

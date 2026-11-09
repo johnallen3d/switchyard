@@ -7,6 +7,8 @@
 #   crates/tab-picker  rex-tab-picker (cmd+k tabs, agents and archive; cmd+i;
 #                      standalone from a shell, also as rex-inbox)
 #   crates/spawn       rex-spawn (cmd+shift+n, ctrl+cmd+n, plus --tasks and --act)
+#   crates/server      switchyard-server (rows and tasks kept current from Rex
+#                      events, served on a Unix socket)
 [workspace]
 resolver = "3"
 members = ["crates/*"]

@@ -170,6 +170,11 @@ pub fn launch(
     if let Err(e) = record_task(task) {
         log(&format!("could not record {}/{name}: {e}", project.name));
     }
+    // List the new task now rather than at the server's next registry poll;
+    // a resume does it once it has updated the registry (see `actions`).
+    if resume.is_none() {
+        crate::server::refresh();
+    }
     Ok((host.to_string(), session, window_id))
 }
 

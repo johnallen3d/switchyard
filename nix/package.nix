@@ -7,9 +7,14 @@
 #   plain session in a zoxide folder or starts agent work in a new worktree of
 #   a catalog project on a chosen host. Its --launch and --run modes do the
 #   work, and it holds the task registry behind the tab picker's tasks.
+# - switchyard-server: keeps the pickers' rows and tasks current from Rex
+#   events on the config host and serves them on a Unix socket; the tools
+#   fall back to direct queries without it (the Home Manager module runs it
+#   as a service).
 #
 # The Lua ships separately (the Home Manager module links it on the Mac).
 {
+  git,
   lib,
   makeWrapper,
   rustPlatform,
@@ -21,7 +26,7 @@ rustPlatform.buildRustPackage {
   src = lib.cleanSourceWith {
     src = ../.;
     # The Rex Lua ships separately (the Home Manager module), except
-    # host_rows.lua, which rex-tab-picker builds in.
+    # host_rows.lua, which rex-tab-picker and switchyard-server build in.
     filter = path: type: let
       rel = lib.removePrefix "${toString ../.}/" (toString path);
     in
@@ -31,13 +36,15 @@ rustPlatform.buildRustPackage {
   };
   cargoLock.lockFile = ../Cargo.lock;
   nativeBuildInputs = [makeWrapper];
+  # core's launch tests make throwaway repos with git.
+  nativeCheckInputs = [git];
   postInstall = ''
-    # The picker lists this host's folders with zoxide; rex and ssh stay the
-    # caller's.
+    # The picker lists this host's folders with zoxide; rex, ssh and git stay
+    # the caller's (the server's service sets its PATH).
     wrapProgram $out/bin/rex-spawn --prefix PATH : ${lib.makeBinPath [zoxide]}
   '';
   meta = {
-    description = "Rex float tools: tab picker, inbox and new-session picker";
+    description = "Rex float tools: tab picker, inbox, new-session picker and data server";
     mainProgram = "rex-spawn";
     platforms = lib.platforms.unix;
   };

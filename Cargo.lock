@@ -749,9 +749,19 @@ dependencies = [
 name = "switchyard-core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "switchyard-server"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "switchyard-core",
 ]
 
 [[package]]

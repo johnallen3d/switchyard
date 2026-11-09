@@ -2,10 +2,16 @@
 -- them, and ended tasks, in one rex-tab-picker float (cmd+i opens it on the
 -- agents view). The float opens at once, waiting, on the focused session's
 -- host; a background `rex do` on the config host fills it (see
--- util.open_filled_float), running at once:
+-- util.open_filled_float).
+--
+-- It asks switchyard-server first: `switchyard-server pastes` prints the
+-- pastes below from the server's snapshot in milliseconds (see
+-- ../../crates/core/src/server.rs). Without a server, or when it fails, it
+-- fans out instead, running at once:
 --
 -- - one `rex do` per server listing its tabs (each attaching to all its
---   sessions), delivered together as `rows` (or `error`);
+--   sessions), delivered together as `rows`, with an E row naming each host
+--   that failed (`error` when they all did);
 -- - `rex-spawn --tasks --live`, the task registry with each tab's live agent
 --   status (`live`), and `rex-spawn --tasks`, which also checks each task's
 --   worktree over SSH and ends the gone ones (`tasks`); a registry failure
@@ -37,11 +43,55 @@ do
   file:close()
 end
 
--- The rest of the background script. The tab listings and the task fetches
--- start together; rows go out first, then the tasks as they come.
+-- The rest of the background script. The fan-out's tab listings and task
+-- fetches start together; rows go out first, then the tasks as they come.
 local fill_script = "local host_rows_script = " .. string.format("%q", host_rows_script) .. [==[
 
-main(function()
+local function deliver_result(kind, r, err)
+  if r == nil then
+    deliver("tasks-error", tostring(err or "can't run rex-spawn"))
+  elseif not r.ok then
+    deliver("tasks-error", (r.stderr:gsub("^rex%-spawn: ", "")))
+  else
+    deliver(kind, r.stdout)
+  end
+end
+
+-- The pastes `switchyard-server pastes [--checked]` prints, or nil when no
+-- server answered in time (or none is installed).
+local function server_pastes(...)
+  local r = rex.exec({ "switchyard-server", "pastes", ... })
+  if r == nil or not r.ok then return nil end
+  local ok, pastes = pcall(rex.json.decode, r.stdout)
+  if not ok or type(pastes) ~= "table" then return nil end
+  return pastes
+end
+
+-- From the server: one snapshot, which normally has checked tasks. Only in
+-- the server's first moments are they `live`; then a second call waits
+-- (briefly) for the check rather than leave the float on live status, and
+-- if the server can't say, rex-spawn checks as the fan-out would.
+local function from_server()
+  local pastes = server_pastes()
+  if pastes == nil then return false end
+  local pending = false
+  for _, p in ipairs(pastes) do
+    deliver(p.kind, p.body)
+    if p.kind == "live" then pending = true end
+    if p.kind == "tasks-error" then pending = false end
+  end
+  if pending then
+    local checked = server_pastes("--checked")
+    if checked == nil then
+      deliver_result("tasks", rex.exec({ "rex-spawn", "--tasks" }))
+    else
+      for _, p in ipairs(checked) do deliver(p.kind, p.body) end
+    end
+  end
+  return true
+end
+
+local function fan_out()
   local jobs = { { host = "local", job = rex.exec.start({ "rex", "do", "-e", host_rows_script, "host=local" }) } }
   for _, host in ipairs(rex.servers()) do
     jobs[#jobs + 1] = { host = host, job = rex.exec.start({ "rex", "-S", host, "do", "-e", host_rows_script,
@@ -52,23 +102,28 @@ main(function()
     local job, err = rex.exec.start({ "rex-spawn", "--tasks", step[2] })
     steps[#steps + 1] = { kind = step[1], job = job, err = err }
   end
-  local rows, failed = {}, nil
+  -- A host that fails gets an E row, so the float shows the rest and names
+  -- it, as from the server.
+  local rows, failed, listed = {}, nil, false
   for _, j in ipairs(jobs) do
     local r = j.job:wait()
-    if not r.ok then failed = failed or (j.host .. ": " .. (r.stderr:gsub("%s+$", ""))) end
-    rows[#rows + 1] = r.ok and rex.json.decode(r.stdout) or ""
-  end
-  if failed then deliver("error", failed) else deliver("rows", table.concat(rows)) end
-  for _, step in ipairs(steps) do
-    local r = step.job and step.job:wait()
-    if r == nil then
-      deliver("tasks-error", tostring(step.err or "can't run rex-spawn"))
-    elseif not r.ok then
-      deliver("tasks-error", (r.stderr:gsub("^rex%-spawn: ", "")))
+    if r.ok then
+      listed = true
+      rows[#rows + 1] = rex.json.decode(r.stdout)
     else
-      deliver(step.kind, r.stdout)
+      local err = j.host .. ": " .. (r.stderr:gsub("%s+$", ""))
+      failed = failed or err
+      rows[#rows + 1] = "E\t" .. j.host .. "\t" .. err:gsub("[\t\n]", " ") .. "\n"
     end
   end
+  if listed then deliver("rows", table.concat(rows)) else deliver("error", failed) end
+  for _, step in ipairs(steps) do
+    deliver_result(step.kind, step.job and step.job:wait(), step.err)
+  end
+end
+
+main(function()
+  if not from_server() then fan_out() end
 end)
 ]==]
 

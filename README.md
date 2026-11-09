@@ -25,6 +25,7 @@ cargo build --locked --workspace
 ./target/debug/rex-inbox                 # Agents view
 ./target/debug/rex-spawn --kind session
 ./target/debug/rex-spawn --kind agent
+./target/debug/switchyard-server         # foreground; Ctrl-C stops it
 ```
 
 Run these in an interactive terminal. They use your existing Rex setup, runtime
@@ -74,5 +75,32 @@ Settings live in system-config's
 `modules/home-manager/agent-projects/projects.toml`. Edit those sources, not the
 generated config. The Mac owns the task registry; standalone Linux pickers show
 tabs only.
+
+## Server
+
+`switchyard-server` keeps the pickers' data current on the Mac: one
+`rex do --all` watcher per Rex server refreshes tab rows on Rex events, and the
+task registry is checked against the hosts in the background. Pickers and
+floats ask it over a Unix socket and fall back to querying the hosts directly
+when it doesn't answer, so it is optional: it only makes them faster.
+
+`programs.switchyard.server.enable` (default on macOS) runs it as the launchd
+agent `org.nix-community.home.switchyard-server`, restarted if it exits. On
+Linux the same option adds a `switchyard-server` systemd user unit (off by
+default). The service gets a PATH with `~/.local/bin`, the Home Manager
+profile, and the system directories, so it finds `rex`, `ssh`, `git`, and
+`bash`.
+
+```bash
+switchyard-server             # run in the foreground (stop the service first)
+switchyard-server snapshot    # the running server's rows, tasks, errors (JSON)
+switchyard-server subscribe   # a snapshot per change, until interrupted
+launchctl kickstart -k "gui/$(id -u)/org.nix-community.home.switchyard-server"
+```
+
+- Socket: `/tmp/switchyard-$UID/server.sock`, or
+  `$XDG_RUNTIME_DIR/switchyard/server.sock` when that is set (Linux).
+- Logs: `~/Library/Logs/switchyard-server.log` on macOS;
+  `journalctl --user -u switchyard-server` on Linux.
 
 Development conventions and the source map are in [AGENTS.md](AGENTS.md).

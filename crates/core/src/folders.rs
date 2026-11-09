@@ -4,7 +4,7 @@
 
 use std::process::{Command, Stdio};
 
-use crate::rex::{host_home, rex_json};
+use crate::rex::{host_home, rex_json, ssh};
 
 pub struct Folder {
     pub path: String,
@@ -14,22 +14,37 @@ pub struct Folder {
 
 /// The zoxide folders of `host`, one per line: this host's (`current`) by
 /// zoxide, the config host's (`home`) as passed in `home_folders`, or
-/// another host's over SSH. Err when that host can't be reached.
+/// another host's from switchyard-server's cache when it answers (only on
+/// the config host, where it runs), else over SSH. Err when that host
+/// can't be reached.
 pub fn list(host: &str, current: &str, home: &str, home_folders: &str) -> Result<String, String> {
     if host == current {
-        let out = Command::new("zoxide")
-            .args(["query", "-l"])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|e| format!("zoxide: {e}"))?;
-        return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+        return zoxide_here();
     }
     if host == home {
         return Ok(home_folders.to_string());
     }
-    let out = Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3", host, "zoxide query -l"])
+    if let Ok(text) = crate::server::folders(host) {
+        return Ok(text);
+    }
+    zoxide_on(host)
+}
+
+/// This host's zoxide folders.
+pub fn zoxide_here() -> Result<String, String> {
+    let out = Command::new("zoxide")
+        .args(["query", "-l"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| format!("zoxide: {e}"))?;
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Another host's zoxide folders over SSH.
+pub fn zoxide_on(host: &str) -> Result<String, String> {
+    let out = ssh(host)
+        .arg("zoxide query -l")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()

@@ -71,7 +71,9 @@ pub struct Tab {
 /// Rows from the config, tab separated:
 ///   S  TARGET  HOST  SESSION_ID  SESSION_LABEL
 ///   T  WINDOW_ID  STATE  NAME  DIR
-/// A T row belongs to the S row before it.
+///   E  HOST  MESSAGE
+/// A T row belongs to the S row before it. An E row says a host's tabs are
+/// missing or stale (see `failed_hosts`); pickers without them skip it.
 pub fn parse_rows(input: &str) -> (Vec<Session>, Vec<Tab>) {
     let mut sessions: Vec<Session> = Vec::new();
     let mut tabs = Vec::new();
@@ -101,6 +103,16 @@ pub fn parse_rows(input: &str) -> (Vec<Session>, Vec<Tab>) {
         }
     }
     (sessions, tabs)
+}
+
+/// The hosts the rows' E rows name, in order: their tabs couldn't be
+/// listed, so what's shown of them (if anything) is from earlier.
+pub fn failed_hosts(input: &str) -> Vec<String> {
+    input
+        .lines()
+        .filter_map(|line| line.strip_prefix("E\t"))
+        .map(|rest| rest.split('\t').next().unwrap_or("").to_string())
+        .collect()
 }
 
 pub struct Task {
