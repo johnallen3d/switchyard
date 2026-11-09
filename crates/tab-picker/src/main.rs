@@ -18,7 +18,7 @@
 //! - All (default): tabs grouped by session; task tabs show their dirty
 //!   count and a profile tint.
 //! - Agents (`--view agents`, cmd+i): tabs with live agent status and open
-//!   tasks, in inbox urgency order.
+//!   tasks, grouped by status in inbox urgency order.
 //! - Archive (ctrl-a): ended tasks, most recent first; ctrl-f hides the
 //!   archived ones, leaving those whose tab or worktree went without one.
 //!
@@ -148,6 +148,8 @@ enum Armed {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
     Session(usize),
+    /// An Agents status heading; the empty string means no known status.
+    Status(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
     Task(usize),
@@ -161,9 +163,9 @@ struct Hits {
     second: Vec<usize>,
 }
 
-/// Session rows are headers, not picks.
+/// Session and status rows are headers, not picks.
 fn selectable(r: &Item) -> bool {
-    !matches!(r, Item::Session(_))
+    matches!(r, Item::Tab(_) | Item::Task(_))
 }
 
 /// A row as the flat views draw it.
@@ -321,7 +323,7 @@ impl App {
     /// The (session_id, window_id) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
-            Item::Session(_) => None,
+            Item::Session(_) | Item::Status(_) => None,
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
@@ -342,7 +344,7 @@ impl App {
     /// The task a row stands for: a tab's open task, or the row's own.
     fn task_of(&self, item: Item) -> Option<&Task> {
         match item {
-            Item::Session(_) => None,
+            Item::Session(_) | Item::Status(_) => None,
             Item::Tab(t) => self.tabs[t].task.map(|k| &self.tasks[k]),
             Item::Task(k) => Some(&self.tasks[k]),
         }
@@ -442,7 +444,7 @@ impl App {
                 }
             }
             // Headers aren't flat rows.
-            Item::Session(_) => Flat {
+            Item::Session(_) | Item::Status(_) => Flat {
                 project: "",
                 name: "",
                 msg: "",
@@ -546,10 +548,12 @@ impl App {
         best.map(|(_, i)| i)
     }
 
-    /// Agents and Archive: a flat list in the given order. Matches the
-    /// project (or session), name and host. Returns the best match.
+    /// Agents and Archive: rows in the given order, with status headings
+    /// for matching Agents only. Matches project (or session), name and host.
+    /// Returns the best match.
     fn filter_flat(&mut self, rows: Vec<Item>, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
+        let mut group = None;
         for item in rows {
             let (project, name, host, work) = {
                 let f = self.flat(item);
@@ -565,6 +569,20 @@ impl App {
                 self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone() });
                 if best.is_none_or(|(b, _)| score > b) {
                     best = Some((score, item));
+                }
+            }
+            if self.view == View::Agents {
+                let state = match self.flat(item).state {
+                    "blocked" => "blocked",
+                    "error" => "error",
+                    "done" => "done",
+                    "working" => "working",
+                    "idle" => "idle",
+                    _ => "",
+                };
+                if group != Some(state) {
+                    self.rows.push(Item::Status(state));
+                    group = Some(state);
                 }
             }
             self.rows.push(item);
@@ -584,16 +602,15 @@ impl App {
         self.selected = Some(draw::step(&self.rows, at, delta, selectable));
     }
 
-    /// Move to the first tab of the next session, or back to the first tab
-    /// of this session (then the one before).
-    fn jump_session(&mut self, forward: bool) {
+    /// Move to the first pick of the next group, or back to the first pick
+    /// of this group (then the one before).
+    fn jump_group(&mut self, forward: bool) {
         let Some(at) = self.selected else { return };
-        let first_tab =
-            |i: usize| selectable(&self.rows[i]) && i > 0 && matches!(self.rows[i - 1], Item::Session(_));
+        let first_pick = |i: usize| selectable(&self.rows[i]) && i > 0 && !selectable(&self.rows[i - 1]);
         let found = if forward {
-            (at + 1..self.rows.len()).find(|&i| first_tab(i))
+            (at + 1..self.rows.len()).find(|&i| first_pick(i))
         } else {
-            (0..at).rev().find(|&i| first_tab(i))
+            (0..at).rev().find(|&i| first_pick(i))
         };
         if let Some(i) = found {
             self.moved();
@@ -629,7 +646,7 @@ impl App {
             },
         };
         match item {
-            Item::Session(_) => String::new(),
+            Item::Session(_) | Item::Status(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
@@ -697,8 +714,8 @@ impl App {
                 self.moved();
                 self.refilter();
             }
-            KeyCode::Up if alt => self.jump_session(false),
-            KeyCode::Down if alt => self.jump_session(true),
+            KeyCode::Up if alt => self.jump_group(false),
+            KeyCode::Down if alt => self.jump_group(true),
             KeyCode::Up => self.step(-1),
             KeyCode::Down => self.step(1),
             KeyCode::PageUp => self.step(-page),
@@ -723,7 +740,7 @@ impl App {
             return;
         }
         let mut row = self.offset + (y - a.y) as usize;
-        if matches!(self.rows.get(row), Some(Item::Session(_))) {
+        if self.rows.get(row).is_some_and(|item| !selectable(item)) {
             row += 1;
         }
         if self.rows.get(row).is_some_and(selectable) {
@@ -834,8 +851,8 @@ impl App {
             return;
         }
         if let Some(sel) = self.selected {
-            // Keep the session header in view when scrolling back to a
-            // session's first tab.
+            // Keep the group header in view when scrolling back to its
+            // first pick.
             let header_above = sel > 0 && !selectable(&self.rows[sel - 1]);
             self.offset = draw::keep_in_view(self.offset, sel, h, header_above);
         }
@@ -848,7 +865,7 @@ impl App {
         let cols = if self.view == View::All {
             (0, 0)
         } else {
-            let shown = || self.rows.iter().map(|&i| self.flat(i));
+            let shown = || self.rows.iter().filter(|i| selectable(i)).map(|&i| self.flat(i));
             let right_w = shown().map(|t| self.right_spans(&t, self.p.base, "").1).max().unwrap_or(0);
             let room = (list.width as usize).saturating_sub(3 + right_w + 1);
             let proj_w = shown().map(|t| str_width(t.project)).max().unwrap_or(0).min(room / 4);
@@ -859,7 +876,9 @@ impl App {
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
             let selected = self.selected == Some(i);
-            if self.view == View::All {
+            if let Item::Status(state) = row {
+                self.draw_status_header(f, r, state);
+            } else if self.view == View::All {
                 let last = !self.rows.get(i + 1).is_some_and(selectable);
                 self.draw_grouped_row(f, r, row, selected, last, tick);
             } else {
@@ -869,6 +888,27 @@ impl App {
         if overflow {
             draw::scrollbar(f, &self.p, area, self.offset, self.rows.len());
         }
+    }
+
+    fn draw_status_header(&self, f: &mut Frame, area: Rect, state: &str) {
+        let p = &self.p;
+        let (glyph, label, color) = match state {
+            "blocked" => ("●", "Waiting", p.gold),
+            "error" => ("✗", "Failed", p.love),
+            "done" => ("✓", "Done", p.pine),
+            "working" => ("●", "Working", p.foam),
+            "idle" => ("·", "Idle", p.muted),
+            _ => ("?", "No status", p.muted),
+        };
+        let heading = format!(" {glyph} {label} ");
+        let rule = "─".repeat((area.width as usize).saturating_sub(str_width(&heading)));
+        f.render_widget(
+            Line::from(vec![
+                Span::styled(heading, Style::new().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(rule, Style::new().fg(p.hl_med)),
+            ]),
+            area,
+        );
     }
 
     fn draw_empty(&self, f: &mut Frame, area: Rect) {
@@ -1018,8 +1058,8 @@ impl App {
                 f.render_widget(Line::from(spans), r);
                 f.render_widget(Line::from(right).right_aligned(), r);
             }
-            // Task rows only appear in the flat views.
-            Item::Task(_) => {}
+            // Task and status rows only appear in the Agents/Archive views.
+            Item::Task(_) | Item::Status(_) => {}
             Item::Tab(t) => {
                 let tab = &self.tabs[*t];
                 let task = tab.task.map(|k| &self.tasks[k]);
@@ -1190,7 +1230,10 @@ impl App {
         match self.view {
             View::All => keys.push(("⌥↑↓", "session")),
             View::Archive => keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" })),
-            View::Agents => keys.push(("⌃A", "archive")),
+            View::Agents => {
+                keys.push(("⌥↑↓", "status"));
+                keys.push(("⌃A", "archive"));
+            }
         }
         keys.push(("esc", "close"));
         let keys: Vec<_> = keys.into_iter().map(|(k, label)| (k, label, p.subtle)).collect();
@@ -1287,6 +1330,122 @@ impl App {
     fn busy(&mut self, term: &mut DefaultTerminal, msg: String) {
         self.note = Some((msg, false));
         let _ = term.draw(|f| self.draw(f));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn inbox() -> App {
+        let mut app = App::new((String::new(), String::new()), View::Agents);
+        app.follow = false;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\tbuild\tworking\tbuilding\n",
+                "T\twait\tblocked\tapproval\n",
+                "T\tfail\terror\tbroken\n",
+                "T\tdone\tdone\tready\n",
+                "T\tidle\t\tregistered\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"idle", "status":"idle"},
+                {"session_id":"s", "window_id":"old", "name":"older", "status":"blocked", "status_at":10},
+                {"session_id":"s", "window_id":"new", "name":"newer", "status":"blocked", "status_at":20, "profile":"work"},
+                {"session_id":"s", "window_id":"unknown"},
+                {"session_id":"s", "window_id":"future", "status":"future"},
+                {"session_id":"s", "window_id":"ended", "ended_at":30}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        app
+    }
+
+    #[test]
+    fn inbox_groups_by_status_and_preserves_urgency_and_age_order() {
+        let app = inbox();
+        assert_eq!(app.rows, vec![
+            Item::Status("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
+            Item::Status("error"), Item::Tab(2),
+            Item::Status("done"), Item::Tab(3),
+            Item::Status("working"), Item::Tab(0),
+            Item::Status("idle"), Item::Tab(4),
+            Item::Status(""), Item::Task(3), Item::Task(4),
+        ]);
+        assert_eq!(app.selected_item(), Some(Item::Task(1)));
+    }
+
+    #[test]
+    fn inbox_headings_follow_search_and_profile_filters() {
+        let mut app = inbox();
+        app.query = "older".into();
+        app.refilter();
+        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(1)]);
+        assert_eq!(app.selected_item(), Some(Item::Task(1)));
+        app.query.clear();
+        app.profile = Profile::Work;
+        app.refilter();
+        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(2)]);
+        app.query = "no-match".into();
+        app.refilter();
+        assert!(app.rows.is_empty());
+        assert!(app.selected.is_none());
+    }
+
+    #[test]
+    fn inbox_navigation_skips_headings_and_jumps_status_groups() {
+        let mut app = inbox();
+        app.jump_group(true);
+        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
+        app.step(-1);
+        assert_eq!(app.selected_item(), Some(Item::Tab(1)));
+        app.jump_group(false);
+        assert_eq!(app.selected_item(), Some(Item::Task(1)));
+        app.edge(true);
+        assert_eq!(app.selected_item(), Some(Item::Task(4)));
+        app.edge(false);
+        assert_eq!(app.selected_item(), Some(Item::Task(1)));
+        app.list_area = Rect::new(0, 0, 100, 20);
+        app.click(2, 4); // Failed heading selects its first session, not the header.
+        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
+        app.selected = Some(4);
+        assert!(app.pick().is_empty());
+        assert!(app.selected_key().is_none());
+        assert!(app.selected_task().is_none());
+    }
+
+    #[test]
+    fn status_updates_keep_the_selected_task_and_armed_action() {
+        let mut app = inbox();
+        let selected = app.selected_key();
+        app.armed = Armed::Archive;
+        app.deliver(|app| app.tasks[1].state = "working".into());
+        assert_eq!(app.selected_key(), selected);
+        assert_eq!(app.selected_item(), Some(Item::Task(1)));
+        assert!(app.armed == Armed::Archive);
+        let at = app.selected.unwrap();
+        assert_eq!(app.rows[at - 1], Item::Status("working"));
+    }
+
+    #[test]
+    fn status_headings_render_without_changing_other_views() {
+        let mut app = inbox();
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        for label in ["Waiting", "Failed", "Done", "Working", "Idle", "No status"] {
+            assert!(text.contains(label), "missing status heading: {label}");
+        }
+        app.set_view(View::All);
+        assert_eq!(app.rows, vec![
+            Item::Session(0), Item::Tab(0), Item::Tab(1), Item::Tab(2), Item::Tab(3), Item::Tab(4),
+        ]);
+        app.set_view(View::Archive);
+        assert_eq!(app.rows, vec![Item::Task(5)]);
     }
 }
 
