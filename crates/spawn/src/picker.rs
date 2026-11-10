@@ -354,9 +354,12 @@ impl App {
                     matched.push(i);
                     continue;
                 }
-                let (name, path) = (self.projects[i].name.clone(), self.projects[i].path.clone());
-                if let Some((score, f)) = score_fields(&mut self.matcher, &pattern, &[&name, &path]) {
-                    self.hits.insert(Item::Project(i), (f[0].clone(), f[1].clone()));
+                // Match projects by name only; every catalog path shares a
+                // prefix, so path hits would match most of the list.
+                let name = self.projects[i].name.clone();
+                if let Some((score, mut f)) = score_fields(&mut self.matcher, &pattern, &[&name]) {
+                    self.hits
+                        .insert(Item::Project(i), (f.swap_remove(0), Vec::new()));
                     keep_best(&mut best, score, Item::Project(i));
                     matched.push(i);
                 }
