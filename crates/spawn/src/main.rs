@@ -70,7 +70,8 @@ const USAGE: &str = "usage: rex-spawn [--kind agent|session] [--home LABEL FOLDE
        rex-spawn --launch HOST PATH NAME HARNESS [PROMPT_REF]
        rex-spawn --run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume] [PROMPT]
        rex-spawn --tasks [--live]
-       rex-spawn --act review|archive|force-archive|resume|link HOST SESSION_ID WINDOW_ID
+       rex-spawn --act review|archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
+       rex-spawn --act snooze HOST SESSION_ID WINDOW_ID UNTIL
        rex-spawn --session-of PROFILE HARNESS WORKTREE
 
 Without a mode, shows the new-session picker (kind agent unless --kind
@@ -90,7 +91,9 @@ hosts and prints them as JSON with live agent status; with --live it only
 adds the status, without checking worktrees or ending tasks. --act reviews or
 archives the task in a tab (force-archive also throws away uncommitted
 changes), resumes an ended task's agent session in a new tab and prints
-it as --launch does, or prints the URL of the task's main work item (link). --session-of prints the newest agent session for a
+it as --launch does, prints the URL of the task's main work item (link),
+pins or unpins an open task in the inbox (pin), or snoozes it until UNTIL,
+Unix seconds, with 0 waking it (snooze). --session-of prints the newest agent session for a
 worktree on this host.";
 
 /// The picker's options: `--kind KIND`, then from the float `--home LABEL
@@ -140,7 +143,14 @@ fn main() -> io::Result<()> {
                 println!("{id}");
             }
         }
-        ["--act", action, host, session, window] => match actions::act(action, host, session, window) {
+        ["--act", action, host, session, window, rest @ ..] if rest.len() <= 1 => match match (*action, rest) {
+            ("snooze", [until]) => match until.parse() {
+                Ok(until) => actions::snooze(host, window, until),
+                Err(_) => Err(format!("snooze: UNTIL must be Unix seconds, not {until}")),
+            },
+            (_, []) => actions::act(action, host, session, window),
+            _ => Err(format!("{action} takes no UNTIL")),
+        } {
             Ok(msg) => {
                 log(&msg);
                 println!("{msg}");

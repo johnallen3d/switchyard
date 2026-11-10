@@ -23,6 +23,11 @@
 //! - link: print the URL of the task's main work item (its PR, else an
 //!   issue, card or commit; see `links`), open or ended, for the caller to
 //!   open on the client machine.
+//! - pin: pin an open task to the top of the inbox, or unpin a pinned one
+//!   (`pinned` in the registry).
+//! - snooze (`rex-spawn --act snooze HOST SESSION WINDOW UNTIL`): hide an
+//!   open task in the inbox's Snoozed group until UNTIL, Unix seconds
+//!   (`snoozed_until`); 0 wakes it now.
 //! - resume: for an ended task (archived, or its tab or worktree gone), open
 //!   a new tab on the task's host that recreates the worktree on its branch
 //!   and resumes the agent session, replace the ended entry with the new
@@ -112,8 +117,58 @@ fn archive_check(worktree: &str, branch: &str) -> String {
     )
 }
 
+/// Pin or unpin the open task in `window` on `host`, as `pinned`; the
+/// outcome says which.
+fn pin(host: &str, window: &str) -> Result<String, String> {
+    let mut tasks = load_tasks()?;
+    let task = open_task(&mut tasks, host, window)?;
+    let pinned = !task["pinned"].as_bool().unwrap_or(false);
+    set_or_remove(task, "pinned", pinned.then(|| true.into()));
+    let label = label_of(task);
+    save_tasks(&tasks)?;
+    Ok(format!("{} {label}", if pinned { "pinned" } else { "unpinned" }))
+}
+
+/// Snooze the open task in `window` on `host` until `until` (Unix seconds),
+/// or wake it for 0.
+pub fn snooze(host: &str, window: &str, until: u64) -> Result<String, String> {
+    let mut tasks = load_tasks()?;
+    let task = open_task(&mut tasks, host, window)?;
+    set_or_remove(task, "snoozed_until", (until > 0).then(|| until.into()));
+    let label = label_of(task);
+    save_tasks(&tasks)?;
+    crate::server::refresh();
+    Ok(if until > 0 { format!("snoozed {label}") } else { format!("woke {label}") })
+}
+
+fn open_task<'a>(tasks: &'a mut [serde_json::Value], host: &str, window: &str) -> Result<&'a mut serde_json::Value, String> {
+    tasks
+        .iter_mut()
+        .find(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window))
+        .ok_or_else(|| "no open task for that tab".to_string())
+}
+
+fn label_of(task: &serde_json::Value) -> String {
+    format!("{}/{}", task["project"].as_str().unwrap_or(""), task["name"].as_str().unwrap_or(""))
+}
+
+fn set_or_remove(task: &mut serde_json::Value, key: &str, value: Option<serde_json::Value>) {
+    match (value, task.as_object_mut()) {
+        (Some(v), Some(obj)) => {
+            obj.insert(key.into(), v);
+        }
+        (None, Some(obj)) => {
+            obj.remove(key);
+        }
+        _ => {}
+    }
+}
+
 pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
-    let result = run_action(action, host, session, window);
+    let result = match action {
+        "pin" => pin(host, window),
+        _ => run_action(action, host, session, window),
+    };
     // Even a failed archive may have changed the registry or closed the
     // tab: have switchyard-server check now rather than at its next poll.
     // Reviewing and opening a work item change nothing.

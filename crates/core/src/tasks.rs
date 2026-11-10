@@ -527,6 +527,11 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         .map(|(i, repo, pr)| (format!("{}/{}", field(&tasks[i], "host"), field(&tasks[i], "window_id")), repo, pr))
         .collect();
     tasks.retain(|t| t["ended_at"].as_u64().is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS));
+    // A pin or snooze saved while the hosts were checked wins over the
+    // registry as it was read.
+    if let Ok(fresh) = load_tasks() {
+        carry_inbox_state(&mut tasks, &fresh);
+    }
     if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
         save_tasks(&tasks)?;
     }
@@ -554,10 +559,50 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     Ok(tasks)
 }
 
+/// The inbox state John sets on a task (see actions' pin and snooze).
+const INBOX_KEYS: [&str; 2] = ["pinned", "snoozed_until"];
+
+/// Copy each task's inbox state from `fresh`, a later read of the registry,
+/// matching tasks by host, window and start.
+fn carry_inbox_state(tasks: &mut [serde_json::Value], fresh: &[serde_json::Value]) {
+    let same = |a: &serde_json::Value, b: &serde_json::Value| {
+        ["host", "window_id", "created_at"].iter().all(|k| a[*k] == b[*k])
+    };
+    for task in tasks.iter_mut() {
+        let Some(newer) = fresh.iter().find(|f| same(f, task)) else { continue };
+        let Some(obj) = task.as_object_mut() else { continue };
+        for key in INBOX_KEYS {
+            match newer.get(key) {
+                Some(v) => obj.insert(key.into(), v.clone()),
+                None => obj.remove(key),
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn inbox_state_saved_during_a_check_survives_it() {
+        let mut tasks = vec![
+            serde_json::json!({"host":"h", "window_id":"a", "created_at":1, "status":"x", "pinned":true}),
+            serde_json::json!({"host":"h", "window_id":"b", "created_at":2}),
+            serde_json::json!({"host":"h", "window_id":"c", "created_at":3, "pinned":true}),
+        ];
+        let fresh = vec![
+            serde_json::json!({"host":"h", "window_id":"a", "created_at":1}),
+            serde_json::json!({"host":"h", "window_id":"b", "created_at":2, "pinned":true, "snoozed_until":9}),
+        ];
+        carry_inbox_state(&mut tasks, &fresh);
+        assert_eq!(tasks[0], serde_json::json!({"host":"h", "window_id":"a", "created_at":1, "status":"x"}));
+        assert_eq!(tasks[1]["snoozed_until"], 9);
+        assert_eq!(tasks[1]["pinned"], true);
+        // Gone from the later read (pruned or replaced): left alone.
+        assert_eq!(tasks[2]["pinned"], true);
+    }
 
     fn git(dir: &Path, args: &[&str]) {
         let ok = Command::new("git")

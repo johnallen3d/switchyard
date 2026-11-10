@@ -279,6 +279,10 @@ pub struct Task {
     /// Whether the branch is merged into the default branch (`merged`,
     /// `unmerged`, `new`), when its worktree was checked.
     pub merged: String,
+    /// Pinned to the top of the inbox and the tab list.
+    pub pinned: bool,
+    /// Snoozed in the inbox until then (Unix seconds); 0 for not snoozed.
+    pub snoozed_until: u64,
     /// The listed tab it runs in, if open and listed.
     pub tab: Option<usize>,
 }
@@ -306,6 +310,16 @@ impl Task {
         (self.ended.is_none() || self.left)
             && self.dirty == 0
             && (self.merged == "merged" || self.links.iter().any(|l| l.kind == "pr" && l.state == "merged"))
+    }
+
+    /// Open and pinned.
+    pub fn is_pinned(&self) -> bool {
+        self.ended.is_none() && self.pinned
+    }
+
+    /// Open and snoozed at `now`.
+    pub fn is_snoozed(&self, now: u64) -> bool {
+        self.ended.is_none() && self.snoozed_until > now
     }
 
     /// The links as search text: their short forms and refs.
@@ -346,6 +360,8 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             left: t["worktree_left"].as_bool().unwrap_or(false),
             links: parse_links(&t["links"]),
             merged: s(t, "branch_merged"),
+            pinned: t["pinned"].as_bool().unwrap_or(false),
+            snoozed_until: t["snoozed_until"].as_u64().unwrap_or(0),
             tab: None,
         })
         .collect())

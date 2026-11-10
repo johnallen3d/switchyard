@@ -7,7 +7,8 @@
 //! host that runs host_rows.lua on every server (as the fill script does),
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check). It acts on Enter, ctrl-r, ctrl-l (open
-//! the task's work item) and the "ask" confirm the way the config's
+//! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
+//! "ask" confirm the way the config's
 //! tab_picker mode does, through core's actions and `rex do
 //! session.select`, then stays open, showing the outcome and the data after
 //! it. Escape or ctrl-c closes it. The registry is on the Mac; elsewhere it
@@ -257,6 +258,16 @@ pub fn archive(action: &str, p: &Pick) -> Result<String, String> {
 pub fn review(p: &Pick) -> Result<(), String> {
     logged("review", actions::act("review", &p.host, &p.session, &p.window))?;
     go(p)
+}
+
+/// Pin or unpin the pick's task; Ok is the outcome to show.
+pub fn pin(p: &Pick) -> Result<String, String> {
+    logged("pin", actions::act("pin", &p.host, &p.session, &p.window))
+}
+
+/// Snooze the pick's task until `until` (Unix seconds), or wake it for 0.
+pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
+    logged("snooze", actions::snooze(&p.host, &p.window, until))
 }
 
 /// Resume an ended task in a new tab and show it.

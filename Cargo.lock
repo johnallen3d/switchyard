@@ -570,6 +570,7 @@ dependencies = [
 name = "rex-tab-picker"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "nucleo-matcher",
  "ratatui",
  "serde_json",

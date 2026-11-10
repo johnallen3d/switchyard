@@ -28,6 +28,14 @@
 -- ctrl+l types ctrl+l back so the float opens its link chooser; while that
 -- is open the title is rex-tab-picker:link:URL (hex-encoded), Enter or
 -- ctrl+l opens URL and Escape types Escape back to close the chooser.
+-- ctrl+t pins or unpins an open task (`rex-spawn --act pin`), then types
+-- ctrl+t back so the float shows it. ctrl+s reaches the float, which opens
+-- its snooze prompt; while that is open the title is
+-- rex-tab-picker:snooze:UNTIL:TARGET/SESSION/WINDOW (UNTIL in Unix
+-- seconds, 0 to wake), or rex-tab-picker:snooze-invalid while the typed
+-- time can't be read. Enter snoozes (`rex-spawn --act snooze ... UNTIL`)
+-- and types Enter back so the float shows it; Escape types Escape back to
+-- close the prompt.
 -- TARGET is "-" for this host or the hex-encoded host label. See
 -- ../../crates/tab-picker/src/main.rs and
 -- ../../crates/core/src/actions.rs.
@@ -193,6 +201,12 @@ local function read_pick(ctx, key)
   local title = float_title(ctx, block_id)
   local url = title:match("^rex%-tab%-picker:link:(%x+)$")
   if url ~= nil then return { action = "link", url = util.unhex(url), float = block_id } end
+  local wake_at, starget, ssession, swindow = title:match("^rex%-tab%-picker:snooze:(%d+):([^/]+)/([^/]+)/([^/]+)")
+  if wake_at ~= nil then
+    local shere = starget == "-"
+    return { action = "snooze", wake_at = wake_at, host = shere and host_label() or util.unhex(starget), here = shere,
+      session_id = ssession, window_id = swindow, links = 1, float = block_id }
+  end
   local action, target, session_id, window_id, links = title
     :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)/?(%d*)$")
   if action == nil then return nil end
@@ -227,8 +241,8 @@ end
 
 -- Run `rex-spawn --act` for the pick and return its output; a refusal (such
 -- as a dirty worktree) comes back as the action's error.
-local function act(action, pick)
-  local r, err = rex.exec({ "rex-spawn", "--act", action, pick.host, pick.session_id, pick.window_id },
+local function act(action, pick, ...)
+  local r, err = rex.exec({ "rex-spawn", "--act", action, pick.host, pick.session_id, pick.window_id, ... },
     { env = util.cli_env() })
   if r == nil then error(err, 0) end
   if not r.ok then error((r.stderr:gsub("^rex%-spawn: ", "")), 0) end
@@ -252,6 +266,12 @@ rex.action{
     -- A dirty worktree: keep the float open and type ctrl-x into it, which
     -- moves it on to "are you sure"; the next Enter answers force-archive.
     if pick.action == "ask" then return type_into(ctx, pick.float, "\24") end
+    -- The snooze prompt: save it, then type Enter back so the float shows
+    -- it and moves on.
+    if pick.action == "snooze" then
+      act("snooze", pick, pick.wake_at)
+      return type_into(ctx, pick.float, "\r")
+    end
     close_picker(ctx)
     -- The link chooser's pick.
     if pick.action == "link" then return open_url(pick.url) end
@@ -284,7 +304,7 @@ rex.action{
   run   = function(ctx, args)
     local pick = read_pick(ctx, "ctrl+l")
     -- Only task rows have work items.
-    if pick == nil or pick.action == "go" then return end
+    if pick == nil or pick.action == "go" or pick.action == "snooze" then return end
     if pick.action == "link" then
       close_picker(ctx)
       return open_url(pick.url)
@@ -296,14 +316,28 @@ rex.action{
   end,
 }
 
--- Escape closes the float, or with the link chooser open, types Escape
--- back so the float closes just the chooser.
+-- Pin or unpin the highlighted open task, then type ctrl+t back so the
+-- float shows it.
+rex.action{
+  name  = "tab_picker_pin",
+  title = "Pin or Unpin Picked Task",
+  run   = function(ctx, args)
+    local pick = read_pick(ctx, "ctrl+t")
+    if pick == nil or pick.action ~= "task" then return end
+    act("pin", pick)
+    type_into(ctx, pick.float, "\20")
+  end,
+}
+
+-- Escape closes the float, or with the link chooser or snooze prompt open,
+-- types Escape back so the float closes just that.
 rex.action{
   name  = "tab_picker_cancel",
   title = "Close Tab Picker",
   run   = function(ctx, args)
     local _, block_id = util.find_float(ctx, label)
-    if block_id ~= nil and float_title(ctx, block_id):match("^rex%-tab%-picker:link:") then
+    local title = block_id ~= nil and float_title(ctx, block_id) or ""
+    if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze") then
       return type_into(ctx, block_id, "\27")
     end
     close_picker(ctx)
@@ -315,4 +349,5 @@ rex.bind("cmd+i", "tab_picker_agents")
 rex.bind("tab_picker/enter", "tab_picker_go")
 rex.bind("tab_picker/ctrl+r", "tab_picker_review")
 rex.bind("tab_picker/ctrl+l", "tab_picker_open_link")
+rex.bind("tab_picker/ctrl+t", "tab_picker_pin")
 rex.bind("tab_picker/escape", "tab_picker_cancel")

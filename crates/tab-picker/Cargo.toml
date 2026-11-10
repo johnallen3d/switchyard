@@ -8,6 +8,7 @@ switchyard-core.workspace = true
 switchyard-ui.workspace = true
 nucleo-matcher.workspace = true
 ratatui.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 
 [[bin]]

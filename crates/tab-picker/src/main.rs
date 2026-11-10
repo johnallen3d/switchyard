@@ -19,7 +19,8 @@
 //! - All (default): tabs grouped by session; task tabs show their dirty
 //!   count and a profile tint.
 //! - Agents (`--view agents`, cmd+i): tabs with live agent status and open
-//!   tasks, grouped by status in inbox urgency order.
+//!   tasks, grouped by status in inbox urgency order, with Pinned tasks
+//!   above and Snoozed ones below.
 //! - Archive (ctrl-a): ended tasks, most recent first; ctrl-f hides the
 //!   archived ones, leaving those whose tab or worktree went without one.
 //!
@@ -28,6 +29,14 @@
 //! archive of the highlighted task (open, or ended with its worktree left);
 //! with uncommitted changes the config's "ask" types another ctrl-x, which
 //! moves on to "are you sure". Any other key disarms.
+//!
+//! ctrl-t pins or unpins the highlighted open task (`pinned` in the
+//! registry), which puts it in a Pinned group at the top of All and Agents.
+//! ctrl-s, in Agents, opens a prompt for when to wake the task (see
+//! snooze.rs); Enter snoozes it into the Snoozed group until then
+//! (`snoozed_until`), and Enter on an empty prompt wakes a snoozed one. In
+//! the float the config saves both and types the key back (ctrl-t, or
+//! Enter for the prompt) for the picker to show them.
 //!
 //! The pick goes out in the terminal title as
 //! `rex-tab-picker:ACTION:TARGET/SESSION/WINDOW`. ACTION is `go` (a tab),
@@ -42,12 +51,16 @@
 //! config types ctrl-l back to open a chooser over them (PRs, cards, then
 //! issues). While it is open the pick is `link:URL` (URL hex-encoded): the
 //! config opens it on Enter or ctrl-l and types Escape back to close it.
+//! While the snooze prompt is open it is `snooze:UNTIL:TARGET/SESSION/WINDOW`
+//! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
+//! reads as a time.
 //!
 //! Run bare from a shell (`rex-tab-picker`, or `rex-inbox` for the Agents
 //! view), it works without the float: it fetches the data and acts on its
 //! picks itself, staying open after each action (see standalone.rs).
 
 mod model;
+mod snooze;
 mod standalone;
 
 use std::collections::HashMap;
@@ -75,6 +88,12 @@ use switchyard_ui::protocol::{self, Title, hex};
 
 const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
+const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
+const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
+
+/// How long a pin or snooze made here holds over deliveries that don't
+/// have it yet (the registry is saved, but the data was read before).
+const PENDING_TTL: Duration = Duration::from_secs(15);
 
 /// Whether the tabs have arrived.
 enum Load {
@@ -189,6 +208,8 @@ struct Flat<'a> {
     /// Linked work items, PRs first, and the branch's merge state.
     links: &'a [Link],
     merged: &'a str,
+    /// When a snoozed task wakes; 0 when not snoozed.
+    wake: u64,
 }
 
 type Key = (String, String);
@@ -203,6 +224,28 @@ struct Chooser {
 impl Chooser {
     fn url(&self) -> &str {
         &self.links[self.selected].url
+    }
+}
+
+/// The ctrl-s prompt: when to wake the highlighted task, typed (see
+/// snooze.rs). Empty, it wakes a snoozed task.
+struct Snooze {
+    /// The task's tab, as (session_id, window_id), which stays highlighted.
+    key: Key,
+    label: String,
+    /// The task's current snooze, 0 for none.
+    current: u64,
+    text: String,
+    /// When the text says, or why it can't; Ok(0) wakes.
+    until: Result<u64, String>,
+}
+
+impl Snooze {
+    fn update(&mut self, now: u64) {
+        self.until = match self.text.trim() {
+            "" if self.current > now => Ok(0),
+            text => snooze::parse(text, now),
+        };
     }
 }
 
@@ -236,6 +279,11 @@ struct App {
     armed: Armed,
     /// The open ctrl-l link chooser; Enter opens its pick, Escape closes it.
     chooser: Option<Chooser>,
+    /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
+    snooze: Option<Snooze>,
+    /// Pins and snoozes made here, by (host, window_id): (pinned,
+    /// snoozed_until, when), kept over deliveries until they agree.
+    pending: HashMap<Key, (bool, u64, Instant)>,
     list_area: Rect,
     title: Title,
     started: Instant,
@@ -274,6 +322,8 @@ impl App {
             offset: 0,
             armed: Armed::No,
             chooser: None,
+            snooze: None,
+            pending: HashMap::new(),
             list_area: Rect::default(),
             title: Title::new("rex-tab-picker"),
             started: Instant::now(),
@@ -335,6 +385,7 @@ impl App {
         let keep = self.selected_key();
         let armed = self.armed;
         take(self);
+        self.apply_pending();
         link(&mut self.tabs, &self.sessions, &mut self.tasks);
         let want = if self.follow { Some(self.current.clone()) } else { keep.clone() };
         self.refilter_to(want.clone());
@@ -343,6 +394,29 @@ impl App {
             self.select_key(keep.clone());
         }
         self.armed = if self.selected_key() == keep && self.armable() { armed } else { Armed::No };
+        // The snooze prompt goes with its task.
+        if self.snooze.as_ref().is_some_and(|z| self.selected_key().as_ref() != Some(&z.key)) {
+            self.snooze = None;
+        }
+    }
+
+    /// Hold the pins and snoozes made here over data from before them.
+    fn apply_pending(&mut self) {
+        let tasks = &mut self.tasks;
+        self.pending.retain(|(host, window), (pinned, until, at)| {
+            if at.elapsed() > PENDING_TTL {
+                return false;
+            }
+            match tasks.iter_mut().find(|t| t.ended.is_none() && &t.host == host && &t.window_id == window) {
+                Some(t) if t.pinned == *pinned && t.snoozed_until == *until => false,
+                Some(t) => {
+                    t.pinned = *pinned;
+                    t.snoozed_until = *until;
+                    true
+                }
+                None => true,
+            }
+        });
     }
 
     // ------------------------------------------------------------ rows
@@ -389,6 +463,49 @@ impl App {
         self.selected_item().and_then(|i| self.task_of(i))
     }
 
+    /// The index of the task a row stands for.
+    fn task_index(&self, item: Item) -> Option<usize> {
+        match item {
+            Item::Session(_) | Item::Status(_) => None,
+            Item::Tab(t) => self.tabs[t].task,
+            Item::Task(k) => Some(k),
+        }
+    }
+
+    /// The highlighted open task, which ctrl-t can pin (not in the archive)
+    /// and ctrl-s snooze (in the inbox).
+    fn selected_open_task(&self) -> Option<usize> {
+        self.selected_item().and_then(|i| self.task_index(i)).filter(|&k| self.tasks[k].ended.is_none())
+    }
+
+    fn can_pin(&self) -> bool {
+        self.view != View::Archive && self.selected_open_task().is_some()
+    }
+
+    fn can_snooze(&self) -> bool {
+        self.view == View::Agents && self.selected_open_task().is_some()
+    }
+
+    /// The Agents group a row goes in: `pinned`, `snoozed` (which wins), or
+    /// its status (empty when unknown).
+    fn agent_group(&self, item: Item) -> &'static str {
+        let task = self.task_of(item);
+        if task.is_some_and(|t| t.is_snoozed(self.now)) {
+            return "snoozed";
+        }
+        if task.is_some_and(Task::is_pinned) {
+            return "pinned";
+        }
+        match self.flat(item).state {
+            "blocked" => "blocked",
+            "error" => "error",
+            "done" => "done",
+            "working" => "working",
+            "idle" => "idle",
+            _ => "",
+        }
+    }
+
     /// Whether ctrl-x can arm an archive for the highlighted row: an open
     /// task, or an ended one that left its worktree behind.
     fn armable(&self) -> bool {
@@ -426,11 +543,19 @@ impl App {
             .filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none())
             .map(Item::Task);
         let mut rows: Vec<Item> = tabs.chain(orphans).collect();
-        // Most urgent first and, within a state, the one waiting longest
-        // first (unknown times last).
+        // Pinned first and snoozed last. Most urgent first and, within a
+        // state, the one waiting longest first (unknown times last); the
+        // snoozed by when they wake.
         rows.sort_by_key(|&i| {
             let f = self.flat(i);
-            (std::cmp::Reverse(urgency(f.state)), if f.since == 0 { u64::MAX } else { f.since })
+            match self.agent_group(i) {
+                "snoozed" => (2, std::cmp::Reverse(0), f.wake),
+                group => (
+                    if group == "pinned" { 0 } else { 1 },
+                    std::cmp::Reverse(urgency(f.state)),
+                    if f.since == 0 { u64::MAX } else { f.since },
+                ),
+            }
         });
         rows
     }
@@ -465,6 +590,7 @@ impl App {
                         since: t.since,
                         links: &t.links,
                         merged: &t.merged,
+                        wake: if t.is_snoozed(self.now) { t.snoozed_until } else { 0 },
                     },
                     None => Flat {
                         project: &session.label,
@@ -479,6 +605,7 @@ impl App {
                         since: 0,
                         links: &[],
                         merged: "",
+                        wake: 0,
                     },
                 }
             }
@@ -496,6 +623,7 @@ impl App {
                 since: 0,
                 links: &[],
                 merged: "",
+                wake: 0,
             },
             Item::Task(k) => {
                 let t = &self.tasks[k];
@@ -512,6 +640,7 @@ impl App {
                     since: t.since,
                     links: &t.links,
                     merged: &t.merged,
+                    wake: if t.is_snoozed(self.now) { t.snoozed_until } else { 0 },
                 }
             }
         }
@@ -545,14 +674,45 @@ impl App {
         self.offset = 0;
     }
 
-    /// All: tabs grouped under their sessions. Returns the best match.
+    /// Whether a tab's open task is pinned, which puts it in All's Pinned
+    /// group rather than its session's.
+    fn tab_pinned(&self, t: usize) -> bool {
+        self.tabs[t].task.is_some_and(|k| self.tasks[k].is_pinned())
+    }
+
+    /// All: pinned tabs, then tabs grouped under their sessions. Returns the
+    /// best match.
     fn filter_grouped(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
+        let mut pinned = Vec::new();
+        for t in 0..self.tabs.len() {
+            if !self.tab_pinned(t) || !self.profile_passes(self.tab_work(t)) {
+                continue;
+            }
+            if filtering {
+                let s = self.tabs[t].session;
+                let (name, dir, label) = (self.tabs[t].name.clone(), self.tabs[t].dir.clone(), self.sessions[s].label.clone());
+                let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &label]) else { continue };
+                self.hits.insert(Item::Tab(t), Hits { name: f[0].clone(), second: f[1].clone() });
+                if best.is_none_or(|(b, _)| score > b) {
+                    best = Some((score, Item::Tab(t)));
+                }
+            }
+            pinned.push(Item::Tab(t));
+        }
+        if !pinned.is_empty() {
+            self.rows.push(Item::Status("pinned"));
+            self.rows.extend(pinned);
+        }
         for s in 0..self.sessions.len() {
             let label = self.sessions[s].label.clone();
             let host = self.sessions[s].host.clone();
-            let shown: Vec<usize> =
-                self.sessions[s].tabs.iter().copied().filter(|&t| self.profile_passes(self.tab_work(t))).collect();
+            let shown: Vec<usize> = self.sessions[s]
+                .tabs
+                .iter()
+                .copied()
+                .filter(|&t| !self.tab_pinned(t) && self.profile_passes(self.tab_work(t)))
+                .collect();
             let mut matched = Vec::new();
             for &t in &shown {
                 if !filtering {
@@ -592,7 +752,7 @@ impl App {
     }
 
     /// Agents and Archive: rows in the given order, with status headings
-    /// for matching Agents only. Matches project (or session), name, host
+    /// (and Pinned and Snoozed) for matching Agents only. Matches project (or session), name, host
     /// and the task's work items (`#42`, `card 1041`, `PR #57`), so an
     /// ended task can be found by its issue or card and resumed. Returns
     /// the best match.
@@ -619,14 +779,7 @@ impl App {
                 }
             }
             if self.view == View::Agents {
-                let state = match self.flat(item).state {
-                    "blocked" => "blocked",
-                    "error" => "error",
-                    "done" => "done",
-                    "working" => "working",
-                    "idle" => "idle",
-                    _ => "",
-                };
+                let state = self.agent_group(item);
                 if group != Some(state) {
                     self.rows.push(Item::Status(state));
                     group = Some(state);
@@ -677,11 +830,25 @@ impl App {
 
     // ------------------------------------------------------------ the pick
 
-    /// What Enter would do, as the config's title protocol expects.
+    /// What Enter would do, as the config's title protocol expects. With
+    /// the snooze prompt open, `snooze:UNTIL:` and the row's target, or
+    /// `snooze-invalid` while the text can't be read.
     fn pick(&self) -> String {
         if let Some(c) = &self.chooser {
             return format!("link:{}", hex(c.url()));
         }
+        if let Some(z) = &self.snooze {
+            let row = self.row_pick();
+            return match (&z.until, row.split_once(':')) {
+                (Ok(until), Some((_, target))) => format!("snooze:{until}:{target}"),
+                _ => "snooze-invalid".into(),
+            };
+        }
+        self.row_pick()
+    }
+
+    /// The highlighted row's pick, whatever is open over it.
+    fn row_pick(&self) -> String {
         let Some(item) = self.selected_item() else { return String::new() };
         let task = self.task_of(item);
         let dirty = task.is_some_and(|t| t.dirty > 0);
@@ -724,6 +891,92 @@ impl App {
         true
     }
 
+    /// Pin or unpin the highlighted open task here; whether it could.
+    fn toggle_pin(&mut self) -> bool {
+        if !self.can_pin() {
+            return false;
+        }
+        let Some(k) = self.selected_open_task() else { return false };
+        let (pinned, until) = (!self.tasks[k].pinned, self.tasks[k].snoozed_until);
+        self.moved();
+        self.set_inbox(k, pinned, until);
+        self.refilter();
+        true
+    }
+
+    /// Record a pin or snooze made here, over the data until it agrees.
+    fn set_inbox(&mut self, k: usize, pinned: bool, until: u64) {
+        let t = &mut self.tasks[k];
+        t.pinned = pinned;
+        t.snoozed_until = until;
+        self.pending.insert((t.host.clone(), t.window_id.clone()), (pinned, until, Instant::now()));
+    }
+
+    /// Open the snooze prompt on the highlighted open task in the inbox.
+    fn open_snooze(&mut self) {
+        if !self.can_snooze() {
+            return;
+        }
+        let (Some(k), Some(key)) = (self.selected_open_task(), self.selected_key()) else { return };
+        let t = &self.tasks[k];
+        let current = if t.is_snoozed(self.now) { t.snoozed_until } else { 0 };
+        let mut z = Snooze { key, label: t.label(), current, text: String::new(), until: Ok(0) };
+        z.update(self.now);
+        self.moved();
+        self.snooze = Some(z);
+    }
+
+    /// The prompt's Enter, once the snooze is saved (in the float, the
+    /// config types Enter back after `rex-spawn --act snooze`): show it
+    /// here, moving on from a task just snoozed to the next.
+    fn finish_snooze(&mut self) {
+        let Some(z) = self.snooze.take() else { return };
+        let Ok(until) = z.until else {
+            self.snooze = Some(z);
+            return;
+        };
+        let Some(k) = self.selected_open_task() else { return };
+        let next = match (until, self.selected) {
+            (0, _) | (_, None) => self.selected_key(),
+            (_, Some(at)) => {
+                let after = (at + 1..self.rows.len()).find(|&i| selectable(&self.rows[i]));
+                let before = (0..at).rev().find(|&i| selectable(&self.rows[i]));
+                after.or(before).and_then(|i| self.key_of(self.rows[i]))
+            }
+        };
+        self.set_inbox(k, self.tasks[k].pinned, until);
+        self.refilter_to(next);
+    }
+
+    /// Keys while the snooze prompt is open: type, Enter (see
+    /// finish_snooze) or Escape to close it. False to quit.
+    fn snooze_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let now = self.now;
+        let Some(z) = &mut self.snooze else { return true };
+        match k.code {
+            KeyCode::Char('c') if ctrl => return false,
+            KeyCode::Esc => self.snooze = None,
+            KeyCode::Enter => {
+                self.finish_snooze();
+                return true;
+            }
+            KeyCode::Char('u') if ctrl => z.text.clear(),
+            KeyCode::Char('w') if ctrl => delete_word(&mut z.text),
+            KeyCode::Backspace if alt || ctrl => delete_word(&mut z.text),
+            KeyCode::Backspace => {
+                z.text.pop();
+            }
+            KeyCode::Char(c) if !ctrl && !alt => z.text.push(c),
+            _ => return true,
+        }
+        if let Some(z) = &mut self.snooze {
+            z.update(now);
+        }
+        true
+    }
+
     /// Keys while the chooser is open: move, or Escape to close it. Enter
     /// never gets here (the config's mode, or standalone_key, opens the
     /// pick). False to quit.
@@ -756,6 +1009,9 @@ impl App {
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
+        if self.snooze.is_some() {
+            return self.snooze_key(k);
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let page = (self.list_area.height as isize - 2).max(1);
@@ -780,6 +1036,12 @@ impl App {
             KeyCode::Char('l') if ctrl => {
                 self.open_chooser();
             }
+            // In the float, the config types ctrl-t back once it has
+            // pinned or unpinned the task.
+            KeyCode::Char('t') if ctrl => {
+                self.toggle_pin();
+            }
+            KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             KeyCode::Char('u') if ctrl => {
@@ -850,7 +1112,51 @@ impl App {
         draw::rule(f, &self.p, rule);
         self.draw_list(f, body);
         self.draw_chooser(f, body);
+        self.draw_snooze(f, body);
         self.draw_footer(f, footer);
+    }
+
+    /// The ctrl-s prompt, when open: a small box over the list with the
+    /// typed text and when it means, or why it can't be read.
+    fn draw_snooze(&self, f: &mut Frame, area: Rect) {
+        let Some(z) = &self.snooze else { return };
+        let p = &self.p;
+        let w = 60.min(area.width);
+        let h = 4.min(area.height);
+        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        f.render_widget(Clear, r);
+        let title = format!(" Snooze {} ", z.label);
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(p.iris))
+            .style(Style::new().bg(p.base))
+            .title(Span::styled(title, Style::new().fg(p.text)));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        if inner.height == 0 {
+            return;
+        }
+        let input = Line::from(vec![
+            Span::styled(" until ", Style::new().fg(p.muted)),
+            Span::styled(z.text.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+            Span::styled("▏", Style::new().fg(p.iris)),
+        ]);
+        f.render_widget(input, Rect { height: 1, ..inner });
+        if inner.height < 2 {
+            return;
+        }
+        let row = Rect { y: inner.y + 1, height: 1, ..inner };
+        let line = match (&z.until, z.text.trim().is_empty()) {
+            (Ok(0), _) => Line::from(vec![
+                Span::styled(format!(" Snoozed until {} · ", snooze::describe(z.current, self.now)), Style::new().fg(p.muted)),
+                Span::styled("⏎", Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+                Span::styled(" wakes it", Style::new().fg(p.muted)),
+            ]),
+            (Ok(until), _) => Line::styled(format!(" {}", snooze::describe(*until, self.now)), Style::new().fg(p.pine)),
+            (Err(_), true) => Line::styled(format!(" Try {}", snooze::EXAMPLES), Style::new().fg(p.muted)),
+            (Err(e), false) => Line::styled(format!(" {e}"), Style::new().fg(p.love)),
+        };
+        f.render_widget(line, row);
     }
 
     /// The ctrl-l chooser, when open: a small box over the list, one link a
@@ -949,7 +1255,10 @@ impl App {
         if self.view == View::Agents {
             // Counts by what needs attention.
             let count = |st: &str| {
-                self.rows.iter().filter(|&&i| selectable(&i) && self.flat(i).state == st).count()
+                self.rows
+                    .iter()
+                    .filter(|&&i| selectable(&i) && self.flat(i).state == st && self.agent_group(i) != "snoozed")
+                    .count()
             };
             for (n, label, color) in [
                 (count("blocked"), "waiting", p.gold),
@@ -1031,6 +1340,8 @@ impl App {
             "done" => ("✓", "Done", p.pine),
             "working" => ("●", "Working", p.foam),
             "idle" => ("·", "Idle", p.muted),
+            "pinned" => (ICON_PIN, "Pinned", p.iris),
+            "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
             _ => ("?", "No status", p.muted),
         };
         let heading = format!(" {glyph} {label} ");
@@ -1290,7 +1601,12 @@ impl App {
         }
         let chip_fg = if t.work { p.gold } else { p.subtle };
         right.extend(pill(vec![Span::styled(t.host.to_string(), Style::new().fg(chip_fg))], p.surface, bg));
-        let when = if t.since > 0 { format!(" {}", age(self.now.saturating_sub(t.since))) } else { String::new() };
+        // A snoozed task: how long until it wakes.
+        let when = match (t.wake, t.since) {
+            (wake, _) if wake > 0 => format!(" {}", age(wake.saturating_sub(self.now))),
+            (_, since) if since > 0 => format!(" {}", age(self.now.saturating_sub(since))),
+            _ => String::new(),
+        };
         right.push(Span::styled(format!("  {verb:>9}{when:>4} "), Style::new().fg(p.muted).bg(bg)));
         let w = right.iter().map(|s| str_width(&s.content)).sum();
         (right, w)
@@ -1316,6 +1632,7 @@ impl App {
             (None, "idle") => ("·", p.muted, "idle"),
             (None, _) => ("?", p.muted, "no status"),
         };
+        let verb = if t.wake > 0 { "snoozed" } else { verb };
         // Right side first, so the columns and message get what is left.
         let (right, right_w) = self.right_spans(&t, bg, verb, r.width);
         let mut left = vec![edge, Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg))];
@@ -1350,6 +1667,16 @@ impl App {
         if let Some((msg, failed)) = &self.note {
             let style = Style::new().fg(if *failed { p.love } else { p.pine });
             f.render_widget(Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]), area);
+            return;
+        }
+        if let Some(z) = &self.snooze {
+            let enter = match z.until {
+                Ok(0) => "wake",
+                _ => "snooze",
+            };
+            let keys = [("⏎", enter, p.subtle), ("⌃U", "clear", p.subtle), ("esc", "cancel", p.subtle)];
+            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            f.render_widget(Line::from(spans), area);
             return;
         }
         if self.chooser.is_some() {
@@ -1406,6 +1733,12 @@ impl App {
             [] => {}
             [link] => keys.push(("⌃L", if link.kind == "pr" { "open PR" } else { "open link" })),
             _ => keys.push(("⌃L", "links")),
+        }
+        if self.can_pin() {
+            keys.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
+        }
+        if self.can_snooze() {
+            keys.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
         }
         keys.push(("⇥", self.view.next(false).name()));
         keys.push(("⌃O", self.profile.next().name()));
@@ -1474,6 +1807,45 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let review = matches!(k.code, KeyCode::Char('r') if ctrl);
         let open = matches!(k.code, KeyCode::Char('l') if ctrl);
+        // The snooze prompt's Enter saves the snooze; other keys edit it.
+        if let Some(z) = &self.snooze {
+            // Unreadable text: Enter does nothing.
+            let Ok(until) = z.until else { return matches!(k.code, KeyCode::Enter) };
+            if !matches!(k.code, KeyCode::Enter) {
+                return false;
+            }
+            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            let label = z.label.clone();
+            self.note = Some(match standalone::snooze(&pick, until) {
+                Ok(msg) => {
+                    self.finish_snooze();
+                    let msg = if until > 0 { format!("{msg} until {}", snooze::describe(until, self.now)) } else { msg };
+                    (msg, false)
+                }
+                Err(e) => {
+                    self.snooze = None;
+                    (format!("{label}: {e}"), true)
+                }
+            });
+            self.refetch();
+            return true;
+        }
+        // Pin or unpin in the registry, then here.
+        if matches!(k.code, KeyCode::Char('t') if ctrl) {
+            if !self.can_pin() {
+                return true;
+            }
+            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            self.note = Some(match standalone::pin(&pick) {
+                Ok(msg) => {
+                    self.toggle_pin();
+                    (msg, false)
+                }
+                Err(e) => (e, true),
+            });
+            self.refetch();
+            return true;
+        }
         // The chooser's pick opens on Enter (or ctrl-l again); other keys
         // move in it.
         if let Some(c) = &self.chooser {
@@ -1653,6 +2025,131 @@ mod tests {
         assert_eq!(app.rows[at - 1], Item::Status("working"));
     }
 
+    fn inbox_with_lifecycle() -> App {
+        let mut app = App::new((String::new(), String::new()), View::Agents);
+        app.follow = false;
+        app.now = 1000;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\ta\tworking\tbusy\n",
+                "T\tb\tblocked\tasks\n",
+                "T\tc\tdone\tdone\n",
+                "T\td\tidle\tdone\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"pinned", "pinned":true},
+                {"session_id":"s", "window_id":"b", "name":"later", "snoozed_until":5000},
+                {"session_id":"s", "window_id":"c", "name":"woke", "snoozed_until":500},
+                {"session_id":"s", "window_id":"d", "name":"both", "pinned":true, "snoozed_until":4000}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        app
+    }
+
+    #[test]
+    fn pinned_tasks_lead_and_snoozed_ones_trail_the_inbox() {
+        let mut app = inbox_with_lifecycle();
+        assert_eq!(app.rows, vec![
+            Item::Status("pinned"), Item::Tab(0),
+            Item::Status("done"), Item::Tab(2),
+            Item::Status("snoozed"), Item::Tab(3), Item::Tab(1),
+        ]);
+        // A snoozed blocked task isn't counted as waiting.
+        let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
+        terminal.draw(|f| app.draw_search(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(!text.contains("waiting") && text.contains("1 done"), "{text}");
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Pinned") && text.contains("Snoozed") && text.contains("snoozed  1h"), "{text}");
+    }
+
+    #[test]
+    fn pinned_tabs_get_their_own_group_in_all_tabs() {
+        let mut app = inbox_with_lifecycle();
+        app.set_view(View::All);
+        assert_eq!(app.rows, vec![
+            Item::Status("pinned"), Item::Tab(0), Item::Tab(3),
+            Item::Session(0), Item::Tab(1), Item::Tab(2),
+        ]);
+        app.query = "demo".into();
+        app.refilter();
+        assert!(app.rows.contains(&Item::Tab(0)) && app.rows.contains(&Item::Tab(1)));
+    }
+
+    #[test]
+    fn ctrl_t_pins_and_unpins_and_holds_over_stale_data() {
+        let mut app = inbox_with_lifecycle();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.key(ctrl('t'));
+        assert!(app.tasks[2].pinned);
+        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
+        // Done ranks above working, pinned or not.
+        assert_eq!(&app.rows[..3], &[Item::Status("pinned"), Item::Tab(2), Item::Tab(0)]);
+        // Data read before the pin was saved doesn't undo it ...
+        app.deliver(|app| app.tasks[2].pinned = false);
+        assert!(app.tasks[2].pinned);
+        // ... and once it agrees, it is the data's again.
+        app.deliver(|app| app.tasks[2].pinned = true);
+        assert!(app.pending.is_empty());
+        app.key(ctrl('t'));
+        assert!(!app.tasks[2].pinned);
+        // Not in the archive.
+        app.set_view(View::Archive);
+        assert!(!app.can_pin());
+    }
+
+    #[test]
+    fn ctrl_s_snoozes_until_a_typed_time_and_wakes() {
+        let mut app = inbox_with_lifecycle();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        let target = app.row_pick().split_once(':').unwrap().1.to_string();
+        app.key(ctrl('s'));
+        assert!(app.snooze.is_some());
+        assert_eq!(app.pick(), "snooze-invalid");
+        for c in "2x".chars() {
+            app.key(plain(KeyCode::Char(c)));
+        }
+        assert_eq!(app.pick(), "snooze-invalid");
+        // Enter on unreadable text does nothing; the search is untouched.
+        app.key(plain(KeyCode::Enter));
+        assert!(app.snooze.is_some() && app.query.is_empty());
+        app.key(plain(KeyCode::Backspace));
+        app.key(plain(KeyCode::Char('h')));
+        assert_eq!(app.pick(), format!("snooze:{}:{target}", 1000 + 7200));
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Snooze /woke") && text.contains("until 2h"), "{text}");
+        app.key(plain(KeyCode::Enter));
+        assert!(app.snooze.is_none());
+        assert_eq!(app.tasks[2].snoozed_until, 8200);
+        assert_eq!(app.rows.last(), Some(&Item::Tab(2)));
+        // The highlight moved on to the row that followed.
+        assert_eq!(app.selected_item(), Some(Item::Tab(3)));
+        // On a snoozed task, an empty prompt wakes it.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.key(ctrl('s'));
+        assert_eq!(app.pick(), format!("snooze:0:{target}"));
+        app.key(plain(KeyCode::Enter));
+        assert_eq!(app.tasks[2].snoozed_until, 0);
+        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
+        // Escape closes the prompt; only the inbox snoozes.
+        app.key(ctrl('s'));
+        app.key(plain(KeyCode::Esc));
+        assert!(app.snooze.is_none());
+        app.set_view(View::All);
+        app.key(ctrl('s'));
+        assert!(app.snooze.is_none());
+    }
+
     #[test]
     fn failed_hosts_keep_the_other_rows_and_show_in_the_header() {
         let mut app = App::new((String::new(), String::new()), View::All);
@@ -1799,13 +2296,20 @@ and the body: KIND rows (or error and a message), live and tasks
 
 Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
 tabs and tasks itself, from switchyard-server as they change when it runs,
-else directly every few seconds, and acts on Enter, ctrl-r and ctrl-l (open
-the task's work item, or choose among several), staying open until Escape or ctrl-c.";
+else directly every few seconds, and acts on Enter, ctrl-r, ctrl-l (open
+the task's work item, or choose among several), ctrl-t (pin or unpin a task)
+and ctrl-s (snooze or wake a task in the inbox), staying open until Escape
+or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.take_fetched();
+        let before = app.now;
         app.now = now();
+        // A snooze ran out: back to its group.
+        if app.tasks.iter().any(|t| t.snoozed_until > before && t.snoozed_until <= app.now) {
+            app.refilter();
+        }
         term.draw(|f| app.draw(f))?;
         app.report()?;
         let animate = matches!(app.load, Load::Waiting)
@@ -1818,7 +2322,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         match event::read()? {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if app.standalone {
-                    if k.code == KeyCode::Esc && app.chooser.is_none() {
+                    if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() {
                         return Ok(());
                     }
                     if app.standalone_key(k, term) {
