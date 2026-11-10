@@ -23,7 +23,11 @@
 -- new tab and jumps there (resume), or runs an archive armed with ctrl+x in
 -- the float (archive, force-archive; for ask, a dirty worktree, it types
 -- ctrl+x back so the float asks "are you sure"); ctrl+r reviews a task, and
--- ctrl+l opens its main work item (`rex-spawn --act link`).
+-- ctrl+l opens its main work item (`rex-spawn --act link`). A task with
+-- several links adds their count, ACTION:TARGET/SESSION/WINDOW/N, and
+-- ctrl+l types ctrl+l back so the float opens its link chooser; while that
+-- is open the title is rex-tab-picker:link:URL (hex-encoded), Enter or
+-- ctrl+l opens URL and Escape types Escape back to close the chooser.
 -- TARGET is "-" for this host or the hex-encoded host label. See
 -- ../../crates/tab-picker/src/main.rs and
 -- ../../crates/core/src/actions.rs.
@@ -168,9 +172,17 @@ rex.action{
   run   = function(ctx, args) open_picker(ctx, "agents") end,
 }
 
+local function float_title(ctx, block_id)
+  local t = rex.block.call("com.superlogical.terminal", "title", {
+    session_id = ctx.session_id, block_id = block_id,
+  })
+  return (t and t.title) or ""
+end
+
 -- The float's pick: action, host (the config host's label for "-"),
--- session and window. Keys pressed with the float not focused fall through
--- to the pane.
+-- session, window and how many links ctrl+l chooses from; or, with the
+-- link chooser open, action "link" and its url. Keys pressed with the float
+-- not focused fall through to the pane.
 local function read_pick(ctx, key)
   local _, block_id = util.find_float(ctx, label)
   if block_id == nil or block_id ~= ctx.block_id then
@@ -178,15 +190,31 @@ local function read_pick(ctx, key)
     rex.client.queue("pane.send_key", { key = key })
     return nil
   end
-  local pick = rex.block.call("com.superlogical.terminal", "title", {
-    session_id = ctx.session_id, block_id = block_id,
-  })
-  local action, target, session_id, window_id = ((pick and pick.title) or "")
-    :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)$")
+  local title = float_title(ctx, block_id)
+  local url = title:match("^rex%-tab%-picker:link:(%x+)$")
+  if url ~= nil then return { action = "link", url = util.unhex(url), float = block_id } end
+  local action, target, session_id, window_id, links = title
+    :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)/?(%d*)$")
   if action == nil then return nil end
   local here = target == "-"
   return { action = action, host = here and host_label() or util.unhex(target), here = here,
-    session_id = session_id, window_id = window_id, float = block_id }
+    session_id = session_id, window_id = window_id, links = tonumber(links) or 1, float = block_id }
+end
+
+-- Type keys into the float, for the picker to act on.
+local function type_into(ctx, block_id, data)
+  rex.block.call("com.superlogical.terminal", "write", {
+    session_id = ctx.session_id, block_id = block_id, data = data,
+  })
+end
+
+-- The Rex app runs on this config host, so a browser opened here opens
+-- where John is; Rex has no client action for a URL.
+local function open_url(url)
+  local r, err = rex.exec({ "sh", "-c", 'if command -v open >/dev/null 2>&1; then exec open "$1"; else exec xdg-open "$1"; fi',
+    "sh", url }, { env = util.cli_env() })
+  if r == nil then error(err, 0) end
+  if not r.ok then error("can't open " .. url .. ": " .. (r.stderr:gsub("%s+$", "")), 0) end
 end
 
 local function jump(pick)
@@ -223,13 +251,10 @@ rex.action{
     if pick == nil then return end
     -- A dirty worktree: keep the float open and type ctrl-x into it, which
     -- moves it on to "are you sure"; the next Enter answers force-archive.
-    if pick.action == "ask" then
-      rex.block.call("com.superlogical.terminal", "write", {
-        session_id = ctx.session_id, block_id = pick.float, data = "\24",
-      })
-      return
-    end
+    if pick.action == "ask" then return type_into(ctx, pick.float, "\24") end
     close_picker(ctx)
+    -- The link chooser's pick.
+    if pick.action == "link" then return open_url(pick.url) end
     if pick.action == "archive" or pick.action == "force-archive" then return act(pick.action, pick) end
     if pick.action == "resume" then return resume(pick) end
     jump(pick)
@@ -250,10 +275,9 @@ rex.action{
   end,
 }
 
--- Open the highlighted task's main work item (its PR, else an issue, card
--- or commit; see ../../crates/core/src/links.rs). The Rex app runs on this
--- config host, so a browser opened here opens where John is; Rex has no
--- client action for a URL.
+-- Open the highlighted task's work item: its only one (its PR, else an
+-- issue, card or commit; see ../../crates/core/src/links.rs), or, with
+-- several, type ctrl+l back so the float offers a chooser.
 rex.action{
   name  = "tab_picker_open_link",
   title = "Open Picked Task's Work Item",
@@ -261,19 +285,29 @@ rex.action{
     local pick = read_pick(ctx, "ctrl+l")
     -- Only task rows have work items.
     if pick == nil or pick.action == "go" then return end
+    if pick.action == "link" then
+      close_picker(ctx)
+      return open_url(pick.url)
+    end
+    if pick.links > 1 then return type_into(ctx, pick.float, "\12") end
     local url = (act("link", pick):gsub("%s+$", ""))
     close_picker(ctx)
-    local r, err = rex.exec({ "sh", "-c", 'if command -v open >/dev/null 2>&1; then exec open "$1"; else exec xdg-open "$1"; fi',
-      "sh", url }, { env = util.cli_env() })
-    if r == nil then error(err, 0) end
-    if not r.ok then error("can't open " .. url .. ": " .. (r.stderr:gsub("%s+$", "")), 0) end
+    open_url(url)
   end,
 }
 
+-- Escape closes the float, or with the link chooser open, types Escape
+-- back so the float closes just the chooser.
 rex.action{
   name  = "tab_picker_cancel",
   title = "Close Tab Picker",
-  run   = function(ctx, args) close_picker(ctx) end,
+  run   = function(ctx, args)
+    local _, block_id = util.find_float(ctx, label)
+    if block_id ~= nil and float_title(ctx, block_id):match("^rex%-tab%-picker:link:") then
+      return type_into(ctx, block_id, "\27")
+    end
+    close_picker(ctx)
+  end,
 }
 
 rex.bind("cmd+k", "tab_picker")

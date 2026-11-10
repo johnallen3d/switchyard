@@ -37,7 +37,11 @@
 //! no listed tab use the registry host. The config's mode turns Enter,
 //! ctrl-r and Escape into the actions, so in the float this program never
 //! talks to Rex. ctrl-l (bound by the config too) opens the highlighted
-//! task's main work item; task rows show their links as badges.
+//! task's work item; task rows show their links as badges grouped by kind.
+//! A task with several links adds their count (`.../WINDOW/N`), and the
+//! config types ctrl-l back to open a chooser over them (PRs, cards, then
+//! issues). While it is open the pick is `link:URL` (URL hex-encoded): the
+//! config opens it on Enter or ctrl-l and types Escape back to close it.
 //!
 //! Run bare from a shell (`rex-tab-picker`, or `rex-inbox` for the Agents
 //! view), it works without the float: it fetches the data and acts on its
@@ -51,13 +55,17 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
-use model::{Link, Session, State, Tab, Task, age, failed_hosts, link, now, parse_rows, parse_tasks, urgency, work_dir};
+use model::{
+    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, link, now, parse_rows, parse_tasks,
+    urgency, work_dir,
+};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::{DefaultTerminal, Frame};
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
@@ -185,6 +193,24 @@ struct Flat<'a> {
 
 type Key = (String, String);
 
+/// The ctrl-l chooser over a task's links (see model's `chooser_links`),
+/// open while the task has several.
+struct Chooser {
+    links: Vec<Link>,
+    selected: usize,
+}
+
+impl Chooser {
+    fn url(&self) -> &str {
+        &self.links[self.selected].url
+    }
+}
+
+/// How wide a row's work-item badges may be in a list `width` wide.
+fn badge_budget(width: u16) -> usize {
+    (width as usize / 3).clamp(16, 48)
+}
+
 // ---------------------------------------------------------------- app
 
 struct App {
@@ -208,6 +234,8 @@ struct App {
     offset: usize,
     /// What ctrl-x has armed for the selected task; Enter confirms it.
     armed: Armed,
+    /// The open ctrl-l link chooser; Enter opens its pick, Escape closes it.
+    chooser: Option<Chooser>,
     list_area: Rect,
     title: Title,
     started: Instant,
@@ -245,6 +273,7 @@ impl App {
             selected: None,
             offset: 0,
             armed: Armed::No,
+            chooser: None,
             list_area: Rect::default(),
             title: Title::new("rex-tab-picker"),
             started: Instant::now(),
@@ -650,6 +679,9 @@ impl App {
 
     /// What Enter would do, as the config's title protocol expects.
     fn pick(&self) -> String {
+        if let Some(c) = &self.chooser {
+            return format!("link:{}", hex(c.url()));
+        }
         let Some(item) = self.selected_item() else { return String::new() };
         let task = self.task_of(item);
         let dirty = task.is_some_and(|t| t.dirty > 0);
@@ -663,18 +695,54 @@ impl App {
                 None => "go",
             },
         };
+        // Several links: ctrl-l opens the chooser rather than the main one.
+        let links = task.map_or(0, |t| chooser_links(&t.links).len());
+        let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
             Item::Session(_) | Item::Status(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
-                format!("{action}:{}/{}/{}", s.target, s.id, tab.window_id)
+                format!("{action}:{}/{}/{}{more}", s.target, s.id, tab.window_id)
             }
             Item::Task(k) => {
                 let t = &self.tasks[k];
-                format!("{action}:{}/{}/{}", hex(&t.host), t.session_id, t.window_id)
+                format!("{action}:{}/{}/{}{more}", hex(&t.host), t.session_id, t.window_id)
             }
         }
+    }
+
+    /// Open the chooser on the selected task's links when it has several;
+    /// whether it opened.
+    fn open_chooser(&mut self) -> bool {
+        let links = self.selected_task().map(|t| chooser_links(&t.links)).unwrap_or_default();
+        if links.len() < 2 {
+            return false;
+        }
+        self.armed = Armed::No;
+        self.chooser = Some(Chooser { links, selected: 0 });
+        true
+    }
+
+    /// Keys while the chooser is open: move, or Escape to close it. Enter
+    /// never gets here (the config's mode, or standalone_key, opens the
+    /// pick). False to quit.
+    fn chooser_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(c) = &mut self.chooser else { return true };
+        let last = c.links.len() - 1;
+        match k.code {
+            KeyCode::Char('c') if ctrl => return false,
+            KeyCode::Esc => self.chooser = None,
+            KeyCode::Up | KeyCode::Char('k') => c.selected = c.selected.saturating_sub(1),
+            KeyCode::Char('p') if ctrl => c.selected = c.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => c.selected = (c.selected + 1).min(last),
+            KeyCode::Char('n') if ctrl => c.selected = (c.selected + 1).min(last),
+            KeyCode::Home => c.selected = 0,
+            KeyCode::End => c.selected = last,
+            _ => {}
+        }
+        true
     }
 
     fn report(&mut self) -> io::Result<()> {
@@ -685,6 +753,9 @@ impl App {
     // ------------------------------------------------------------ keys
 
     fn key(&mut self, k: KeyEvent) -> bool {
+        if self.chooser.is_some() {
+            return self.chooser_key(k);
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let page = (self.list_area.height as isize - 2).max(1);
@@ -704,6 +775,11 @@ impl App {
         self.armed = Armed::No;
         match k.code {
             KeyCode::Char('c') if ctrl => return false,
+            // In the float, the config types ctrl-l back for a task with
+            // several links.
+            KeyCode::Char('l') if ctrl => {
+                self.open_chooser();
+            }
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             KeyCode::Char('u') if ctrl => {
@@ -773,7 +849,57 @@ impl App {
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
         self.draw_list(f, body);
+        self.draw_chooser(f, body);
         self.draw_footer(f, footer);
+    }
+
+    /// The ctrl-l chooser, when open: a small box over the list, one link a
+    /// line with its state and URL.
+    fn draw_chooser(&self, f: &mut Frame, area: Rect) {
+        let Some(c) = &self.chooser else { return };
+        let p = &self.p;
+        let want = c
+            .links
+            .iter()
+            .map(|l| str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(s) + 1) + str_width(&l.url) + 6)
+            .max()
+            .unwrap_or(0);
+        let w = (want as u16 + 2).min(area.width);
+        let h = (c.links.len() as u16 + 2).min(area.height);
+        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        f.render_widget(Clear, r);
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(p.iris))
+            .style(Style::new().bg(p.base))
+            .title(Span::styled(" Open link ", Style::new().fg(p.text)));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        for (i, l) in c.links.iter().enumerate().take(inner.height as usize) {
+            let (short, state, url) = (l.short(), l.badge_state(), &l.url);
+            let selected = i == c.selected;
+            let bg = if selected { p.overlay } else { p.base };
+            let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+            f.buffer_mut().set_style(row, Style::new().bg(bg));
+            let edge = if selected { Span::styled("▎", Style::new().fg(p.iris).bg(bg)) } else { Span::styled(" ", Style::new().bg(bg)) };
+            let mut style = Style::new().fg(p.text).bg(bg);
+            if selected {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            let mut spans = vec![edge, Span::styled(short, style)];
+            if let Some((text, tone)) = state {
+                let fg = match tone {
+                    Tone::Merged => p.iris,
+                    Tone::Pass => p.pine,
+                    Tone::Fail => p.love,
+                    Tone::Pending => p.gold,
+                    Tone::Ref | Tone::Muted => p.muted,
+                };
+                spans.push(Span::styled(format!(" {text}"), Style::new().fg(fg).bg(bg)));
+            }
+            spans.push(Span::styled(format!("  {url}"), Style::new().fg(p.muted).bg(bg)));
+            f.render_widget(Line::from(spans), row);
+        }
     }
 
     /// The active filters, for the frame's title.
@@ -873,7 +999,7 @@ impl App {
             (0, 0)
         } else {
             let shown = || self.rows.iter().filter(|i| selectable(i)).map(|&i| self.flat(i));
-            let right_w = shown().map(|t| self.right_spans(&t, self.p.base, "").1).max().unwrap_or(0);
+            let right_w = shown().map(|t| self.right_spans(&t, self.p.base, "", list.width).1).max().unwrap_or(0);
             let room = (list.width as usize).saturating_sub(3 + right_w + 1);
             let proj_w = shown().map(|t| str_width(t.project)).max().unwrap_or(0).min(room / 4);
             let name_w =
@@ -1122,37 +1248,29 @@ impl App {
         }
     }
 
-    /// A flat row's work items, such as `#42 · PR #57 ✓ merged`: at most
-    /// two links (PRs first) and a count of the rest, or `merged` for a
-    /// branch in the default branch with no PR. Empty for none.
-    fn badge_spans(&self, t: &Flat, bg: Color) -> Vec<Span<'static>> {
+    /// A flat row's work items, grouped by kind within `budget` columns
+    /// (see model's `badges`), such as `PR #57 ✓ merged · cards 1041 1042`,
+    /// or `merged` for a branch in the default branch with no PR. Empty for
+    /// none.
+    fn badge_spans(&self, t: &Flat, bg: Color, budget: usize) -> Vec<Span<'static>> {
         let p = &self.p;
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let dot = || Span::styled(" · ", Style::new().fg(p.muted).bg(bg));
-        for link in t.links.iter().take(2) {
-            if !spans.is_empty() {
-                spans.push(dot());
-            }
-            spans.push(Span::styled(link.short(), Style::new().fg(p.subtle).bg(bg)));
-            let state = match (link.state.as_str(), link.checks.as_str()) {
-                ("merged", _) => Some(("✓ merged", p.iris)),
-                ("closed", _) => Some(("closed", p.muted)),
-                ("draft", _) => Some(("draft", p.muted)),
-                (_, "pass") => Some(("✓", p.pine)),
-                (_, "fail") => Some(("✗", p.love)),
-                (_, "pending") => Some(("●", p.gold)),
-                _ => None,
-            };
-            if let Some((text, color)) = state {
-                spans.push(Span::styled(format!(" {text}"), Style::new().fg(color).bg(bg)));
-            }
-        }
-        if t.links.len() > 2 {
-            spans.push(Span::styled(format!(" +{}", t.links.len() - 2), Style::new().fg(p.muted).bg(bg)));
-        }
+        let mut spans: Vec<Span<'static>> = badges(t.links, budget)
+            .into_iter()
+            .map(|(text, tone)| {
+                let fg = match tone {
+                    Tone::Ref => p.subtle,
+                    Tone::Muted => p.muted,
+                    Tone::Merged => p.iris,
+                    Tone::Pass => p.pine,
+                    Tone::Fail => p.love,
+                    Tone::Pending => p.gold,
+                };
+                Span::styled(text, Style::new().fg(fg).bg(bg))
+            })
+            .collect();
         if t.merged == "merged" && !t.links.iter().any(|l| l.kind == "pr") {
             if !spans.is_empty() {
-                spans.push(dot());
+                spans.push(Span::styled(" · ", Style::new().fg(p.muted).bg(bg)));
             }
             spans.push(Span::styled("merged", Style::new().fg(p.iris).bg(bg)));
         }
@@ -1164,9 +1282,9 @@ impl App {
 
     /// The right side of a flat row, [work items] [dirty] [host chip]
     /// [state age], and its width.
-    fn right_spans(&self, t: &Flat, bg: Color, verb: &str) -> (Vec<Span<'static>>, usize) {
+    fn right_spans(&self, t: &Flat, bg: Color, verb: &str, width: u16) -> (Vec<Span<'static>>, usize) {
         let p = &self.p;
-        let mut right: Vec<Span> = self.badge_spans(t, bg);
+        let mut right: Vec<Span> = self.badge_spans(t, bg, badge_budget(width));
         if t.dirty > 0 {
             right.push(Span::styled(format!("✎{}  ", t.dirty), Style::new().fg(p.gold).bg(bg)));
         }
@@ -1199,7 +1317,7 @@ impl App {
             (None, _) => ("?", p.muted, "no status"),
         };
         // Right side first, so the columns and message get what is left.
-        let (right, right_w) = self.right_spans(&t, bg, verb);
+        let (right, right_w) = self.right_spans(&t, bg, verb, r.width);
         let mut left = vec![edge, Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg))];
         let room = (r.width as usize).saturating_sub(3 + right_w + 1);
         let (proj_w, name_w) = cols;
@@ -1232,6 +1350,12 @@ impl App {
         if let Some((msg, failed)) = &self.note {
             let style = Style::new().fg(if *failed { p.love } else { p.pine });
             f.render_widget(Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]), area);
+            return;
+        }
+        if self.chooser.is_some() {
+            let keys = [("⏎", "open", p.subtle), ("↑↓", "move", p.subtle), ("esc", "cancel", p.subtle)];
+            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            f.render_widget(Line::from(spans), area);
             return;
         }
         if let (true, Some(t)) = (self.armed != Armed::No, self.selected_task()) {
@@ -1276,10 +1400,12 @@ impl App {
             Some(_) => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive")],
             None => vec![("⏎", "go")],
         };
-        // ⌃L opens the task's main work item (core's `links::primary`: the
-        // first kind with a URL, PRs first).
-        if let Some(link) = task.and_then(|t| t.links.iter().find(|l| !l.url.is_empty())) {
-            keys.push(("⌃L", if link.kind == "pr" { "open PR" } else { "open link" }));
+        // ⌃L opens the task's only work item, or a chooser over several.
+        let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
+        match links.as_slice() {
+            [] => {}
+            [link] => keys.push(("⌃L", if link.kind == "pr" { "open PR" } else { "open link" })),
+            _ => keys.push(("⌃L", "links")),
         }
         keys.push(("⇥", self.view.next(false).name()));
         keys.push(("⌃O", self.profile.next().name()));
@@ -1348,14 +1474,32 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let review = matches!(k.code, KeyCode::Char('r') if ctrl);
         let open = matches!(k.code, KeyCode::Char('l') if ctrl);
+        // The chooser's pick opens on Enter (or ctrl-l again); other keys
+        // move in it.
+        if let Some(c) = &self.chooser {
+            if !open && !matches!(k.code, KeyCode::Enter) {
+                return false;
+            }
+            let url = c.url().to_string();
+            self.chooser = None;
+            self.note = Some(match standalone::open_url(&url) {
+                Ok(()) => (format!("opened {url}"), false),
+                Err(e) => (e, true),
+            });
+            return true;
+        }
         if !review && !open && !matches!(k.code, KeyCode::Enter) {
             return false;
         }
         self.note = None;
         let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
         let label = self.selected_label();
-        // Open the task's main work item; nothing to refresh after.
+        // Open the task's only work item, or the chooser over several;
+        // nothing to refresh after.
         if open {
+            if self.open_chooser() {
+                return true;
+            }
             if self.selected_task().is_some() {
                 self.note = Some(match standalone::open_link(&pick) {
                     Ok(url) => (format!("opened {url}"), false),
@@ -1540,12 +1684,61 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 6)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("PR #57 ✓ merged · #42"), "{text}");
+        assert!(text.contains("PR #57 ✓ merged · issue #42"), "{text}");
         assert!(text.contains("merged"));
         let mut terminal = Terminal::new(TestBackend::new(160, 3)).unwrap();
         terminal.draw(|f| app.draw_footer(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("open PR"), "{text}");
+        assert!(text.contains("⌃L links"), "{text}");
+    }
+
+    #[test]
+    fn ctrl_l_chooses_among_several_links_prs_first() {
+        let mut app = App::new((String::new(), String::new()), View::Agents);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"many", "status":"done", "links":[
+                    {"kind":"issue","system":"github","ref":"o/r#42","url":"https://i"},
+                    {"kind":"card","system":"fizzy","ref":"1041","url":"https://c"},
+                    {"kind":"pr","system":"github","ref":"o/r#57","url":"https://p"}]},
+                {"session_id":"s", "window_id":"b", "name":"one", "status":"idle", "links":[
+                    {"kind":"card","system":"fizzy","ref":"1042","url":"https://c2"}]}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
+        // One link: no chooser, and the pick carries no count.
+        assert_eq!(app.pick(), format!("task:{}/s/b", hex("")));
+        app.key(ctrl('l'));
+        assert!(app.chooser.is_none());
+        app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
+        assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
+        assert_eq!(standalone::parse_pick(&app.pick()).unwrap().window, "a");
+        app.key(ctrl('l'));
+        // The PR first and selected, so ctrl-l then Enter opens it.
+        assert_eq!(app.pick(), format!("link:{}", hex("https://p")));
+        app.key(plain(KeyCode::Char('j')));
+        assert_eq!(app.pick(), format!("link:{}", hex("https://c")));
+        app.key(plain(KeyCode::Down));
+        app.key(plain(KeyCode::Down));
+        assert_eq!(app.pick(), format!("link:{}", hex("https://i")));
+        app.key(plain(KeyCode::Up));
+        app.key(plain(KeyCode::Char('k')));
+        app.key(plain(KeyCode::Char('k')));
+        assert_eq!(app.pick(), format!("link:{}", hex("https://p")));
+        // Other keys don't type into the search.
+        app.key(plain(KeyCode::Char('x')));
+        assert!(app.query.is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Open link") && text.contains("card 1041") && text.contains("cancel"), "{text}");
+        app.key(plain(KeyCode::Esc));
+        assert!(app.chooser.is_none());
+        assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
     }
 
     #[test]
@@ -1607,7 +1800,7 @@ and the body: KIND rows (or error and a message), live and tasks
 Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
 tabs and tasks itself, from switchyard-server as they change when it runs,
 else directly every few seconds, and acts on Enter, ctrl-r and ctrl-l (open
-the task's work item), staying open until Escape or ctrl-c.";
+the task's work item, or choose among several), staying open until Escape or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
@@ -1625,7 +1818,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         match event::read()? {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if app.standalone {
-                    if k.code == KeyCode::Esc {
+                    if k.code == KeyCode::Esc && app.chooser.is_none() {
                         return Ok(());
                     }
                     if app.standalone_key(k, term) {

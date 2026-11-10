@@ -231,7 +231,9 @@ pub struct Pick {
 
 pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (action, target) = pick.split_once(':')?;
-    let mut parts = target.splitn(3, '/');
+    // A fourth field, the count of links ctrl-l chooses from, is for the
+    // config's mode.
+    let mut parts = target.split('/');
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Pick {
         action: action.to_string(),
@@ -271,9 +273,15 @@ pub fn resume(p: &Pick) -> Result<(), String> {
 /// standalone picker runs where John is); Ok is the URL.
 pub fn open_link(p: &Pick) -> Result<String, String> {
     let url = actions::act("link", &p.host, &p.session, &p.window)?.trim().to_string();
+    open_url(&url)?;
+    Ok(url)
+}
+
+/// Open `url` in the browser here.
+pub fn open_url(url: &str) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let status = std::process::Command::new(opener)
-        .arg(&url)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -282,7 +290,7 @@ pub fn open_link(p: &Pick) -> Result<String, String> {
     if !status.success() {
         return Err(format!("{opener} {url} failed ({status})"));
     }
-    Ok(url)
+    Ok(())
 }
 
 /// Log an action's outcome to the state log, as `rex-spawn --act` does.

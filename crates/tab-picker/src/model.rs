@@ -4,6 +4,7 @@
 //! against `hostname -s`).
 
 use std::time::{SystemTime, UNIX_EPOCH};
+use switchyard_ui::draw::str_width;
 
 /// A tab's most urgent agent status; Idle means it reports none.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -139,6 +140,118 @@ impl Link {
             _ => self.reference.clone(),
         }
     }
+
+    /// The ref a grouped badge shows after its kind's label: `#57` for
+    /// `PR #57`, `1041` for `card 1041`.
+    fn badge_ref(&self) -> String {
+        let number = self.reference.rsplit_once('#').map_or(self.reference.as_str(), |(_, n)| n);
+        match self.kind.as_str() {
+            "pr" => format!("#{number}"),
+            "issue" if self.system == "github" => format!("#{number}"),
+            "card" => number.to_string(),
+            "commit" => self.reference.chars().take(7).collect(),
+            _ => self.reference.clone(),
+        }
+    }
+
+    /// A PR's state or checks, as a badge shows them after its ref.
+    pub fn badge_state(&self) -> Option<(&'static str, Tone)> {
+        match (self.state.as_str(), self.checks.as_str()) {
+            ("merged", _) => Some(("✓ merged", Tone::Merged)),
+            ("closed", _) => Some(("closed", Tone::Muted)),
+            ("draft", _) => Some(("draft", Tone::Muted)),
+            (_, "pass") => Some(("✓", Tone::Pass)),
+            (_, "fail") => Some(("✗", Tone::Fail)),
+            (_, "pending") => Some(("●", Tone::Pending)),
+            _ => None,
+        }
+    }
+}
+
+/// How a piece of a badge is coloured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Ref,
+    Muted,
+    Merged,
+    Pass,
+    Fail,
+    Pending,
+}
+
+fn kind_label(kind: &str, plural: bool) -> String {
+    let one = match kind {
+        "pr" => "PR",
+        other => other,
+    };
+    if plural { format!("{one}s") } else { one.to_string() }
+}
+
+/// A row's links as compact badges, grouped by kind with the label once:
+/// `PR #57 ✓ merged · cards 1041 1042 1043`. Wider than `budget`, groups
+/// show their first few refs and a count (`cards 1041 1042 +3`), the
+/// biggest group giving way first; then whole groups go from the end,
+/// counted at the end (`PR #57 ✓ merged +4`). The first ref always shows.
+pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
+    let mut groups: Vec<(&str, Vec<&Link>)> = Vec::new();
+    for l in links {
+        match groups.iter_mut().find(|g| g.0 == l.kind) {
+            Some(g) => g.1.push(l),
+            None => groups.push((&l.kind, vec![l])),
+        }
+    }
+    let render = |shown: &[usize]| {
+        let mut out: Vec<(String, Tone)> = Vec::new();
+        let mut hidden = 0;
+        for ((kind, group), &n) in groups.iter().zip(shown) {
+            if n == 0 {
+                hidden += group.len();
+                continue;
+            }
+            if !out.is_empty() {
+                out.push((" · ".into(), Tone::Muted));
+            }
+            out.push((kind_label(kind, group.len() > 1), Tone::Ref));
+            for l in &group[..n] {
+                out.push((format!(" {}", l.badge_ref()), Tone::Ref));
+                if let Some((text, tone)) = l.badge_state() {
+                    out.push((format!(" {text}"), tone));
+                }
+            }
+            if n < group.len() {
+                out.push((format!(" +{}", group.len() - n), Tone::Muted));
+            }
+        }
+        if hidden > 0 {
+            out.push((format!(" +{hidden}"), Tone::Muted));
+        }
+        out
+    };
+    let width = |pieces: &[(String, Tone)]| pieces.iter().map(|(s, _)| str_width(s)).sum::<usize>();
+    let mut shown: Vec<usize> = groups.iter().map(|g| g.1.len()).collect();
+    loop {
+        let pieces = render(&shown);
+        if width(&pieces) <= budget {
+            return pieces;
+        }
+        // The group showing the most refs gives one up (the later on a tie).
+        if let Some(i) = (0..shown.len()).filter(|&i| shown[i] > 1).max_by_key(|&i| shown[i]) {
+            shown[i] -= 1;
+        } else if let Some(i) = shown.iter().rposition(|&n| n > 0).filter(|&i| i > 0) {
+            shown[i] = 0;
+        } else {
+            return pieces;
+        }
+    }
+}
+
+/// The links the ctrl-l chooser offers, most likely first: those with a
+/// URL, PRs, then cards, issues and commits.
+pub fn chooser_links(links: &[Link]) -> Vec<Link> {
+    let rank = |k: &str| ["pr", "card", "issue", "commit"].iter().position(|x| *x == k).unwrap_or(4);
+    let mut out: Vec<Link> = links.iter().filter(|l| !l.url.is_empty()).cloned().collect();
+    out.sort_by_key(|l| rank(&l.kind));
+    out
 }
 
 pub struct Task {
@@ -308,5 +421,66 @@ pub fn age(secs: u64) -> String {
         60..3600 => format!("{}m", secs / 60),
         3600..86400 => format!("{}h", secs / 3600),
         _ => format!("{}d", secs / 86400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn link(kind: &str, reference: &str, state: &str) -> Link {
+        let system = if kind == "card" { "fizzy" } else { "github" };
+        Link {
+            kind: kind.into(),
+            system: system.into(),
+            reference: reference.into(),
+            url: format!("u/{reference}"),
+            state: state.into(),
+            checks: String::new(),
+        }
+    }
+
+    fn text(pieces: &[(String, Tone)]) -> String {
+        pieces.iter().map(|(s, _)| s.as_str()).collect()
+    }
+
+    fn cards(n: usize) -> Vec<Link> {
+        (0..n).map(|i| link("card", &(1041 + i).to_string(), "")).collect()
+    }
+
+    #[test]
+    fn badges_group_links_by_kind_with_the_label_once() {
+        let mut links = vec![link("pr", "o/r#57", "merged")];
+        links.extend(cards(3));
+        links.push(link("issue", "o/r#42", ""));
+        assert_eq!(text(&badges(&links, usize::MAX)), "PR #57 ✓ merged · cards 1041 1042 1043 · issue #42");
+        assert_eq!(text(&badges(&cards(1), usize::MAX)), "card 1041");
+        let prs = [link("pr", "o/r#57", "merged"), link("pr", "o/r#58", "draft")];
+        assert_eq!(text(&badges(&prs, usize::MAX)), "PRs #57 ✓ merged #58 draft");
+        assert!(badges(&[], 10).is_empty());
+    }
+
+    #[test]
+    fn badges_truncate_to_the_first_few_and_a_count() {
+        let links = cards(5);
+        assert_eq!(text(&badges(&links, usize::MAX)), "cards 1041 1042 1043 1044 1045");
+        assert_eq!(text(&badges(&links, 20)), "cards 1041 1042 +3");
+        // The biggest group gives way first; the PR keeps its state.
+        let mut mixed = vec![link("pr", "o/r#57", "merged")];
+        mixed.extend(cards(5));
+        assert_eq!(text(&badges(&mixed, 36)), "PR #57 ✓ merged · cards 1041 1042 +3");
+        // Then whole groups go, counted at the end; the first ref stays.
+        assert_eq!(text(&badges(&mixed, 20)), "PR #57 ✓ merged +5");
+        assert_eq!(text(&badges(&mixed, 3)), "PR #57 ✓ merged +5");
+    }
+
+    #[test]
+    fn chooser_lists_prs_then_cards_then_issues_with_urls() {
+        let mut links = vec![link("issue", "o/r#42", ""), link("commit", "abcdef0123", "")];
+        links.extend(cards(2));
+        links.push(link("pr", "o/r#57", ""));
+        links.push(Link { url: String::new(), ..link("card", "9", "") });
+        let refs: Vec<String> = chooser_links(&links).iter().map(Link::short).collect();
+        assert_eq!(refs, ["PR #57", "card 1041", "card 1042", "#42", "abcdef0"]);
     }
 }
