@@ -109,6 +109,43 @@ in {
               `#rrggbb`. Missing roles fall back to Rosé Pine.
             '';
           };
+          usage = mkOption {
+            type = toml.type;
+            default = {};
+            example = {
+              quotas = [{
+                path = "~/.cache/llm-usage/work.json";
+                account = "work";
+                profile = "work";
+              }];
+              sessions = [{
+                harness = "pi";
+                path = "~/.config/pi-work/sessions";
+                account = "work";
+                profile = "work";
+              }];
+            };
+            description = ''
+              Read-only Usage tab inputs, configured separately on each host.
+              `quotas` is a list of llm-usage schema-v2 JSON paths with account
+              and optional profile labels. `sessions` lists projects/sessions
+              directories with harness (claude, pi, codex), path, account and
+              optional profile. Paths may start with `~/`. Use the same account
+              label on hosts sharing a login; different logins need different
+              labels. Quota snapshots and copied session events are deduplicated,
+              not added twice. Omit either list to use the current process's
+              active profile/cache, explicitly marked unmapped; an empty list
+              disables that source. No other profile or credential is discovered.
+
+              Optional `rates` entries match an exact model and optional provider,
+              and require input, output, cache_read and cache_write USD prices per
+              million tokens. Missing prices stay unknown, not zero. Recorded
+              costs take precedence. Estimates are API-equivalent, not the bill
+              for a subscription. The tab covers the last seven days and polls
+              every minute; configured hosts need the matching Switchyard binary.
+              This option does not install or configure quota collectors.
+            '';
+          };
           projects = mkOption {
             default = [];
             description = "The project catalog the new-session picker offers.";

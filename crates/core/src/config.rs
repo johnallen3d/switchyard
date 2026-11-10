@@ -22,6 +22,8 @@ pub struct Config {
     /// Rosé Pine role names to `#rrggbb`.
     pub palette: HashMap<String, String>,
     pub projects: Vec<ProjectEntry>,
+    /// Read-only quota caches, session roots and optional API-equivalent prices.
+    pub usage: crate::usage::Settings,
 }
 
 #[derive(Debug, Default, Deserialize)]

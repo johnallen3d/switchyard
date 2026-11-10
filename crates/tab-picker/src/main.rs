@@ -62,6 +62,7 @@
 mod model;
 mod snooze;
 mod standalone;
+mod usage;
 
 use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read};
@@ -117,14 +118,16 @@ enum View {
     All,
     Agents,
     Archive,
+    Usage,
 }
 
 impl View {
     fn next(self, back: bool) -> Self {
         match (self, back) {
             (View::All, false) | (View::Archive, true) => View::Agents,
-            (View::Agents, false) | (View::All, true) => View::Archive,
-            (View::Archive, false) | (View::Agents, true) => View::All,
+            (View::Agents, false) | (View::Usage, true) => View::Archive,
+            (View::Archive, false) | (View::All, true) => View::Usage,
+            (View::Usage, false) | (View::Agents, true) => View::All,
         }
     }
 
@@ -133,6 +136,7 @@ impl View {
             View::All => "all tabs",
             View::Agents => "agents",
             View::Archive => "archive",
+            View::Usage => "usage",
         }
     }
 }
@@ -300,6 +304,7 @@ struct App {
     note: Option<(String, bool)>,
     /// A standalone picker's data, as the float's pastes would carry it.
     feed: Option<standalone::Feed>,
+    usage: usage::Usage,
 }
 
 impl App {
@@ -334,6 +339,7 @@ impl App {
             standalone: false,
             note: None,
             feed: None,
+            usage: usage::Usage::default(),
         }
     }
 
@@ -367,6 +373,8 @@ impl App {
                 Err(_) => self.tasks_failed(),
             },
             "tasks-error" => self.tasks_failed(),
+            "usage" => self.usage.paste(body),
+            "usage-error" => self.usage.error = Some(body.trim().to_string()),
             _ => {}
         }
     }
@@ -674,6 +682,7 @@ impl App {
                 let rows = self.archive();
                 self.filter_flat(rows, &pattern, filtering)
             }
+            View::Usage => None,
         };
         let want = if filtering { best.and_then(|i| self.key_of(i)) } else { want };
         self.select_key(want);
@@ -830,7 +839,11 @@ impl App {
     }
 
     fn set_view(&mut self, view: View) {
+        self.armed = Armed::No;
+        self.chooser = None;
+        self.snooze = None;
         self.view = view;
+        self.usage.offset = 0;
         self.refilter();
     }
 
@@ -1035,6 +1048,21 @@ impl App {
             return true;
         }
         self.armed = Armed::No;
+        if self.view == View::Usage {
+            let delta = match k.code {
+                KeyCode::Up | KeyCode::Char('p' | 'k') if k.code == KeyCode::Up || ctrl => Some(-1),
+                KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => Some(1),
+                KeyCode::PageUp => Some(-page),
+                KeyCode::PageDown => Some(page),
+                KeyCode::Home => { self.usage.offset = 0; return true; }
+                KeyCode::End => { self.usage.offset = usize::MAX; return true; }
+                _ => None,
+            };
+            if let Some(delta) = delta {
+                self.usage.offset = self.usage.offset.saturating_add_signed(delta);
+                return true;
+            }
+        }
         match k.code {
             KeyCode::Char('c') if ctrl => return false,
             // In the float, the config types ctrl-l back for a task with
@@ -1103,6 +1131,7 @@ impl App {
             View::All => "Go to tab",
             View::Agents => "Agents",
             View::Archive => "Archive",
+            View::Usage => "Usage",
         };
         let inner = draw::frame(f, &self.p, title, self.header_chips(), "⌘K", Margin::new(2, 1));
         let [search, rule, _, body, _, footer] = Layout::vertical([
@@ -1116,7 +1145,13 @@ impl App {
         .areas(inner);
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
-        self.draw_list(f, body);
+        if self.view == View::Usage {
+            self.list_area = body;
+            let profile = match self.profile { Profile::All => None, p => Some(p.name()) };
+            self.usage.draw(f, body, &self.p, self.now, &self.query, profile);
+        } else {
+            self.draw_list(f, body);
+        }
         self.draw_chooser(f, body);
         self.draw_snooze(f, body);
         self.draw_footer(f, footer);
@@ -1230,6 +1265,7 @@ impl App {
         if self.view == View::Archive && self.kept {
             chip("not archived", p.foam);
         }
+        if self.view == View::Usage { return spans; }
         if let Tasks::Failed = self.tasks_load {
             chip("tabs only", p.muted);
         }
@@ -1248,8 +1284,10 @@ impl App {
             View::All => "Search tabs, sessions, and folders",
             View::Agents => "Search agents",
             View::Archive => "Search ended tasks",
+            View::Usage => "Search accounts, harnesses, models, and hosts",
         };
         draw::search(f, p, area, &self.query, placeholder, typing, true);
+        if self.view == View::Usage { return; }
         let shown = self.rows.iter().filter(|r| selectable(r)).count();
         let mut right = Vec::new();
         let spin = SPINNER[tick(self.started) % SPINNER.len()];
@@ -1383,6 +1421,7 @@ impl App {
             ]
         } else {
             match self.view {
+                View::Usage => Vec::new(),
                 View::All => match &self.load {
                     Load::Waiting => vec![spin(), Line::from(""), text("Loading tabs…".into())],
                     Load::Failed(err) => vec![
@@ -1724,6 +1763,12 @@ impl App {
             f.render_widget(Line::from(spans), area);
             return;
         }
+        if self.view == View::Usage {
+            let keys = [("↑↓", "scroll", p.subtle), ("⇥", "all tabs", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
+            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            f.render_widget(Line::from(spans), area);
+            return;
+        }
         let task = self.selected_task();
         let mut keys: Vec<(&str, &str)> = match task {
             Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
@@ -1749,6 +1794,7 @@ impl App {
         keys.push(("⇥", self.view.next(false).name()));
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
+            View::Usage => {}
             View::All => keys.push(("⌥↑↓", "session")),
             View::Archive => keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" })),
             View::Agents => {
@@ -2306,11 +2352,35 @@ mod tests {
         app.set_view(View::Archive);
         assert_eq!(app.rows, vec![Item::Task(5)]);
     }
+
+    #[test]
+    fn usage_is_integrated_read_only_and_handles_narrow_frames() {
+        let mut app = inbox();
+        let mut view = View::All;
+        for expected in [View::Agents, View::Archive, View::Usage, View::All] {
+            view = view.next(false);
+            assert!(view == expected);
+            assert!(view.next(true).next(false) == view);
+        }
+        app.set_view(View::Usage);
+        assert!(app.rows.is_empty());
+        assert_eq!(app.pick(), "");
+        assert!(!app.can_pin() && !app.can_snooze() && !app.armable());
+        app.paste("rex-data:usage\n{\"fetched\":1,\"samples\":[],\"quotas\":[],\"warnings\":[\"remote host unavailable\"]}");
+        app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        for (width, height) in [(120, 35), (32, 10), (12, 5)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            assert_eq!(app.pick(), "");
+        }
+        app.set_view(View::Agents);
+        assert!(!app.rows.is_empty());
+    }
 }
 
 // ---------------------------------------------------------------- main
 
-const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|agents|archive] [ROWS | - | --wait]
+const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|agents|archive|usage] [ROWS | - | --wait]
 
 Shows Rex tabs grouped by session, the agents among them, and ended tasks,
 and reports the highlighted row in the terminal title as
@@ -2318,7 +2388,13 @@ rex-tab-picker:ACTION:TARGET/SESSION/WINDOW. ROWS are the tab separated rows
 built by the Rex config; `-` or no argument reads stdin. --wait opens at
 once and takes the data from bracketed pastes of rex-data:KIND, a newline
 and the body: KIND rows (or error and a message), live and tasks
-(rex-spawn --tasks JSON), or tasks-error.
+(rex-spawn --tasks JSON), tasks-error, usage (accounting JSON), or usage-error.
+
+Tab cycles All, Agents, Archive, Usage; Usage is read-only and refreshes every
+60 seconds. --usage-json prints sanitized accounting JSON across configured
+hosts; --usage-local prints this host only (also the remote collector protocol).
+Only active profiles are read by default. Configure usage.sessions, usage.quotas
+and usage.rates in the Home Manager settings for account labels and prices.
 
 Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
 tabs and tasks itself, from switchyard-server as they change when it runs,
@@ -2391,11 +2467,21 @@ fn main() -> io::Result<()> {
                     Some("all") => View::All,
                     Some("agents") => View::Agents,
                     Some("archive") => View::Archive,
+                    Some("usage") => View::Usage,
                     _ => {
                         eprintln!("{USAGE}");
                         std::process::exit(2);
                     }
                 }
+            }
+            "--usage-json" | "--usage-local" => {
+                let mut collector = switchyard_core::usage::Collector::default();
+                let snapshot = if arg == "--usage-local" {
+                    let settings = switchyard_core::config::read().map(|c| c.usage).unwrap_or_default();
+                    collector.local(&settings, &switchyard_core::rex::local_label(), now())
+                } else { collector.collect() };
+                println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
+                return Ok(());
             }
             "--wait" => wait = true,
             "-" => {

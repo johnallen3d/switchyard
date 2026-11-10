@@ -136,7 +136,21 @@ local function fan_out()
 end
 
 main(function()
+  -- Accounting is independent of tab/task delivery, including the server
+  -- fast path. Never delay opening the picker for a log scan or remote host.
+  local usage_job = rex.exec.start({ "rex-tab-picker", "--usage-json" })
   if not from_server() then fan_out() end
+  while true do
+    local r = usage_job and usage_job:wait()
+    if r and r.ok then deliver("usage", r.stdout)
+    else deliver("usage-error", "Usage collector failed; install matching Switchyard on the config host") end
+    -- Stop with the float rather than leaving a detached polling loop.
+    for _ = 1, 60 do
+      rex.sleep(1)
+      if float_server().block.call("com.superlogical.terminal", "input_mode", float) == nil then return end
+    end
+    usage_job = rex.exec.start({ "rex-tab-picker", "--usage-json" })
+  end
 end)
 ]==]
 

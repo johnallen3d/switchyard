@@ -100,6 +100,16 @@ impl Feed {
             let (tx, poke, on_server) = (tx.clone(), poke.clone(), on_server.clone());
             thread::spawn(move || follow_server(first, tx, poke, on_server));
         }
+        let usage_tx = tx.clone();
+        thread::spawn(move || {
+            let mut collector = switchyard_core::usage::Collector::default();
+            loop {
+                let snapshot = collector.collect();
+                let body = serde_json::to_string(&snapshot).unwrap_or_default();
+                if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() { return; }
+                thread::sleep(switchyard_core::usage::REFRESH);
+            }
+        });
         thread::spawn(move || fetch_when_needed(tx, poked, on_server));
         Feed { rx, poke }
     }
