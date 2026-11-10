@@ -5,7 +5,8 @@
 -- session on the focused host). The float runs on the focused session's host
 -- and reports its pick in the terminal title, hex encoded:
 --   rex-new:session/HOST/PATH
---   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF]
+--   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]
+-- (PROMPT_REF is empty when only a work item follows).
 -- Enter acts from this config host, the only one that can reach every Rex
 -- host: a session opens with `rex-spawn --open`, and agent work launches
 -- with `rex-spawn --launch`, which opens a tab running `--run` on the target
@@ -137,15 +138,19 @@ rex.action{
 
     if kind == "agent" then
       local host, path, name, harness = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)$")
-      local prompt_ref
+      local prompt_ref, work_item
       if host == nil then
         host, path, name, harness, prompt_ref = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)/(%x+)$")
+      end
+      if host == nil then
+        host, path, name, harness, prompt_ref, work_item = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)/(%x*)/(%x+)$")
       end
       -- An incomplete form reports nothing; keep the float open.
       if host == nil then return end
       close_picker(ctx)
       local argv = { "rex-spawn", "--launch", util.unhex(host), util.unhex(path), util.unhex(name), harness }
       if prompt_ref ~= nil then table.insert(argv, util.unhex(prompt_ref)) end
+      if work_item ~= nil then table.insert(argv, util.unhex(work_item)) end
       local r, err = rex.exec(argv, { env = env })
       if r == nil then error(err, 0) end
       if not r.ok then error(r.stderr, 0) end

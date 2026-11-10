@@ -6,10 +6,11 @@
 //!   lists the catalog's projects and the zoxide folders of one host (ctrl-o
 //!   chooses the host), and takes either a plain session in the highlighted
 //!   folder or project, or agent work in a catalog project or Git folder: a name, a
-//!   harness (ctrl-t, Claude by default) and an optional prompt. ctrl-s
+//!   harness (ctrl-t, Claude by default), an optional work item and an
+//!   optional prompt. ctrl-s
 //!   switches the kind; `--kind` starts it (cmd+shift+n: session, ctrl+cmd+n:
 //!   agent). The picker reports the choice in the terminal title as
-//!   `rex-new:session/HOST/PATH` or `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF]`
+//!   `rex-new:session/HOST/PATH` or `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`
 //!   (fields hex encoded); the config's `new` mode turns Enter into the
 //!   action, as with rex-tab-picker. Escape reaches the picker, which exits
 //!   (closing the float) but asks first when the prompt has text. Titles are
@@ -23,12 +24,13 @@
 //! - `--open HOST DIR`: runs on the config host. Finds or creates the session
 //!   named after DIR on HOST (a ~/ path is expanded for HOST) and prints its
 //!   ID, as a session pick's action needs (see core's `folders`).
-//! - `--launch HOST PATH NAME HARNESS [PROMPT_REF]`: runs on the config host
+//! - `--launch HOST PATH NAME HARNESS [PROMPT_REF [WORK_ITEM]]`: runs on the config host
 //!   (the Mac), which can reach every Rex host. HOST `auto` picks from the
 //!   project's host pool (see core's `hosts::pool`), least busy first. A Git
 //!   folder outside the catalog uses its explicit host and primary checkout.
 //!   Reads the prompt
-//!   from the picker's host, finds or creates the project's session on
+//!   from the picker's host (PROMPT_REF may be empty), leads it with the
+//!   optional work item (see core's `launch::work_item_prompt`), finds or creates the project's session on
 //!   the host, opens a tab running `--run` there, deletes the prompt file,
 //!   records the task (see core's `tasks`), and prints
 //!   `HOST<TAB>SESSION_ID<TAB>WINDOW_ID`.
@@ -67,7 +69,7 @@ use crate::run::run;
 
 const USAGE: &str = "usage: rex-spawn [--kind agent|session] [--home LABEL FOLDERS]
        rex-spawn --open HOST DIR
-       rex-spawn --launch HOST PATH NAME HARNESS [PROMPT_REF]
+       rex-spawn --launch HOST PATH NAME HARNESS [PROMPT_REF [WORK_ITEM]]
        rex-spawn --run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume] [PROMPT]
        rex-spawn --tasks [--live]
        rex-spawn --act review|archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
@@ -76,12 +78,15 @@ const USAGE: &str = "usage: rex-spawn [--kind agent|session] [--home LABEL FOLDE
 
 Without a mode, shows the new-session picker (kind agent unless --kind
 session) and reports the choice in the terminal title as
-rex-new:session/HOST/PATH or rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF],
+rex-new:session/HOST/PATH or
+rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]],
 keeping a typed prompt in a file named by PROMPT_REF (LABEL:ID). --home
 gives the config host's label and its zoxide folders, one per line. Bare,
 from a shell on the config host, the picker runs standalone: Enter opens
 the pick itself and shows its tab. --open finds or creates the session for
-DIR on HOST and prints its ID. --launch collects the prompt,
+DIR on HOST and prints its ID. --launch collects the prompt (an empty
+PROMPT_REF is none), leads it with WORK_ITEM (a work project's
+/agent-kit:issue-implement, otherwise the item's URL),
 opens the work's tab on HOST (auto: the catalog project's least busy host;
 Git folders use their listed host and primary checkout), records the
 task, and prints HOST<TAB>SESSION_ID<TAB>WINDOW_ID. --run sets up the
@@ -116,7 +121,16 @@ fn main() -> io::Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
         ["-h"] | ["--help"] => println!("{USAGE}"),
-        ["--launch", host, path, name, harness, prompt_ref @ ..] if prompt_ref.len() <= 1 => match launch(host, path, name, harness, prompt_ref.first().copied(), None) {
+        // An empty PROMPT_REF stands for none when a WORK_ITEM follows it.
+        ["--launch", host, path, name, harness, rest @ ..] if rest.len() <= 2 => match launch(
+            host,
+            path,
+            name,
+            harness,
+            rest.first().copied().filter(|r| !r.is_empty()),
+            rest.get(1).copied(),
+            None,
+        ) {
             Ok((host, session, window)) => print!("{host}\t{session}\t{window}"),
             Err(e) => {
                 eprintln!("rex-spawn: {e}");

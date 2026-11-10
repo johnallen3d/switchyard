@@ -2,9 +2,10 @@
 //! projects and the zoxide folders of one host, and reports a pick in the
 //! terminal title: a plain session in the highlighted folder or project
 //! (kind `session`), or agent work in a catalog project or Git folder (kind `agent`) with
-//! a name, harness and optional prompt. Titles are
-//! `rex-new:session/HOST/PATH` and `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF]`,
-//! the fields hex encoded.
+//! a name, harness, optional work item and optional prompt. Titles are
+//! `rex-new:session/HOST/PATH` and
+//! `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`, the
+//! fields hex encoded; PROMPT_REF is empty when only a work item follows.
 //!
 //! ctrl-o chooses the host (the folders' host, and where agent work runs,
 //! where `auto` picks the least busy); ctrl-s switches the kind. A session
@@ -30,7 +31,7 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
-use switchyard_core::launch::launch;
+use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
 use switchyard_core::prompts::{parse_prompt_ref, prompt_dir, prune_prompts};
 use switchyard_core::rex::{local_label, log, now, select};
@@ -67,6 +68,7 @@ impl Kind {
 enum Focus {
     Project,
     Name,
+    Item,
     Prompt,
 }
 
@@ -159,8 +161,10 @@ struct App {
     harness: usize,
     focus: Focus,
     query: String,
-    /// The name and prompt fields: readline-style editors (see `text_key`).
+    /// The name, work item and prompt fields: readline-style editors (see
+    /// `text_key`).
     name: TextArea<'static>,
+    item: TextArea<'static>,
     prompt: TextArea<'static>,
     /// This picker's prompt file reference, `LABEL:ID`.
     prompt_ref: String,
@@ -230,6 +234,7 @@ impl App {
             focus: Focus::Project,
             query: String::new(),
             name: text_field(),
+            item: text_field(),
             prompt: text_field(),
             prompt_ref: format!("{}:{}-{}", local_label(), std::process::id(), now()),
             saved_prompt: String::new(),
@@ -401,8 +406,9 @@ impl App {
             return;
         }
         self.focus = match (self.focus, forward) {
-            (Focus::Project, true) | (Focus::Prompt, false) => Focus::Name,
-            (Focus::Name, true) | (Focus::Project, false) => Focus::Prompt,
+            (Focus::Project, true) | (Focus::Item, false) => Focus::Name,
+            (Focus::Name, true) | (Focus::Prompt, false) => Focus::Item,
+            (Focus::Item, true) | (Focus::Project, false) => Focus::Prompt,
             (Focus::Prompt, true) | (Focus::Name, false) => Focus::Project,
         };
     }
@@ -428,15 +434,20 @@ impl App {
         self.name.lines().concat()
     }
 
+    /// The work item as typed.
+    fn item_text(&self) -> String {
+        self.item.lines().concat().trim().to_string()
+    }
+
     /// The prompt as sent: surrounding blank space dropped.
     fn prompt_text(&self) -> String {
         self.prompt.lines().join("\n").trim().to_string()
     }
 
     /// Whether closing would throw away typed text (only agent work keeps a
-    /// prompt).
+    /// prompt and work item).
     fn has_draft(&self) -> bool {
-        self.kind == Kind::Agent && !self.prompt_text().is_empty()
+        self.kind == Kind::Agent && !(self.prompt_text().is_empty() && self.item_text().is_empty())
     }
 
     /// What Enter would do, as the config's title protocol expects; empty
@@ -457,11 +468,18 @@ impl App {
                     hex(&name),
                     HARNESSES[self.harness]
                 );
-                if !self.prompt_text().is_empty() {
-                    if !self.prompt_saved {
-                        return String::new();
-                    }
-                    pick = format!("{pick}/{}", hex(&self.prompt_ref));
+                let prompt_ref = if self.prompt_text().is_empty() {
+                    ""
+                } else if self.prompt_saved {
+                    self.prompt_ref.as_str()
+                } else {
+                    return String::new();
+                };
+                let item = self.item_text();
+                if !item.is_empty() {
+                    pick = format!("{pick}/{}/{}", hex(prompt_ref), hex(&item));
+                } else if !prompt_ref.is_empty() {
+                    pick = format!("{pick}/{}", hex(prompt_ref));
                 }
                 pick
             }
@@ -529,6 +547,9 @@ impl App {
             Focus::Name => {
                 self.name.insert_str(text.chars().filter_map(name_char).collect::<String>());
             }
+            Focus::Item => {
+                self.item.insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
+            }
             Focus::Prompt => {
                 let text = text.replace('\t', "    ");
                 self.prompt.insert_str(text.chars().filter(|&c| c == '\n' || !c.is_control()).collect::<String>());
@@ -558,7 +579,7 @@ impl App {
         // ctrl-k for deleting to the end.
         let list_key = match self.focus {
             Focus::Project => matches!(k.code, KeyCode::Char('n' | 'p' | 'j' | 'k')),
-            Focus::Name => matches!(k.code, KeyCode::Char('n' | 'p' | 'j')),
+            Focus::Name | Focus::Item => matches!(k.code, KeyCode::Char('n' | 'p' | 'j')),
             Focus::Prompt => false,
         };
         match k.code {
@@ -629,7 +650,7 @@ impl App {
                 },
                 Focus::Name => match k.code {
                     KeyCode::Up => self.focus = Focus::Project,
-                    KeyCode::Down => self.focus = Focus::Prompt,
+                    KeyCode::Down => self.focus = Focus::Item,
                     KeyCode::Enter => {}
                     KeyCode::Char(c) if !ctrl && !alt => {
                         if let Some(c) = name_char(c) {
@@ -638,10 +659,21 @@ impl App {
                     }
                     _ => text_key(&mut self.name, k),
                 },
+                Focus::Item => match k.code {
+                    KeyCode::Up => self.focus = Focus::Name,
+                    KeyCode::Down => self.focus = Focus::Prompt,
+                    KeyCode::Enter => {}
+                    KeyCode::Char(c) if !ctrl && !alt => {
+                        if item_char(c) {
+                            self.item.insert_char(c);
+                        }
+                    }
+                    _ => text_key(&mut self.item, k),
+                },
                 // Rex's mode takes plain Enter to act, so a newline is alt- or
                 // shift-Enter (or arrives in a paste).
                 Focus::Prompt => match k.code {
-                    KeyCode::Up if self.prompt.screen_cursor().row == 0 => self.focus = Focus::Name,
+                    KeyCode::Up if self.prompt.screen_cursor().row == 0 => self.focus = Focus::Item,
                     _ => text_key(&mut self.prompt, k),
                 },
             },
@@ -657,9 +689,9 @@ impl App {
         let inner = draw::frame(f, &self.p, title, Vec::new(), "", Margin::new(2, 1));
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
-        let spare = inner.height.saturating_sub(10 + 3 + PROMPT_CHROME_ROWS);
+        let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
         let prompt_rows = if agent { self.prompt_rows(prompt_width(inner.width)).min(spare.max(1)) } else { 0 };
-        let form_rows = if agent { 2 + prompt_rows + PROMPT_CHROME_ROWS } else { 2 };
+        let form_rows = if agent { 3 + prompt_rows + PROMPT_CHROME_ROWS } else { 2 };
         let [search, rule1, _, body, _, rule2, _, form, _, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -858,7 +890,8 @@ impl App {
     }
 
     fn draw_form(&mut self, f: &mut Frame, area: Rect, prompt_rows: u16) {
-        let [name_row, _, card]: [Rect; 3] = Layout::vertical([
+        let [name_row, item_row, _, card]: [Rect; 4] = Layout::vertical([
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(prompt_rows + PROMPT_CHROME_ROWS),
@@ -911,7 +944,50 @@ impl App {
             }
         }
 
+        self.draw_item(f, item_row, label_w);
         self.draw_prompt(f, card, prompt_rows);
+    }
+
+    /// The optional work item, with what it starts as on the right.
+    fn draw_item(&mut self, f: &mut Frame, row: Rect, label_w: u16) {
+        let p = self.p;
+        let focused = self.focus == Focus::Item;
+        let mut spans = vec![
+            Span::styled(if focused { "▎" } else { " " }, Style::new().fg(p.iris)),
+            Span::styled(
+                format!("{:<width$}", "Work item", width = label_w as usize - 1),
+                if focused { Style::new().fg(p.iris).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) },
+            ),
+        ];
+        let item = self.item_text();
+        if item.is_empty() && !focused {
+            spans.push(Span::styled("—", Style::new().fg(p.muted)));
+        }
+        f.render_widget(Line::from(spans), row);
+        // The catalog says whether a project is work; a folder's profile is
+        // settled at launch, so it gets no hint.
+        let hint = match self.project() {
+            Some(project) if !item.is_empty() && project.profile == "work" => {
+                Some(format!("→ {WORK_ITEM_COMMAND} "))
+            }
+            _ => None,
+        };
+        let room = (row.width as usize).saturating_sub(label_w as usize + str_width(&item) + 2);
+        let hint = hint.filter(|h| str_width(h) <= room);
+        let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
+        if let Some(hint) = hint {
+            f.render_widget(Line::from(Span::styled(hint, Style::new().fg(p.gold))).right_aligned(), row);
+        }
+        if focused || !item.is_empty() {
+            let field = Rect { x: row.x + label_w, width: row.width.saturating_sub(label_w + hint_w), ..row };
+            self.item.set_style(Style::new().fg(p.text).bg(p.base));
+            self.item.set_placeholder_text("optional: #42, ENG-123, an issue or card URL");
+            self.item.set_placeholder_style(Style::new().fg(p.muted).bg(p.base));
+            f.render_widget(&self.item, field);
+            if focused {
+                place_cursor(f, &self.item, field);
+            }
+        }
     }
 
     /// A plain session's form: the folder it opens and the chips.
@@ -1066,7 +1142,8 @@ impl App {
                 Kind::Agent => {
                     let next = match self.focus {
                         Focus::Project => "name",
-                        Focus::Name => "prompt",
+                        Focus::Name => "work item",
+                        Focus::Item => "prompt",
                         Focus::Prompt => "project",
                     };
                     hints.push(("⇥", next, p.subtle));
@@ -1099,6 +1176,11 @@ impl App {
         let (spans, _) = draw::hints(p, &hints, area.width as usize);
         f.render_widget(Line::from(spans), area);
     }
+}
+
+/// Whether `c` can be part of a work item: one ref, so no spaces.
+fn item_char(c: char) -> bool {
+    !c.is_whitespace() && !c.is_control()
 }
 
 /// An empty name or prompt field: word-wrapped, with no line highlight or
@@ -1276,11 +1358,12 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         app.note = Some(("the prompt couldn't be saved".into(), true));
         return Ok(false);
     };
+    let item = app.item_text();
     let host = app.agent_host().to_string();
     let label = folders::home_relative(&path);
     app.note = Some((format!("Spawning {label}/{name} on {host}…"), false));
     term.draw(|f| app.draw(f))?;
-    match launch(&host, &path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), None) {
+    match launch(&host, &path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), Some(item.as_str()).filter(|i| !i.is_empty()), None) {
         // Launched: close even if the tab can't be shown, so a second Enter
         // doesn't spawn the work twice.
         Ok((host, session, window)) => {
@@ -1458,6 +1541,27 @@ mod tests {
         assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}/{}", hex("folder-host"), hex("/repos/remote"), hex("folder-work"), HARNESSES[0], hex(&app.prompt_ref)));
         app.prompt_saved = false;
         assert!(app.pick().is_empty());
+    }
+
+    #[test]
+    fn work_item_follows_the_prompt_ref_which_may_be_empty() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        let base = format!("agent/{}/{}/{}/{}", hex("picker-host"), hex("/repos/local"), hex("folder-work"), HARNESSES[0]);
+        app.focus = Focus::Item;
+        app.paste(" #42 x");
+        assert_eq!(app.item_text(), "#42x", "spaces never reach the item");
+        app.item.clear();
+        app.item.insert_str("#42");
+        assert_eq!(app.pick(), format!("{base}//{}", hex("#42")));
+        assert!(app.has_draft());
+        app.prompt.insert_str("do the work");
+        app.prompt_ref = "picker-host:test-prompt".into();
+        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt_ref), hex("#42")));
+        app.focus = Focus::Name;
+        app.next_focus(true);
+        assert!(app.focus == Focus::Item);
     }
 
     #[test]

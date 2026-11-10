@@ -2,7 +2,7 @@
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
 use crate::hosts::{AUTO, Project, catalog, choose_host};
-use crate::links::{FIZZY_BOARD_SH, Tracker, refs_in_text, tracker_or_fizzy};
+use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
 use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, host_home, log, now, rex_json, sh_quote};
@@ -56,8 +56,33 @@ fn folder_script(path: &str) -> String {
     )
 }
 
+/// The slash command a work project's agent starts a work item with; the
+/// item and these flags follow it.
+pub const WORK_ITEM_COMMAND: &str = "/agent-kit:issue-implement";
+const WORK_ITEM_FLAGS: &str = "--create-pr --agent-author";
+
+/// The prompt that starts work on `item` ahead of the typed `prompt`: a
+/// work project hands it to `WORK_ITEM_COMMAND`, which knows its tracker;
+/// otherwise the agent is told the item, as its URL when the tracker can
+/// place it.
+pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &str) -> String {
+    let lead = if profile == "work" {
+        format!("{WORK_ITEM_COMMAND} {item} {WORK_ITEM_FLAGS}")
+    } else {
+        let url = parse_ref(item, tracker).and_then(|l| l["url"].as_str().map(String::from)).unwrap_or_default();
+        format!("Let's work on {}", if url.is_empty() { item } else { &url })
+    };
+    if prompt.is_empty() { lead } else { format!("{lead}\n\n{prompt}") }
+}
+
+/// A work item as typed: one ref or key, without spaces.
+fn work_item_problem(item: &str) -> Option<&'static str> {
+    item.chars().any(|c| c.is_whitespace() || c.is_control()).then_some("a work item is one ref, without spaces")
+}
+
 /// Open the work's tab on `host` and record it, with the work items its
-/// prompt names as `spawn` links. A path outside the catalog must be an
+/// prompt names as `spawn` links. An optional work item leads the prompt
+/// (see `work_item_prompt`). A path outside the catalog must be an
 /// existing Git folder on that explicit host. With `resume`, the tab
 /// resumes that agent session with its recorded profile instead of starting
 /// a new one, and `host` is used as is (never `auto`: the session lives there).
@@ -67,6 +92,7 @@ pub fn launch(
     name: &str,
     harness: &str,
     prompt_ref: Option<&str>,
+    work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
     let projects = catalog()?;
@@ -83,8 +109,12 @@ pub fn launch(
     if !HARNESSES.contains(&harness) {
         return Err(format!("unknown harness {harness}"));
     }
+    let work_item = work_item.map(str::trim).filter(|i| !i.is_empty());
+    if let Some(problem) = work_item.and_then(work_item_problem) {
+        return Err(format!("{}: {problem}", work_item.unwrap_or_default()));
+    }
     // Fetch the prompt first: without it the agent would start on nothing.
-    let prompt = prompt_ref.map(fetch_prompt).transpose()?.unwrap_or_default();
+    let typed = prompt_ref.map(fetch_prompt).transpose()?.unwrap_or_default();
     let (branch, slug) = branch_and_slug(name);
     let host = if host == AUTO {
         let (chosen, why) = choose_host(&project)?;
@@ -119,6 +149,20 @@ pub fn launch(
     // the start; an archive later records the newest one (after /clear).
     let agent_session = resume.map(|(id, _)| id.to_string()).unwrap_or_else(new_session_id);
     let mode = if resume.is_some() { "resume" } else { "new" };
+    // Work items the prompt names (`#42`, `fizzy:123`, issue and card
+    // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
+    // board when the catalog sets none.
+    let board = if project.tracker.trim().is_empty() && (!typed.trim().is_empty() || work_item.is_some()) {
+        let script = format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&cwd));
+        host_bash(host, &script).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &board), &project.clone_url);
+    let prompt = match work_item {
+        Some(item) => work_item_prompt(&project.profile, item, &tracker, typed.trim()),
+        None => typed,
+    };
     let mut run = vec![
         "rex-spawn", "--run", &project.profile, &project.path, name, harness, &project.clone_url,
         &agent_session, mode,
@@ -151,16 +195,6 @@ pub fn launch(
     if let Some(r) = prompt_ref {
         discard_prompt(r);
     }
-    // Work items the prompt names (`#42`, `fizzy:123`, issue and card
-    // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
-    // board when the catalog sets none.
-    let board = if project.tracker.trim().is_empty() && !prompt.is_empty() {
-        let script = format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&cwd));
-        host_bash(host, &script).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &board), &project.clone_url);
     let links: Vec<serde_json::Value> = refs_in_text(&prompt, &tracker)
         .into_iter()
         .map(|mut l| {
@@ -248,6 +282,26 @@ mod tests {
             &crate::rex::local_label(), repo.0.join("nested folder").to_str().unwrap(), &[configured],
         ).unwrap();
         assert_eq!(project.profile, "work");
+    }
+
+    #[test]
+    fn work_item_leads_the_prompt() {
+        let fizzy = Tracker::new("fizzy:6284043/board", "");
+        assert_eq!(
+            work_item_prompt("work", "ENG-12", &fizzy, ""),
+            "/agent-kit:issue-implement ENG-12 --create-pr --agent-author",
+        );
+        assert_eq!(
+            work_item_prompt("work", "#7", &fizzy, "keep it small"),
+            "/agent-kit:issue-implement #7 --create-pr --agent-author\n\nkeep it small",
+        );
+        let personal = work_item_prompt("personal", "#1045", &fizzy, "");
+        assert_eq!(personal, "Let's work on https://app.fizzy.do/6284043/cards/1045");
+        // The prompt's links pick the item up as a spawn link.
+        assert_eq!(refs_in_text(&personal, &fizzy)[0]["ref"], "1045");
+        assert_eq!(work_item_prompt("personal", "ENG-12", &Tracker::default(), "go"), "Let's work on ENG-12\n\ngo");
+        assert!(work_item_problem("ENG-12").is_none());
+        assert!(work_item_problem("two refs").is_some());
     }
 
     #[test]

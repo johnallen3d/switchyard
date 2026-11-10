@@ -83,7 +83,7 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         "" => "claude".to_string(),
         h => h.to_string(),
     };
-    let (host, session, window_id) = launch(host, &path, &field("name"), &harness, None, Some((&agent_session, &field("profile"))))?;
+    let (host, session, window_id) = launch(host, &path, &field("name"), &harness, None, None, Some((&agent_session, &field("profile"))))?;
     // The new task takes the ended one's place in the archive, keeping its
     // work items.
     let mut tasks = load_tasks()?;
