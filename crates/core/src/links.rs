@@ -545,6 +545,27 @@ pub fn add_link(task: &mut Value, mut link: Value, source: &str) -> bool {
     true
 }
 
+/// Make the task's derived links other than its PR exactly `derived`
+/// (from its branch name, commits and PR body), dropping any its branch
+/// no longer implies; those it still does keep their place. True when the
+/// links changed.
+pub fn set_derived_items(task: &mut Value, derived: Vec<Value>) -> bool {
+    let before = task["links"].clone();
+    let mut links: Vec<Value> = before.as_array().cloned().unwrap_or_default();
+    links.retain(|l| l["source"] != "derived" || l["kind"] == "pr" || derived.iter().any(|d| same(l, d)));
+    task["links"] = links.into();
+    for link in derived {
+        add_link(task, link, "derived");
+    }
+    if before.is_null()
+        && task["links"].as_array().is_some_and(Vec::is_empty)
+        && let Some(o) = task.as_object_mut()
+    {
+        o.remove("links");
+    }
+    task["links"] != before
+}
+
 /// Make the task's `agent` links the refs in its branch's git config,
 /// which is their source of truth. True when the links changed.
 pub fn set_agent_links(task: &mut Value, refs: &[String], t: &Tracker) -> bool {
@@ -736,6 +757,28 @@ mod tests {
         assert_eq!(task["links"].as_array().unwrap().len(), 1);
         let mut old = json!({});
         assert!(!set_agent_links(&mut old, &[], &t));
+        assert_eq!(old, json!({}));
+    }
+
+    #[test]
+    fn derived_items_drop_what_the_branch_no_longer_implies() {
+        let t = fizzy();
+        let mut task = json!({"links": []});
+        add_link(&mut task, parse_ref("#5", &t).unwrap(), "derived");
+        add_link(&mut task, parse_ref("fizzy:6", &t).unwrap(), "spawn");
+        set_derived_pr(&mut task, "o/r", &Some(Pr { number: 2, url: "p".into(), state: "open".into(), checks: String::new(), fixes: vec![] }));
+        assert!(!set_derived_items(&mut task, vec![parse_ref("#5", &t).unwrap()]));
+        assert!(set_derived_items(&mut task, vec![parse_ref("#7", &t).unwrap()]));
+        let refs: Vec<(&str, &str)> = task["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| (l["ref"].as_str().unwrap(), l["source"].as_str().unwrap()))
+            .collect();
+        assert_eq!(refs, [("6", "spawn"), ("o/r#2", "derived"), ("7", "derived")]);
+        assert!(!set_derived_items(&mut task, vec![parse_ref("#7", &t).unwrap()]));
+        let mut old = json!({});
+        assert!(!set_derived_items(&mut old, vec![]));
         assert_eq!(old, json!({}));
     }
 

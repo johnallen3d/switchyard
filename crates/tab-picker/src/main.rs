@@ -544,17 +544,23 @@ impl App {
             .map(Item::Task);
         let mut rows: Vec<Item> = tabs.chain(orphans).collect();
         // Pinned first and snoozed last. Most urgent first and, within a
-        // state, the one waiting longest first (unknown times last); the
-        // snoozed by when they wake.
-        rows.sort_by_key(|&i| {
+        // state that wants John, the one waiting longest first (unknown
+        // times last); the snoozed by when they wake. Working and idle
+        // agents go by name: their status time moves with every status
+        // message, and rows that swap as agents report are hard to pick.
+        // Ties go by name too, so the order never depends on which host
+        // answered first.
+        rows.sort_by_cached_key(|&i| {
             let f = self.flat(i);
+            let name = (f.project.to_string(), f.name.to_string(), f.host.to_string());
+            let at = match f.state {
+                "working" | "idle" => 0,
+                _ if f.since == 0 => u64::MAX,
+                _ => f.since,
+            };
             match self.agent_group(i) {
-                "snoozed" => (2, std::cmp::Reverse(0), f.wake),
-                group => (
-                    if group == "pinned" { 0 } else { 1 },
-                    std::cmp::Reverse(urgency(f.state)),
-                    if f.since == 0 { u64::MAX } else { f.since },
-                ),
+                "snoozed" => (2, std::cmp::Reverse(0), f.wake, name),
+                group => (if group == "pinned" { 0 } else { 1 }, std::cmp::Reverse(urgency(f.state)), at, name),
             }
         });
         rows
@@ -1974,6 +1980,26 @@ mod tests {
             Item::Status(""), Item::Task(3), Item::Task(4),
         ]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
+    }
+
+    #[test]
+    fn working_agents_keep_their_order_as_they_report() {
+        let order = |a: u64, b: u64| {
+            let mut app = App::new((String::new(), String::new()), View::Agents);
+            app.follow = false;
+            app.deliver(|app| {
+                app.tasks = parse_tasks(&serde_json::json!([
+                    {"session_id":"s", "window_id":"a", "project":"p", "name":"zeta", "status":"working", "status_at":a},
+                    {"session_id":"s", "window_id":"b", "project":"p", "name":"alpha", "status":"working", "status_at":b},
+                ]).to_string()).unwrap();
+                app.load = Load::Ready;
+                app.tasks_load = Tasks::Ready;
+            });
+            app.rows
+        };
+        let expected = vec![Item::Status("working"), Item::Task(1), Item::Task(0)];
+        assert_eq!(order(10, 20), expected);
+        assert_eq!(order(20, 10), expected);
     }
 
     #[test]

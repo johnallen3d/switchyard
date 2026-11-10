@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use crate::links::{
     Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo, parse_ref, pr_key, set_agent_links,
-    set_derived_pr, tracker_or_fizzy, FIZZY_BOARD_SH,
+    set_derived_items, set_derived_pr, tracker_or_fizzy, FIZZY_BOARD_SH,
 };
 use crate::rex::{home, host_bash, local_label, now};
 use crate::sessions::newest_session;
@@ -166,29 +166,40 @@ fn host_windows(host: &str) -> Option<HashMap<String, TabStatus>> {
 }
 
 /// Bash that sets `head` (the full branch head), `baseref` (the default
-/// branch's ref it was compared with) and `merged` for `$branch` in the
-/// checkout at `$path`: `merged` when the head is in the default branch
-/// (local or origin's), `new` when it is but the branch has no commits of
-/// its own yet (its head is where the reflog says it was created),
-/// `unmerged`, or empty when it can't tell. A caller that already knows
-/// them can set `wt_head` (the head) and `wt_base` (origin/HEAD's short
-/// name, possibly empty) to skip those lookups.
+/// branch's first ref found), `baserefs` (all of them, space separated:
+/// the local default branch and origin's, which may be ahead of it) and
+/// `merged` for `$branch` in the checkout at `$path`: `merged` when the
+/// head is in the default branch (local or origin's), `new` when it is but
+/// the branch's reflog shows no commits made on it (it was only created or
+/// fast-forwarded, as when it pulls the default branch), `unmerged`, or
+/// empty when it can't tell. A caller that already knows them can set
+/// `wt_head` (the head) and `wt_base` (origin/HEAD's short name, possibly
+/// empty) to skip those lookups.
 pub(crate) const MERGED_SH: &str = r#"
   head=${wt_head:-$(git -C "$path" rev-parse --verify --quiet "refs/heads/$branch" 2>/dev/null)}
   base=${wt_base-$(git -C "$path" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)}
   base=${base#origin/}
   merged=
   baseref=
+  baserefs=
   for ref in "refs/heads/${base:-main}" "refs/remotes/origin/${base:-main}"; do
     [ -n "$head" ] || break
     git -C "$path" rev-parse --verify --quiet "$ref" >/dev/null 2>&1 || continue
     baseref=${baseref:-$ref}
-    if git -C "$path" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then merged=merged; break; fi
-    merged=unmerged
+    baserefs="$baserefs $ref"
+    [ "$merged" = merged ] && continue
+    if git -C "$path" merge-base --is-ancestor "$head" "$ref" 2>/dev/null; then merged=merged; else merged=unmerged; fi
   done
   if [ "$merged" = merged ]; then
-    first=$(git -C "$path" reflog show --format=%H "refs/heads/$branch" 2>/dev/null | tail -n 1)
-    [ "$first" = "$head" ] && merged=new
+    # Without a reflog it can't tell, and stays merged.
+    reflog= own=
+    while IFS= read -r line; do
+      reflog=1
+      # Only the branch's creation and fast-forwards to a default branch
+      # are not its own work; anything else (commit, rebase, reset) is.
+      case $line in branch:*|merge\ *:\ Fast-forward) ;; *) own=1; break ;; esac
+    done < <(git -C "$path" reflog show --format=%gs "refs/heads/$branch" 2>/dev/null)
+    [ -n "$reflog" ] && [ -z "$own" ] && merged=new
   fi
 "#;
 
@@ -266,10 +277,12 @@ while IFS=$'\t' read -r repo branch; do
   fixes=
   if [ -n "$baseref" ]; then
     shopt -s nocasematch
+    # Commits in neither default branch ref, not just since the local one:
+    # a branch that pulled origin's newer one would claim what they close.
     while IFS= read -r line; do
       case $line in *'#'*) ;; *) continue ;; esac
       case $line in *fix*|*clos*|*resolv*) fixes="$fixes ${line//$'\t'/ }" ;; esac
-    done < <(git -C "$path" log --format=%B "$baseref..$head" 2>/dev/null)
+    done < <(git -C "$path" log --format=%B "$head" --not $baserefs 2>/dev/null)
     shopt -u nocasematch
     fixes=${fixes:0:4000}
   fi
@@ -488,19 +501,25 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         plans.push((i, tracker, worktree));
     }
     let mut lookups: Vec<(usize, Lookup)> = Vec::new();
+    // The derived issue and card links of tasks whose worktree was read,
+    // rebuilt rather than added to, so one the branch no longer implies
+    // goes. Without a worktree (or a PR answer) they are only added to.
+    let mut rebuilt: HashMap<usize, Vec<serde_json::Value>> = HashMap::new();
     for (i, tracker, worktree) in &plans {
         let task = &mut tasks[*i];
         let branch = field(task, "branch");
+        let mut items = Vec::new();
         if let Some(w) = worktree {
             set_agent_links(task, &w.links, tracker);
-            for r in &w.fixes {
-                if let Some(link) = parse_ref(r, tracker) {
-                    add_link(task, link, "derived");
-                }
-            }
+            items.extend(w.fixes.iter().filter_map(|r| parse_ref(r, tracker)));
         }
-        if let Some(link) = branch_number(&branch).and_then(|n| parse_ref(n, tracker)) {
-            add_link(task, link, "derived");
+        items.extend(branch_number(&branch).and_then(|n| parse_ref(n, tracker)));
+        if worktree.as_ref().is_some_and(|w| !w.path.is_empty()) {
+            rebuilt.insert(*i, items);
+        } else {
+            for link in items {
+                add_link(task, link, "derived");
+            }
         }
         if let (Some(repo), false) = (&tracker.github, branch.is_empty()) {
             lookups.push((*i, Lookup { profile: field(task, "profile"), repo: repo.clone(), branch }));
@@ -509,18 +528,30 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let prs = find_prs(&lookups.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>());
     let mut live_prs: Vec<(usize, String, Pr)> = Vec::new();
     for (i, l) in &lookups {
-        if let Some(pr) = prs.get(&pr_key(&l.repo, &l.branch)) {
-            set_derived_pr(&mut tasks[*i], &l.repo, pr);
-            if let Some(pr) = pr {
-                let tracker = &plans.iter().find(|(k, _, _)| k == i).expect("planned").1;
-                for r in &pr.fixes {
-                    if let Some(link) = parse_ref(r, tracker) {
+        let Some(pr) = prs.get(&pr_key(&l.repo, &l.branch)) else {
+            // GitHub couldn't be asked, so the PR body's links stay.
+            for link in rebuilt.remove(i).unwrap_or_default() {
+                add_link(&mut tasks[*i], link, "derived");
+            }
+            continue;
+        };
+        set_derived_pr(&mut tasks[*i], &l.repo, pr);
+        if let Some(pr) = pr {
+            let tracker = &plans.iter().find(|(k, _, _)| k == i).expect("planned").1;
+            let items = pr.fixes.iter().filter_map(|r| parse_ref(r, tracker));
+            match rebuilt.get_mut(i) {
+                Some(rebuilt) => rebuilt.extend(items),
+                None => {
+                    for link in items {
                         add_link(&mut tasks[*i], link, "derived");
                     }
                 }
-                live_prs.push((*i, l.repo.clone(), pr.clone()));
             }
+            live_prs.push((*i, l.repo.clone(), pr.clone()));
         }
+    }
+    for (i, items) in rebuilt {
+        set_derived_items(&mut tasks[i], items);
     }
     let live_prs: Vec<(String, String, Pr)> = live_prs
         .into_iter()
@@ -627,7 +658,7 @@ mod tests {
         git(&repo, &["init", "--quiet", "-b", "main"]);
         git(&repo, &["remote", "add", "origin", "git@github.com:o/r.git"]);
         git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
-        for b in ["fresh", "done", "open"] {
+        for b in ["fresh", "done", "open", "pulled"] {
             git(&repo, &["worktree", "add", "--quiet", "-b", b, root.join(b).to_str().unwrap(), "main"]);
         }
         git(&root.join("done"), &["commit", "--quiet", "--allow-empty", "-m", "done"]);
@@ -635,11 +666,17 @@ mod tests {
         git(&root.join("open"), &["commit", "--quiet", "--allow-empty", "-m", "open\n\nFixes #9, closes o/r#10"]);
         git(&repo, &["config", "--add", "branch.open.switchyard-link", "fizzy:5"]);
         git(&repo, &["config", "--add", "branch.open.switchyard-link", "https://github.com/o/r/issues/3"]);
+        // Origin's default branch moves on with someone else's fix, and a
+        // branch with no commits of its own pulls it; local main lags.
+        git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "other (#8)\n\nResolves #7"]);
+        git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&repo, &["reset", "--quiet", "--hard", "HEAD~1"]);
+        git(&root.join("pulled"), &["merge", "--quiet", "--ff-only", "origin/main"]);
         std::fs::write(root.join("open/new.txt"), "x").unwrap();
         std::fs::write(repo.join(".fizzy.yaml"), "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n").unwrap();
         let r = repo.to_str().unwrap().to_string();
         let pairs: Vec<(String, String)> =
-            ["fresh", "done", "open", "gone"].iter().map(|b| (r.clone(), b.to_string())).collect();
+            ["fresh", "done", "open", "gone", "pulled"].iter().map(|b| (r.clone(), b.to_string())).collect();
         let got = host_worktrees(&local_label(), &pairs).unwrap();
         let w: Vec<Worktree> = got.into_iter().map(Option::unwrap).collect();
         assert_eq!(w[0].merged, "new");
@@ -650,9 +687,11 @@ mod tests {
         assert_eq!(w[2].fixes, ["#9", "o/r#10"]);
         assert!(w[0].links.is_empty() && w[0].fixes.is_empty());
         assert!(w[3].path.is_empty());
+        assert_eq!(w[4].merged, "new");
+        assert!(w[4].fixes.is_empty(), "{:?}", w[4].fixes);
         // The repo's `.fizzy.yaml` board, with or without a worktree.
         assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
-        assert!(w[..3].iter().all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
+        assert!(w[..3].iter().chain(&w[4..]).all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
