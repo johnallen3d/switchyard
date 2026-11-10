@@ -54,11 +54,7 @@ use std::time::{Duration, Instant};
 use model::{Link, Session, State, Tab, Task, age, failed_hosts, link, now, parse_rows, parse_tasks, urgency, work_dir};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
-use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
-};
-use ratatui::crossterm::execute;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -754,22 +750,6 @@ impl App {
     fn delete_word(&mut self) {
         delete_word(&mut self.query);
         self.refilter();
-    }
-
-    fn click(&mut self, x: u16, y: u16) {
-        let a = self.list_area;
-        if x < a.x || x >= a.x + a.width || y < a.y || y >= a.y + a.height {
-            return;
-        }
-        let mut row = self.offset + (y - a.y) as usize;
-        if self.rows.get(row).is_some_and(|item| !selectable(item)) {
-            row += 1;
-        }
-        if self.rows.get(row).is_some_and(selectable) {
-            self.moved();
-            self.armed = Armed::No;
-            self.selected = Some(row);
-        }
     }
 
     // ------------------------------------------------------------ drawing
@@ -1510,9 +1490,6 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Task(4)));
         app.edge(false);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
-        app.list_area = Rect::new(0, 0, 100, 20);
-        app.click(2, 4); // Failed heading selects its first session, not the header.
-        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
         app.selected = Some(4);
         assert!(app.pick().is_empty());
         assert!(app.selected_key().is_none());
@@ -1661,12 +1638,6 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 }
             }
             Event::Paste(text) if !app.standalone => app.paste(&text),
-            Event::Mouse(m) => match m.kind {
-                MouseEventKind::ScrollUp => app.step(-1),
-                MouseEventKind::ScrollDown => app.step(1),
-                MouseEventKind::Down(MouseButton::Left) => app.click(m.column, m.row),
-                _ => {}
-            },
             _ => {}
         }
     }
@@ -1735,9 +1706,8 @@ fn main() -> io::Result<()> {
         app.paste(&format!("{}rows\n{input}", protocol::DATA));
     }
     let mut term = ratatui::init();
-    let _ = execute!(io::stdout(), EnableMouseCapture);
+    // No mouse capture, so the terminal's own selection and copy work.
     let result = run(&mut term, &mut app);
-    let _ = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
     // Leave the shell's title as it was before the picks.
     if app.standalone {
