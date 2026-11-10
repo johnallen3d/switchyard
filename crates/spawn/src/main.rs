@@ -37,8 +37,8 @@
 //!   prints the registry as JSON with each open task's live agent status,
 //!   for rex-tab-picker's agents and archive views (cmd+k, cmd+i).
 //! - `--act ACTION HOST SESSION WINDOW`: runs on the config host. Reviews or
-//!   archives the task in that tab, or resumes an ended one (see core's
-//!   `actions`).
+//!   archives the task in that tab, resumes an ended one, or prints its main
+//!   work item's URL (see core's `actions` and `links`).
 //! - `--run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION MODE] [PROMPT]`:
 //!   runs in that tab. Clones a missing project, creates or reuses the
 //!   worktree with Worktrunk, starts (MODE `new`, with the prompt as its
@@ -70,7 +70,7 @@ const USAGE: &str = "usage: rex-spawn [--kind agent|session] [--home LABEL FOLDE
        rex-spawn --launch HOST PATH NAME HARNESS [PROMPT_REF]
        rex-spawn --run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume] [PROMPT]
        rex-spawn --tasks [--live]
-       rex-spawn --act review|archive|force-archive|resume HOST SESSION_ID WINDOW_ID
+       rex-spawn --act review|archive|force-archive|resume|link HOST SESSION_ID WINDOW_ID
        rex-spawn --session-of PROFILE HARNESS WORKTREE
 
 Without a mode, shows the new-session picker (kind agent unless --kind
@@ -89,8 +89,8 @@ with PROMPT as its first message or resuming it. --tasks checks recorded tasks a
 hosts and prints them as JSON with live agent status; with --live it only
 adds the status, without checking worktrees or ending tasks. --act reviews or
 archives the task in a tab (force-archive also throws away uncommitted
-changes), or resumes an ended task's agent session in a new tab and prints
-it as --launch does. --session-of prints the newest agent session for a
+changes), resumes an ended task's agent session in a new tab and prints
+it as --launch does, or prints the URL of the task's main work item (link). --session-of prints the newest agent session for a
 worktree on this host.";
 
 /// The picker's options: `--kind KIND`, then from the float `--home LABEL

@@ -2,6 +2,7 @@
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
 use crate::hosts::{AUTO, Project, catalog, choose_host};
+use crate::links::{Tracker, refs_in_text};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
 use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, host_home, log, now, rex_json, sh_quote};
@@ -37,6 +38,7 @@ fn folder_project(host: &str, path: &str, projects: &[Project]) -> Result<Projec
         path: repo,
         clone_url: String::new(),
         hosts: vec![host.to_string()],
+        tracker: configured.map(|p| p.tracker.clone()).unwrap_or_default(),
     })
 }
 
@@ -54,8 +56,9 @@ fn folder_script(path: &str) -> String {
     )
 }
 
-/// Open the work's tab on `host` and record it. A path outside the catalog
-/// must be an existing Git folder on that explicit host. With `resume`, the tab
+/// Open the work's tab on `host` and record it, with the work items its
+/// prompt names as `spawn` links. A path outside the catalog must be an
+/// existing Git folder on that explicit host. With `resume`, the tab
 /// resumes that agent session with its recorded profile instead of starting
 /// a new one, and `host` is used as is (never `auto`: the session lives there).
 pub fn launch(
@@ -148,6 +151,16 @@ pub fn launch(
     if let Some(r) = prompt_ref {
         discard_prompt(r);
     }
+    // Work items the prompt names (`#42`, `fizzy:123`, issue and card
+    // URLs), under the project's tracker.
+    let tracker = Tracker::new(&project.tracker, &project.clone_url);
+    let links: Vec<serde_json::Value> = refs_in_text(&prompt, &tracker)
+        .into_iter()
+        .map(|mut l| {
+            l["source"] = "spawn".into();
+            l
+        })
+        .collect();
     let task = serde_json::json!({
         "host": host,
         "session_id": session,
@@ -162,6 +175,8 @@ pub fn launch(
         "worktree": format!("{cwd}/.worktrees/{slug}"),
         "harness": harness,
         "agent_session": agent_session,
+        // Work items (issues, cards, PRs); see `links`.
+        "links": links,
         "created_at": now(),
         "ended_at": null,
         "ended_reason": null,
@@ -220,7 +235,7 @@ mod tests {
         let repo = Fixture::new();
         let configured = Project {
             profile: "work".into(), path: repo.0.to_str().unwrap().into(),
-            clone_url: "not used".into(), name: "configured".into(), hosts: vec![],
+            clone_url: "not used".into(), name: "configured".into(), hosts: vec![], tracker: String::new(),
         };
         let project = folder_project(
             &crate::rex::local_label(), repo.0.join("nested folder").to_str().unwrap(), &[configured],

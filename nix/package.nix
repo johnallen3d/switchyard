@@ -11,6 +11,8 @@
 #   events on the config host and serves them on a Unix socket; the tools
 #   fall back to direct queries without it (the Home Manager module runs it
 #   as a service).
+# - switchyard: `switchyard link REF`, which links the current branch to a
+#   work item (issue, card, PR) for the inbox.
 #
 # The Lua ships separately (the Home Manager module links it on the Mac).
 {

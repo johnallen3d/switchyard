@@ -22,7 +22,8 @@
 -- reads: Enter jumps (go, task), resumes an ended task's agent session in a
 -- new tab and jumps there (resume), or runs an archive armed with ctrl+x in
 -- the float (archive, force-archive; for ask, a dirty worktree, it types
--- ctrl+x back so the float asks "are you sure"); ctrl+r reviews a task.
+-- ctrl+x back so the float asks "are you sure"); ctrl+r reviews a task, and
+-- ctrl+l opens its main work item (`rex-spawn --act link`).
 -- TARGET is "-" for this host or the hex-encoded host label. See
 -- ../../crates/tab-picker/src/main.rs and
 -- ../../crates/core/src/actions.rs.
@@ -249,6 +250,26 @@ rex.action{
   end,
 }
 
+-- Open the highlighted task's main work item (its PR, else an issue, card
+-- or commit; see ../../crates/core/src/links.rs). The Rex app runs on this
+-- config host, so a browser opened here opens where John is; Rex has no
+-- client action for a URL.
+rex.action{
+  name  = "tab_picker_open_link",
+  title = "Open Picked Task's Work Item",
+  run   = function(ctx, args)
+    local pick = read_pick(ctx, "ctrl+l")
+    -- Only task rows have work items.
+    if pick == nil or pick.action == "go" then return end
+    local url = (act("link", pick):gsub("%s+$", ""))
+    close_picker(ctx)
+    local r, err = rex.exec({ "sh", "-c", 'if command -v open >/dev/null 2>&1; then exec open "$1"; else exec xdg-open "$1"; fi',
+      "sh", url }, { env = util.cli_env() })
+    if r == nil then error(err, 0) end
+    if not r.ok then error("can't open " .. url .. ": " .. (r.stderr:gsub("%s+$", "")), 0) end
+  end,
+}
+
 rex.action{
   name  = "tab_picker_cancel",
   title = "Close Tab Picker",
@@ -259,4 +280,5 @@ rex.bind("cmd+k", "tab_picker")
 rex.bind("cmd+i", "tab_picker_agents")
 rex.bind("tab_picker/enter", "tab_picker_go")
 rex.bind("tab_picker/ctrl+r", "tab_picker_review")
+rex.bind("tab_picker/ctrl+l", "tab_picker_open_link")
 rex.bind("tab_picker/escape", "tab_picker_cancel")

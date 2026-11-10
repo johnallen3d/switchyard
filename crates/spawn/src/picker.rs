@@ -1420,7 +1420,7 @@ mod tests {
     fn app() -> App {
         let mut app = App::new(Kind::Agent, vec![Project {
             profile: "personal".into(), path: "~/catalog/repo".into(),
-            clone_url: "unused".into(), name: "repo".into(), hosts: vec![],
+            clone_url: "unused".into(), name: "repo".into(), hosts: vec![], tracker: String::new(),
         }], "config-host".into(), String::new(), vec!["folder-host".into()]);
         // Supply deterministic folders; no prompts, tasks or tabs are written.
         app.here = "picker-host".into();

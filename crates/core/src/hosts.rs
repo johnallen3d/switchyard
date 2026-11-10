@@ -14,6 +14,8 @@ pub struct Project {
     pub name: String,
     /// Pool override from projects.toml's `hosts`; empty uses the group's.
     pub hosts: Vec<String>,
+    /// The catalog's `tracker` (see `links::Tracker`); may be empty.
+    pub tracker: String,
 }
 
 /// The catalog projects (from projects.toml), or why the config is unreadable.
@@ -29,6 +31,7 @@ pub fn catalog() -> Result<Vec<Project>, String> {
                 clone_url: p.clone_url.clone(),
                 name: name.into(),
                 hosts: p.hosts.clone(),
+                tracker: p.tracker.clone(),
             }
         })
         .collect())

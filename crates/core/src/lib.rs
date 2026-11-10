@@ -8,6 +8,7 @@ pub mod config;
 pub mod folders;
 pub mod hosts;
 pub mod launch;
+pub mod links;
 pub mod naming;
 pub mod prompts;
 pub mod rex;

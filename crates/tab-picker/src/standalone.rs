@@ -6,11 +6,12 @@
 //! else directly, every few seconds: the rows from one `rex do -e` on this
 //! host that runs host_rows.lua on every server (as the fill script does),
 //! and the tasks from the registry through switchyard-core (live status
-//! first, then the worktree check). It acts on Enter, ctrl-r and the "ask"
-//! confirm the way the config's tab_picker mode does, through core's
-//! actions and `rex do session.select`, then stays open, showing the
-//! outcome and the data after it. Escape or ctrl-c closes it. The registry
-//! is on the Mac; elsewhere it shows tabs only.
+//! first, then the worktree check). It acts on Enter, ctrl-r, ctrl-l (open
+//! the task's work item) and the "ask" confirm the way the config's
+//! tab_picker mode does, through core's actions and `rex do
+//! session.select`, then stays open, showing the outcome and the data after
+//! it. Escape or ctrl-c closes it. The registry is on the Mac; elsewhere it
+//! shows tabs only.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -264,6 +265,24 @@ pub fn resume(p: &Pick) -> Result<(), String> {
         (Some(h), Some(s), Some(w)) => select(h, s, w),
         _ => Err(format!("resume printed no tab: {out}")),
     }
+}
+
+/// Open the pick's task's main work item in the browser here (the
+/// standalone picker runs where John is); Ok is the URL.
+pub fn open_link(p: &Pick) -> Result<String, String> {
+    let url = actions::act("link", &p.host, &p.session, &p.window)?.trim().to_string();
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let status = std::process::Command::new(opener)
+        .arg(&url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|e| format!("{opener}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{opener} {url} failed ({status})"));
+    }
+    Ok(url)
 }
 
 /// Log an action's outcome to the state log, as `rex-spawn --act` does.

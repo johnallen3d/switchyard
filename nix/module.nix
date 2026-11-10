@@ -131,6 +131,17 @@ in {
                   default = [];
                   description = "Hosts for this project, overriding its pool.";
                 };
+                tracker = mkOption {
+                  type = types.str;
+                  default = "";
+                  example = "fizzy:6284043/03h7f11emprus7nifd286mh8n";
+                  description = ''
+                    Where the project's work items live, for linking tasks to
+                    them: `github:OWNER/REPO` and/or `fizzy:ACCOUNT/BOARD`,
+                    comma separated. The first decides what a bare `#42`
+                    means; the GitHub repo defaults to the clone URL's.
+                  '';
+                };
               };
             });
           };

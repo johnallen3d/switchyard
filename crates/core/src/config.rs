@@ -31,6 +31,9 @@ pub struct ProjectEntry {
     pub path: String,
     pub clone_url: String,
     pub hosts: Vec<String>,
+    /// What the project's refs mean (see `links::Tracker`):
+    /// `github:OWNER/REPO` and/or `fizzy:ACCOUNT/BOARD`.
+    pub tracker: String,
 }
 
 pub fn path() -> PathBuf {

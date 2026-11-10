@@ -115,6 +115,32 @@ pub fn failed_hosts(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// A work item linked to a task (see core's `links`), with a PR's live
+/// state and checks when known.
+#[derive(Clone, Default)]
+pub struct Link {
+    pub kind: String,
+    pub system: String,
+    pub reference: String,
+    pub url: String,
+    pub state: String,
+    pub checks: String,
+}
+
+impl Link {
+    /// The short form a badge shows: `#42`, `PR #57`, `card 123`, `a1b2c3d`.
+    pub fn short(&self) -> String {
+        let number = self.reference.rsplit_once('#').map_or(self.reference.as_str(), |(_, n)| n);
+        match self.kind.as_str() {
+            "pr" => format!("PR #{number}"),
+            "issue" if self.system == "github" => format!("#{number}"),
+            "card" => format!("card {number}"),
+            "commit" => self.reference.chars().take(7).collect(),
+            _ => self.reference.clone(),
+        }
+    }
+}
+
 pub struct Task {
     /// The registry's host label (`hostname -s`).
     pub host: String,
@@ -135,6 +161,11 @@ pub struct Task {
     pub ended: Option<String>,
     /// An ended task whose worktree is still there, for ctrl-x to remove.
     pub left: bool,
+    /// Linked work items, PRs first.
+    pub links: Vec<Link>,
+    /// Whether the branch is merged into the default branch (`merged`,
+    /// `unmerged`, `new`), when its worktree was checked.
+    pub merged: String,
     /// The listed tab it runs in, if open and listed.
     pub tab: Option<usize>,
 }
@@ -151,7 +182,22 @@ impl Task {
     /// Ended by an archive (or a discard, its old name) rather than by its
     /// tab closing or worktree going away.
     pub fn archived(&self) -> bool {
-        matches!(self.ended.as_deref(), Some("archived" | "force-archived" | "discarded" | "force-discarded"))
+        matches!(self.ended.as_deref(), Some("archived" | "force-archived" | "merged" | "discarded" | "force-discarded"))
+    }
+
+    /// Safe to archive: open (or ended with its worktree left), nothing
+    /// uncommitted, and its work merged (a PR GitHub reports merged, or
+    /// the branch in the default branch). Known only after the worktree
+    /// check.
+    pub fn safe(&self) -> bool {
+        (self.ended.is_none() || self.left)
+            && self.dirty == 0
+            && (self.merged == "merged" || self.links.iter().any(|l| l.kind == "pr" && l.state == "merged"))
+    }
+
+    /// The links as search text: their short forms and refs.
+    pub fn links_text(&self) -> String {
+        self.links.iter().map(|l| format!("{} {}", l.short(), l.reference)).collect::<Vec<_>>().join(" ")
     }
 }
 
@@ -185,9 +231,34 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
                 r => r,
             }),
             left: t["worktree_left"].as_bool().unwrap_or(false),
+            links: parse_links(&t["links"]),
+            merged: s(t, "branch_merged"),
             tab: None,
         })
         .collect())
+}
+
+/// A task's links, PRs first, then issues, cards and commits.
+fn parse_links(v: &serde_json::Value) -> Vec<Link> {
+    let s = |l: &serde_json::Value, k: &str| l[k].as_str().unwrap_or("").to_string();
+    let mut links: Vec<Link> = v
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|l| Link {
+                    kind: s(l, "kind"),
+                    system: s(l, "system"),
+                    reference: s(l, "ref"),
+                    url: s(l, "url"),
+                    state: s(l, "state"),
+                    checks: s(l, "checks"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let rank = |k: &str| ["pr", "issue", "card", "commit"].iter().position(|x| *x == k).unwrap_or(4);
+    links.sort_by_key(|l| rank(&l.kind));
+    links
 }
 
 /// Link each open task to its listed tab, both ways.

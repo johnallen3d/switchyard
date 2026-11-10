@@ -36,7 +36,8 @@
 //! `-` for the config host, else the hex-encoded host label; task rows with
 //! no listed tab use the registry host. The config's mode turns Enter,
 //! ctrl-r and Escape into the actions, so in the float this program never
-//! talks to Rex.
+//! talks to Rex. ctrl-l (bound by the config too) opens the highlighted
+//! task's main work item; task rows show their links as badges.
 //!
 //! Run bare from a shell (`rex-tab-picker`, or `rex-inbox` for the Agents
 //! view), it works without the float: it fetches the data and acts on its
@@ -50,7 +51,7 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
-use model::{Session, State, Tab, Task, age, failed_hosts, link, now, parse_rows, parse_tasks, urgency, work_dir};
+use model::{Link, Session, State, Tab, Task, age, failed_hosts, link, now, parse_rows, parse_tasks, urgency, work_dir};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::crossterm::event::{
@@ -181,6 +182,9 @@ struct Flat<'a> {
     work: bool,
     dirty: u64,
     since: u64,
+    /// Linked work items, PRs first, and the branch's merge state.
+    links: &'a [Link],
+    merged: &'a str,
 }
 
 type Key = (String, String);
@@ -434,6 +438,8 @@ impl App {
                         work: t.work(),
                         dirty: t.dirty,
                         since: t.since,
+                        links: &t.links,
+                        merged: &t.merged,
                     },
                     None => Flat {
                         project: &session.label,
@@ -446,6 +452,8 @@ impl App {
                         work: work_dir(&tab.dir),
                         dirty: 0,
                         since: 0,
+                        links: &[],
+                        merged: "",
                     },
                 }
             }
@@ -461,6 +469,8 @@ impl App {
                 work: false,
                 dirty: 0,
                 since: 0,
+                links: &[],
+                merged: "",
             },
             Item::Task(k) => {
                 let t = &self.tasks[k];
@@ -475,6 +485,8 @@ impl App {
                     work: t.work(),
                     dirty: t.dirty,
                     since: t.since,
+                    links: &t.links,
+                    merged: &t.merged,
                 }
             }
         }
@@ -555,8 +567,10 @@ impl App {
     }
 
     /// Agents and Archive: rows in the given order, with status headings
-    /// for matching Agents only. Matches project (or session), name and host.
-    /// Returns the best match.
+    /// for matching Agents only. Matches project (or session), name, host
+    /// and the task's work items (`#42`, `card 1041`, `PR #57`), so an
+    /// ended task can be found by its issue or card and resumed. Returns
+    /// the best match.
     fn filter_flat(&mut self, rows: Vec<Item>, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
         let mut group = None;
@@ -569,7 +583,9 @@ impl App {
                 continue;
             }
             if filtering {
-                let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&project, &name, &host]) else {
+                let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
+                let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&project, &name, &host, &links])
+                else {
                     continue;
                 };
                 self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone() });
@@ -1126,10 +1142,51 @@ impl App {
         }
     }
 
-    /// The right side of a flat row, [dirty] [host chip] [state age], and its width.
+    /// A flat row's work items, such as `#42 · PR #57 ✓ merged`: at most
+    /// two links (PRs first) and a count of the rest, or `merged` for a
+    /// branch in the default branch with no PR. Empty for none.
+    fn badge_spans(&self, t: &Flat, bg: Color) -> Vec<Span<'static>> {
+        let p = &self.p;
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let dot = || Span::styled(" · ", Style::new().fg(p.muted).bg(bg));
+        for link in t.links.iter().take(2) {
+            if !spans.is_empty() {
+                spans.push(dot());
+            }
+            spans.push(Span::styled(link.short(), Style::new().fg(p.subtle).bg(bg)));
+            let state = match (link.state.as_str(), link.checks.as_str()) {
+                ("merged", _) => Some(("✓ merged", p.iris)),
+                ("closed", _) => Some(("closed", p.muted)),
+                ("draft", _) => Some(("draft", p.muted)),
+                (_, "pass") => Some(("✓", p.pine)),
+                (_, "fail") => Some(("✗", p.love)),
+                (_, "pending") => Some(("●", p.gold)),
+                _ => None,
+            };
+            if let Some((text, color)) = state {
+                spans.push(Span::styled(format!(" {text}"), Style::new().fg(color).bg(bg)));
+            }
+        }
+        if t.links.len() > 2 {
+            spans.push(Span::styled(format!(" +{}", t.links.len() - 2), Style::new().fg(p.muted).bg(bg)));
+        }
+        if t.merged == "merged" && !t.links.iter().any(|l| l.kind == "pr") {
+            if !spans.is_empty() {
+                spans.push(dot());
+            }
+            spans.push(Span::styled("merged", Style::new().fg(p.iris).bg(bg)));
+        }
+        if !spans.is_empty() {
+            spans.push(Span::styled("  ", Style::new().bg(bg)));
+        }
+        spans
+    }
+
+    /// The right side of a flat row, [work items] [dirty] [host chip]
+    /// [state age], and its width.
     fn right_spans(&self, t: &Flat, bg: Color, verb: &str) -> (Vec<Span<'static>>, usize) {
         let p = &self.p;
-        let mut right: Vec<Span> = Vec::new();
+        let mut right: Vec<Span> = self.badge_spans(t, bg);
         if t.dirty > 0 {
             right.push(Span::styled(format!("✎{}  ", t.dirty), Style::new().fg(p.gold).bg(bg)));
         }
@@ -1149,6 +1206,7 @@ impl App {
         let (glyph, color, verb) = match (t.ended, t.state) {
             // Closed without an archive: the worktree is still there.
             (Some(_), _) if t.left => ("▢", p.gold, "closed"),
+            (Some("merged"), _) => ("▢", p.iris, "merged"),
             (Some("archived" | "force-archived" | "discarded" | "force-discarded"), _) => ("▢", p.iris, "archived"),
             (Some("tab closed"), _) => ("▢", p.muted, "closed"),
             (Some("worktree removed"), _) => ("▢", p.muted, "removed"),
@@ -1231,11 +1289,18 @@ impl App {
         }
         let task = self.selected_task();
         let mut keys: Vec<(&str, &str)> = match task {
+            Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
             Some(t) if t.ended.is_some() && t.left => vec![("⏎", "resume"), ("⌃X", "remove worktree")],
             Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
+            Some(t) if t.safe() => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive (merged)")],
             Some(_) => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive")],
             None => vec![("⏎", "go")],
         };
+        // ⌃L opens the task's main work item (core's `links::primary`: the
+        // first kind with a URL, PRs first).
+        if let Some(link) = task.and_then(|t| t.links.iter().find(|l| !l.url.is_empty())) {
+            keys.push(("⌃L", if link.kind == "pr" { "open PR" } else { "open link" }));
+        }
         keys.push(("⇥", self.view.next(false).name()));
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
@@ -1300,13 +1365,25 @@ impl App {
     /// Enter, ctrl-r and Escape in a standalone picker, as the config's
     /// tab_picker mode handles them; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
-        let review = matches!(k.code, KeyCode::Char('r') if k.modifiers.contains(KeyModifiers::CONTROL));
-        if !review && !matches!(k.code, KeyCode::Enter) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let review = matches!(k.code, KeyCode::Char('r') if ctrl);
+        let open = matches!(k.code, KeyCode::Char('l') if ctrl);
+        if !review && !open && !matches!(k.code, KeyCode::Enter) {
             return false;
         }
         self.note = None;
         let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
         let label = self.selected_label();
+        // Open the task's main work item; nothing to refresh after.
+        if open {
+            if self.selected_task().is_some() {
+                self.note = Some(match standalone::open_link(&pick) {
+                    Ok(url) => (format!("opened {url}"), false),
+                    Err(e) => (e, true),
+                });
+            }
+            return true;
+        }
         let done = |r: Result<(), String>, msg: String| match r {
             Ok(()) => (msg, false),
             Err(e) => (e, true),
@@ -1470,6 +1547,56 @@ mod tests {
     }
 
     #[test]
+    fn task_rows_show_work_item_badges_and_open_hint() {
+        let mut app = App::new((String::new(), String::new()), View::Agents);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"linked", "status":"done", "links":[
+                    {"kind":"issue","system":"github","ref":"o/r#42","url":"i"},
+                    {"kind":"pr","system":"github","ref":"o/r#57","url":"p","state":"merged","checks":"pass"}]},
+                {"session_id":"s", "window_id":"b", "name":"local", "status":"working", "branch_merged":"merged"}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        assert_eq!(app.tasks[0].links[0].kind, "pr");
+        let mut terminal = Terminal::new(TestBackend::new(120, 6)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("PR #57 ✓ merged · #42"), "{text}");
+        assert!(text.contains("merged"));
+        let mut terminal = Terminal::new(TestBackend::new(160, 3)).unwrap();
+        terminal.draw(|f| app.draw_footer(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("open PR"), "{text}");
+    }
+
+    #[test]
+    fn archive_search_finds_tasks_by_work_item_and_merged_work_is_safe() {
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"carded", "ended_at":5, "ended_reason":"merged",
+                 "links":[{"kind":"card","system":"fizzy","ref":"1041","url":"c"}]},
+                {"session_id":"s", "window_id":"b", "name":"other", "ended_at":6, "ended_reason":"tab closed",
+                 "worktree_left":true, "dirty_count":0, "branch_merged":"merged"},
+                {"session_id":"s", "window_id":"c", "name":"dirty", "dirty_count":2,
+                 "links":[{"kind":"pr","system":"github","ref":"o/r#1","url":"p","state":"merged"}]},
+                {"session_id":"s", "window_id":"d", "name":"open",
+                 "links":[{"kind":"pr","system":"github","ref":"o/r#2","url":"p","state":"merged"}]}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        app.query = "card 1041".into();
+        app.refilter();
+        assert_eq!(app.rows, vec![Item::Task(0)]);
+        assert_eq!(app.pick(), format!("resume:{}/s/a", hex("")));
+        assert!(app.tasks[0].archived());
+        assert!(!app.tasks[0].safe() && app.tasks[1].safe() && !app.tasks[2].safe() && app.tasks[3].safe());
+    }
+
+    #[test]
     fn status_headings_render_without_changing_other_views() {
         let mut app = inbox();
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
@@ -1502,8 +1629,8 @@ and the body: KIND rows (or error and a message), live and tasks
 
 Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
 tabs and tasks itself, from switchyard-server as they change when it runs,
-else directly every few seconds, and acts on Enter and ctrl-r, staying open
-until Escape or ctrl-c.";
+else directly every few seconds, and acts on Enter, ctrl-r and ctrl-l (open
+the task's work item), staying open until Escape or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
