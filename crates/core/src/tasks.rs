@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use crate::links::{
     Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo, parse_ref, pr_key, set_agent_links,
-    set_derived_pr,
+    set_derived_pr, tracker_or_fizzy, FIZZY_BOARD_SH,
 };
 use crate::rex::{home, host_bash, local_label, now};
 use crate::sessions::newest_session;
@@ -202,10 +202,11 @@ pub(crate) const MERGED_SH: &str = r#"
 /// hosts; their login shell is Fish), or locally for the config host.
 fn host_worktrees(host: &str, pairs: &[(String, String)]) -> Option<Vec<Option<Worktree>>> {
     // One line per pair:
-    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FILE...,
-    // "-" for no worktree, "?" for no repo. MERGED is as MERGED_SH sets it;
-    // LINKS are the branch's `switchyard-link` git config values, FIXES its
-    // commit message lines that may close issues, space separated.
+    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>FILE...,
+    // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
+    // sets it; LINKS are the branch's `switchyard-link` git config values,
+    // FIXES its commit message lines that may close issues, space separated;
+    // FIZZY the repo's `.fizzy.yaml` board (see `links::FIZZY_BOARD_SH`).
     // Each repo's worktree list, origin URL, default branch and link config
     // are read once, the branch head comes from the worktree list, and the
     // rest is shell builtins where it can be: starting processes is most of
@@ -215,9 +216,10 @@ fn host_worktrees(host: &str, pairs: &[(String, String)]) -> Option<Vec<Option<W
 "#,
     );
     script.push_str(MERGED_SH);
+    script.push_str("}\n");
+    script.push_str(FIZZY_BOARD_SH);
     script.push_str(
-        r#"}
-repos=() lists=() origins=() bases=() configs=()
+        r#"repos=() lists=() origins=() bases=() configs=() boards=()
 while IFS=$'\t' read -r repo branch; do
   list= n=
   for i in "${!repos[@]}"; do
@@ -226,11 +228,13 @@ while IFS=$'\t' read -r repo branch; do
   if [ -z "$n" ]; then
     n=${#repos[@]}
     list=$(git -C "$repo" worktree list --porcelain 2>/dev/null) || list="?"
-    repos[$n]=$repo lists[$n]=$list origins[$n]= bases[$n]= configs[$n]=
+    repos[$n]=$repo lists[$n]=$list origins[$n]= bases[$n]= configs[$n]= boards[$n]=
     if [ "$list" != "?" ]; then
       origins[$n]=$(git -C "$repo" remote get-url origin 2>/dev/null)
       bases[$n]=$(git -C "$repo" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
       configs[$n]=$(git -C "$repo" config --get-regexp '^branch\..*\.switchyard-link$' 2>/dev/null)
+      boards[$n]=$(fizzy_board "$repo")
+      boards[$n]=${boards[$n]//$'\t'/}
     fi
   fi
   if [ "$list" = "?" ]; then echo "?"; continue; fi
@@ -242,7 +246,7 @@ while IFS=$'\t' read -r repo branch; do
       "branch refs/heads/$branch") path=$wt wt_head=$sha; break ;;
     esac
   done <<<"$list"
-  if [ "$path" = "-" ]; then echo "-"; continue; fi
+  if [ "$path" = "-" ]; then printf -- '-\t%s\n' "${boards[$n]}"; continue; fi
   count=0 files=
   while IFS= read -r line; do
     [ -n "$line" ] || continue
@@ -269,7 +273,7 @@ while IFS=$'\t' read -r repo branch; do
     shopt -u nocasematch
     fixes=${fixes:0:4000}
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$count" "${head:0:12}" "$merged" "$origin" "$links" "$fixes" "$files"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$count" "${head:0:12}" "$merged" "$origin" "$links" "$fixes" "${boards[$n]}" "$files"
 done <<'RSP_PAIRS'
 "#,
     );
@@ -288,7 +292,10 @@ done <<'RSP_PAIRS'
             .into_iter()
             .map(|l| match l {
                 "?" => None,
-                "-" => Some(Worktree::default()),
+                line if line == "-" || line.starts_with("-\t") => {
+                    let fizzy = line.split('\t').nth(1).unwrap_or("").to_string();
+                    Some(Worktree { fizzy, ..Worktree::default() })
+                }
                 line => {
                     let mut f = line.split('\t');
                     let path = f.next().unwrap_or("").to_string();
@@ -298,8 +305,9 @@ done <<'RSP_PAIRS'
                     let origin = f.next().unwrap_or("").to_string();
                     let links = f.next().unwrap_or("").split_whitespace().map(String::from).collect();
                     let fixes = crate::links::fixed_refs(f.next().unwrap_or(""));
+                    let fizzy = f.next().unwrap_or("").to_string();
                     let files = f.filter(|s| !s.is_empty()).map(String::from).collect();
-                    Some(Worktree { path, dirty, files, head, merged, origin, links, fixes })
+                    Some(Worktree { path, dirty, files, head, merged, origin, links, fixes, fizzy })
                 }
             })
             .collect(),
@@ -321,6 +329,8 @@ struct Worktree {
     /// The branch's `switchyard-link` refs, and the issues its commits fix.
     links: Vec<String>,
     fixes: Vec<String>,
+    /// The repo's `.fizzy.yaml` board, `ACCOUNT/BOARD`, or empty.
+    fizzy: String,
 }
 
 
@@ -465,7 +475,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             .filter(|o| github_repo(o).is_some())
             .or_else(|| project.map(|p| p.clone_url.clone()))
             .unwrap_or_default();
-        let mut tracker = Tracker::new(project.map(|p| p.tracker.as_str()).unwrap_or(""), &remote);
+        let board = worktree.as_ref().map(|w| w.fizzy.as_str()).unwrap_or("");
+        let catalog = project.map(|p| p.tracker.as_str()).unwrap_or("");
+        let mut tracker = Tracker::new(&tracker_or_fizzy(catalog, board), &remote);
         if tracker.github.is_none() {
             tracker.github = task["links"].as_array().and_then(|links| {
                 links.iter().filter(|l| l["kind"] == "pr" && l["system"] == "github").find_map(|l| {
@@ -579,6 +591,7 @@ mod tests {
         git(&repo, &["config", "--add", "branch.open.switchyard-link", "fizzy:5"]);
         git(&repo, &["config", "--add", "branch.open.switchyard-link", "https://github.com/o/r/issues/3"]);
         std::fs::write(root.join("open/new.txt"), "x").unwrap();
+        std::fs::write(repo.join(".fizzy.yaml"), "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n").unwrap();
         let r = repo.to_str().unwrap().to_string();
         let pairs: Vec<(String, String)> =
             ["fresh", "done", "open", "gone"].iter().map(|b| (r.clone(), b.to_string())).collect();
@@ -592,6 +605,8 @@ mod tests {
         assert_eq!(w[2].fixes, ["#9", "o/r#10"]);
         assert!(w[0].links.is_empty() && w[0].fixes.is_empty());
         assert!(w[3].path.is_empty());
+        // The repo's `.fizzy.yaml` board, with or without a worktree.
+        assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
         assert!(w[..3].iter().all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
         let _ = std::fs::remove_dir_all(&root);
     }

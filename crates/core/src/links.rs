@@ -24,7 +24,9 @@
 //!
 //! A ref's meaning depends on the project's tracker, from the catalog's
 //! `tracker` (see `Tracker`): a bare `#42` is a GitHub issue, or a Fizzy
-//! card when the tracker is a Fizzy board.
+//! card when the tracker is a Fizzy board. A project whose catalog entry
+//! sets no tracker falls back to the board its checkout's `.fizzy.yaml`
+//! names (see `tracker_or_fizzy`), and failing that to GitHub.
 //!
 //! PR lookups are cached in `$XDG_STATE_HOME/rex/switchyard-links.json`
 //! for `PR_TTL_SECS`, so the inbox's refreshes don't call GitHub every
@@ -386,6 +388,38 @@ impl Tracker {
     }
 }
 
+/// A shell function, `fizzy_board REPO`, that prints `ACCOUNT/BOARD` from
+/// the checkout's `.fizzy.yaml` (the Fizzy CLI's per-repo config), or
+/// nothing when it has none. Builtins only; Bash 3.2 runs it.
+pub const FIZZY_BOARD_SH: &str = r#"fizzy_board() {
+  local account= board= key value
+  [ -f "$1/.fizzy.yaml" ] || return 0
+  while IFS=: read -r key value || [ -n "$key" ]; do
+    value=${value%$'\r'}
+    value=${value#"${value%%[![:space:]]*}"}
+    value=${value%"${value##*[![:space:]]}"}
+    value=${value#[\"\']} value=${value%[\"\']}
+    case $key in
+      account) account=$value ;;
+      board) board=$value ;;
+    esac
+  done < "$1/.fizzy.yaml"
+  if [ -n "$account" ]; then printf '%s/%s' "$account" "$board"; fi
+  return 0
+}
+"#;
+
+/// The catalog's tracker, or when it sets none, the Fizzy board a
+/// checkout's `.fizzy.yaml` names (`ACCOUNT/BOARD`, from `fizzy_board`),
+/// so a bare `#42` in a project tracked on Fizzy is a card.
+pub fn tracker_or_fizzy(catalog: &str, fizzy_board: &str) -> String {
+    let fizzy_board = fizzy_board.trim();
+    if !catalog.trim().is_empty() || fizzy_board.is_empty() {
+        return catalog.to_string();
+    }
+    format!("fizzy:{fizzy_board}")
+}
+
 fn digits(s: &str) -> Option<&str> {
     (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then_some(s)
 }
@@ -645,6 +679,16 @@ mod tests {
         assert_eq!((card["kind"].as_str(), card["ref"].as_str()), (Some("card"), Some("42")));
         assert_eq!(card["url"], "https://app.fizzy.do/6284043/cards/42");
         assert!(parse_ref("#42", &Tracker::default()).is_none());
+    }
+
+    #[test]
+    fn fizzy_yaml_is_the_fallback_tracker() {
+        assert_eq!(tracker_or_fizzy("", "6284043/b1\n"), "fizzy:6284043/b1");
+        assert_eq!(tracker_or_fizzy("github:o/r", "6284043/b1"), "github:o/r");
+        assert_eq!(tracker_or_fizzy("", ""), "");
+        let t = Tracker::new(&tracker_or_fizzy("", "6284043/b1"), "https://github.com/o/r");
+        let card = parse_ref("#1062", &t).unwrap();
+        assert_eq!((card["kind"].as_str(), card["url"].as_str()), (Some("card"), Some("https://app.fizzy.do/6284043/cards/1062")));
     }
 
     #[test]

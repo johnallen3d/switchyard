@@ -2,7 +2,7 @@
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
 use crate::hosts::{AUTO, Project, catalog, choose_host};
-use crate::links::{Tracker, refs_in_text};
+use crate::links::{FIZZY_BOARD_SH, Tracker, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
 use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, host_home, log, now, rex_json, sh_quote};
@@ -152,8 +152,15 @@ pub fn launch(
         discard_prompt(r);
     }
     // Work items the prompt names (`#42`, `fizzy:123`, issue and card
-    // URLs), under the project's tracker.
-    let tracker = Tracker::new(&project.tracker, &project.clone_url);
+    // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
+    // board when the catalog sets none.
+    let board = if project.tracker.trim().is_empty() && !prompt.is_empty() {
+        let script = format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&cwd));
+        host_bash(host, &script).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &board), &project.clone_url);
     let links: Vec<serde_json::Value> = refs_in_text(&prompt, &tracker)
         .into_iter()
         .map(|mut l| {
