@@ -231,8 +231,12 @@ impl Collector {
                 continue;
             }
             let mut paths = Vec::new();
-            if let Err(e) = files(&expand(&source.path), &mut paths) {
-                snap.warnings.push(format!("{host}: {} {} logs: {e}", source.account, source.harness));
+            // A profile that has never run on this host has no log directory yet.
+            match files(&expand(&source.path), &mut paths) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    snap.warnings.push(format!("{host}: {} {} logs: {e}", source.account, source.harness));
+                }
+                _ => {}
             }
             let mut malformed = 0;
             for path in paths {
@@ -840,5 +844,18 @@ mod tests {
         let c: config::Config = toml::from_str("[usage]\nsessions=[]\nquotas=[]").unwrap();
         let snap = Collector::default().local(&c.usage, "test-host", 1794338086);
         assert!(snap.samples.is_empty() && snap.quotas.is_empty() && snap.warnings.is_empty());
+    }
+
+    #[test]
+    fn missing_log_directory_is_not_a_warning() {
+        let source = SessionSource {
+            harness: "claude".into(),
+            path: "/nonexistent/switchyard-test/projects".into(),
+            account: "personal".into(),
+            profile: "personal".into(),
+        };
+        let settings = Settings { sessions: Some(vec![source]), quotas: Some(vec![]), rates: vec![] };
+        let snap = Collector::default().local(&settings, "test-host", 1794338086);
+        assert!(snap.samples.is_empty() && snap.warnings.is_empty());
     }
 }
