@@ -269,7 +269,7 @@ end
 
 rex.action{
   name  = "tab_picker_go",
-  title = "Go to, Archive or Resume Picked Row",
+  title = "Go",
   run   = function(ctx, args)
     local pick = read_pick(ctx, "enter")
     -- Nothing picked (an empty list); keep the float open.
@@ -295,7 +295,7 @@ rex.action{
 -- Review opens lazygit beside the highlighted task's agent, then shows its tab.
 rex.action{
   name  = "tab_picker_review",
-  title = "Review Picked Task",
+  title = "Review",
   run   = function(ctx, args)
     local pick = read_pick(ctx, "ctrl+r")
     -- Only open tasks have something to review.
@@ -311,7 +311,7 @@ rex.action{
 -- several, type ctrl+l back so the float offers a chooser.
 rex.action{
   name  = "tab_picker_open_link",
-  title = "Open Picked Task's Work Item",
+  title = "Open",
   run   = function(ctx, args)
     local pick = read_pick(ctx, "ctrl+l")
     -- Only task rows have work items.
@@ -331,7 +331,7 @@ rex.action{
 -- float shows it.
 rex.action{
   name  = "tab_picker_pin",
-  title = "Pin or Unpin Picked Task",
+  title = "Pin",
   run   = function(ctx, args)
     local pick = read_pick(ctx, "ctrl+t")
     if pick == nil or pick.action ~= "task" then return end
@@ -344,7 +344,7 @@ rex.action{
 -- types Escape back so the float closes just that.
 rex.action{
   name  = "tab_picker_cancel",
-  title = "Close Tab Picker",
+  title = "Close",
   run   = function(ctx, args)
     local _, block_id = util.find_float(ctx, label)
     local title = block_id ~= nil and float_title(ctx, block_id) or ""
