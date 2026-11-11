@@ -19,18 +19,18 @@
 --
 -- The picker records its pick in the terminal title as
 -- rex-tab-picker:ACTION:TARGET/SESSION/WINDOW, which the tab_picker mode
--- reads: Enter jumps (go, task), resumes an ended task's agent session in a
--- new tab and jumps there (resume), or runs an archive armed with ctrl+x in
--- the float (archive, force-archive; for ask, a dirty worktree, it types
--- ctrl+x back so the float asks "are you sure"); ctrl+r reviews a task, and
--- ctrl+l opens its main work item (`switchyard task act link`). A task with
--- several links adds their count, ACTION:TARGET/SESSION/WINDOW/N, and
--- ctrl+l types ctrl+l back so the float opens its link chooser; while that
--- is open the title is rex-tab-picker:link:URL (hex-encoded), Enter or
--- ctrl+l opens URL and Escape types Escape back to close the chooser.
--- ctrl+t pins or unpins an open task (`switchyard task act pin`), then types
--- ctrl+t back so the float shows it. ctrl+s reaches the float, which opens
--- its snooze prompt; while that is open the title is
+-- reads. The mode binds only Enter and Escape, so Rex's key-mode popup stays
+-- small; the float's other keys arm what Enter does. Enter jumps (go,
+-- task), resumes an ended task's agent session in a new tab and jumps there
+-- (resume), or runs what the float armed: an archive with ctrl+x (archive,
+-- force-archive; for ask, a dirty worktree, it types ctrl+x back so the
+-- float asks "are you sure"), a review with ctrl+r (review), or a pin with
+-- ctrl+t (pin; `switchyard task act pin`, then it types Enter back so the
+-- float shows it). ctrl+l in the float arms a task's only work item, or
+-- opens a chooser over several; either way the title is
+-- rex-tab-picker:link:URL (hex-encoded), Enter opens URL, and with the
+-- chooser open Escape types Escape back to close it. ctrl+s reaches the
+-- float, which opens its snooze prompt; while that is open the title is
 -- rex-tab-picker:snooze:UNTIL:TARGET/SESSION/WINDOW (UNTIL in Unix
 -- seconds, 0 to wake), or rex-tab-picker:snooze-invalid while the typed
 -- time can't be read. Enter snoozes (`switchyard task act snooze ... UNTIL`)
@@ -162,8 +162,7 @@ end
 
 -- An action that waits for the picker holds up the app's keys, so this one
 -- opens the float and returns. The picker records the highlighted row, and
--- the tab_picker mode turns Enter, ctrl+r and Escape into the actions that
--- finish. A second press of either shortcut closes the float.
+-- the tab_picker mode turns Enter and Escape into the actions that finish. A second press of either shortcut closes the float.
 rex.mode("tab_picker")
 
 local function open_picker(ctx, view)
@@ -196,8 +195,8 @@ local function float_title(ctx, block_id)
 end
 
 -- The float's pick: action, host (the config host's label for "-"),
--- session, window and how many links ctrl+l chooses from; or, with the
--- link chooser open, action "link" and its url. Keys pressed with the float
+-- session and window; or, for a work item to open, action "link" and its
+-- url. Keys pressed with the float
 -- not focused fall through to the pane.
 local function read_pick(ctx, key)
   local _, block_id = util.find_float(ctx, label)
@@ -213,14 +212,14 @@ local function read_pick(ctx, key)
   if wake_at ~= nil then
     local shere = starget == "-"
     return { action = "snooze", wake_at = wake_at, host = shere and host_label() or util.unhex(starget), here = shere,
-      session_id = ssession, window_id = swindow, links = 1, float = block_id }
+      session_id = ssession, window_id = swindow, float = block_id }
   end
-  local action, target, session_id, window_id, links = title
-    :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)/?(%d*)$")
+  local action, target, session_id, window_id = title
+    :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)/?%d*$")
   if action == nil then return nil end
   local here = target == "-"
   return { action = action, host = here and host_label() or util.unhex(target), here = here,
-    session_id = session_id, window_id = window_id, links = tonumber(links) or 1, float = block_id }
+    session_id = session_id, window_id = window_id, float = block_id }
 end
 
 -- Type keys into the float, for the picker to act on.
@@ -280,65 +279,25 @@ rex.action{
       act("snooze", pick, pick.wake_at)
       return type_into(ctx, pick.float, "\r")
     end
+    -- An armed pin: save it, then type Enter back so the float shows it.
+    if pick.action == "pin" then
+      act("pin", pick)
+      return type_into(ctx, pick.float, "\r")
+    end
     close_picker(ctx)
-    -- The link chooser's pick.
+    -- A work item: armed, or the chooser's pick.
     if pick.action == "link" then return open_url(pick.url) end
     if pick.action == "archive" or pick.action == "force-archive" then return act(pick.action, pick) end
     if pick.action == "resume" then return resume(pick) end
+    -- An armed review opens lazygit beside the task's agent, then shows
+    -- its tab.
+    if pick.action == "review" then act("review", pick) end
     jump(pick)
   end,
 }
 
--- Review opens lazygit beside the highlighted task's agent, then shows its tab.
-rex.action{
-  name  = "tab_picker_review",
-  title = "Review",
-  run   = function(ctx, args)
-    local pick = read_pick(ctx, "ctrl+r")
-    -- Only open tasks have something to review.
-    if pick == nil or pick.action ~= "task" then return end
-    close_picker(ctx)
-    act("review", pick)
-    jump(pick)
-  end,
-}
-
--- Open the highlighted task's work item: its only one (its PR, else an
--- issue, card or commit; see ../../crates/core/src/links.rs), or, with
--- several, type ctrl+l back so the float offers a chooser.
-rex.action{
-  name  = "tab_picker_open_link",
-  title = "Open",
-  run   = function(ctx, args)
-    local pick = read_pick(ctx, "ctrl+l")
-    -- Only task rows have work items.
-    if pick == nil or pick.action == "go" or pick.action == "snooze" then return end
-    if pick.action == "link" then
-      close_picker(ctx)
-      return open_url(pick.url)
-    end
-    if pick.links > 1 then return type_into(ctx, pick.float, "\12") end
-    local url = (act("link", pick):gsub("%s+$", ""))
-    close_picker(ctx)
-    open_url(url)
-  end,
-}
-
--- Pin or unpin the highlighted open task, then type ctrl+t back so the
--- float shows it.
-rex.action{
-  name  = "tab_picker_pin",
-  title = "Pin",
-  run   = function(ctx, args)
-    local pick = read_pick(ctx, "ctrl+t")
-    if pick == nil or pick.action ~= "task" then return end
-    act("pin", pick)
-    type_into(ctx, pick.float, "\20")
-  end,
-}
-
--- Escape closes the float, or with the link chooser or snooze prompt open,
--- types Escape back so the float closes just that.
+-- Escape closes the float, or with a work item armed, the link chooser or
+-- the snooze prompt open, types Escape back so the float cancels just that.
 rex.action{
   name  = "tab_picker_cancel",
   title = "Close",
@@ -354,7 +313,4 @@ rex.action{
 
 rex.bind("cmd+k", "tab_picker")
 rex.bind("tab_picker/enter", "tab_picker_go")
-rex.bind("tab_picker/ctrl+r", "tab_picker_review")
-rex.bind("tab_picker/ctrl+l", "tab_picker_open_link")
-rex.bind("tab_picker/ctrl+t", "tab_picker_pin")
 rex.bind("tab_picker/escape", "tab_picker_cancel")

@@ -39,22 +39,25 @@
 //! ctrl-s, in All, opens a prompt for when to wake the task (see
 //! snooze.rs); Enter snoozes it into the Snoozed group until then
 //! (`snoozed_until`), and Enter on an empty prompt wakes a snoozed one. In
-//! the float the config saves both and types the key back (ctrl-t, or
-//! Enter for the prompt) for the picker to show them.
+//! the float the config saves both and types Enter back for the picker to
+//! show them.
 //!
 //! The pick goes out in the terminal title as
 //! `rex-tab-picker:ACTION:TARGET/SESSION/WINDOW`. ACTION is `go` (a tab),
-//! `task` (a row with an open task, which ctrl-r can review), `resume` (an
-//! ended task), or an armed `archive`, `ask` or `force-archive`. TARGET is
+//! `task` (a row with an open task), `resume` (an ended task), or an armed
+//! `archive`, `ask`, `force-archive`, `review` or `pin`. TARGET is
 //! `-` for the config host, else the hex-encoded host label; task rows with
-//! no listed tab use the registry host. The config's mode turns Enter,
-//! ctrl-r and Escape into the actions, so in the float this program never
-//! talks to Rex. ctrl-l (bound by the config too) opens the highlighted
-//! task's work item; task rows show their links as badges grouped by kind.
-//! A task with several links adds their count (`.../WINDOW/N`), and the
-//! config types ctrl-l back to open a chooser over them (PRs, cards, then
-//! issues). While it is open the pick is `link:URL` (URL hex-encoded): the
-//! config opens it on Enter or ctrl-l and types Escape back to close it.
+//! no listed tab use the registry host. The config's mode binds only Enter
+//! and Escape, so Rex's key-mode popup stays small, and in the float this
+//! program never talks to Rex. ctrl-r and ctrl-t arm Enter instead, as
+//! ctrl-x does: the pick becomes `review` or `pin` until another key
+//! cancels it. ctrl-l opens the highlighted task's work item; task rows
+//! show their links as badges grouped by kind. With one, ctrl-l arms Enter
+//! to open it; with several it opens a chooser over them (PRs, cards, then
+//! issues). Either way the pick is `link:URL` (URL hex-encoded), which the
+//! config opens on Enter; with the chooser open it types Escape back to
+//! close it. A task with several links also adds their count
+//! (`.../WINDOW/N`).
 //! While the snooze prompt is open it is `snooze:UNTIL:TARGET/SESSION/WINDOW`
 //! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
 //! reads as a time.
@@ -188,6 +191,17 @@ enum Armed {
     No,
     Archive,
     Force,
+    /// In the float, ctrl-r, ctrl-l (one work item) and ctrl-t arm these
+    /// for Enter, so the config's mode binds only Enter and Escape.
+    Review,
+    Link,
+    Pin,
+}
+
+impl Armed {
+    fn archives(self) -> bool {
+        matches!(self, Armed::Archive | Armed::Force)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -436,7 +450,7 @@ impl App {
         if self.follow && self.selected_key() != want {
             self.select_key(keep.clone());
         }
-        self.armed = if self.selected_key() == keep && self.armable() { armed } else { Armed::No };
+        self.armed = if self.selected_key() == keep && self.can_arm(armed) { armed } else { Armed::No };
         // The snooze prompt goes with its task.
         if self.snooze.as_ref().is_some_and(|z| self.selected_key().as_ref() != Some(&z.key)) {
             self.snooze = None;
@@ -553,6 +567,23 @@ impl App {
     /// task, or an ended one that left its worktree behind.
     fn armable(&self) -> bool {
         self.selected_task().is_some_and(|t| t.ended.is_none() || t.left)
+    }
+
+    /// Whether `armed` still applies to the highlighted row.
+    fn can_arm(&self, armed: Armed) -> bool {
+        match armed {
+            Armed::No => true,
+            Armed::Archive | Armed::Force => self.armable(),
+            Armed::Review => self.view != View::Usage && self.selected_open_task().is_some(),
+            Armed::Link => self.view != View::Usage && self.selected_link().is_some(),
+            Armed::Pin => self.view != View::Usage && self.can_pin(),
+        }
+    }
+
+    /// The highlighted task's only work item, which ctrl-l opens.
+    fn selected_link(&self) -> Option<Link> {
+        let mut links = chooser_links(&self.selected_task()?.links);
+        if links.len() == 1 { links.pop() } else { None }
     }
 
     fn is_current(&self, t: usize) -> bool {
@@ -959,6 +990,11 @@ impl App {
         if let Some(c) = &self.chooser {
             return format!("link:{}", hex(c.url()));
         }
+        // ctrl-l on a task with one work item: Enter opens it, as from the
+        // chooser.
+        if let (Armed::Link, Some(l)) = (self.armed, self.selected_link()) {
+            return format!("link:{}", hex(&l.url));
+        }
         if let Some(z) = &self.snooze {
             let row = self.row_pick();
             return match (&z.until, row.split_once(':')) {
@@ -978,7 +1014,9 @@ impl App {
             Armed::Archive if dirty => "ask",
             Armed::Archive => "archive",
             Armed::Force => "force-archive",
-            Armed::No => match task {
+            Armed::Review => "review",
+            Armed::Pin => "pin",
+            Armed::No | Armed::Link => match task {
                 Some(t) if t.ended.is_some() => "resume",
                 Some(_) => "task",
                 None => "go",
@@ -1144,10 +1182,19 @@ impl App {
             let dirty = self.selected_task().is_some_and(|t| t.dirty > 0);
             self.armed = match self.armed {
                 _ if !self.armable() => Armed::No,
-                Armed::No => Armed::Archive,
                 Armed::Archive | Armed::Force if dirty => Armed::Force,
-                armed => armed,
+                armed if armed.archives() => armed,
+                _ => Armed::Archive,
             };
+            return true;
+        }
+        // In the float, Enter reaches here only when the config types it
+        // back after saving an armed pin: show it.
+        if k.code == KeyCode::Enter {
+            if self.armed == Armed::Pin {
+                self.toggle_pin();
+            }
+            self.armed = Armed::No;
             return true;
         }
         self.armed = Armed::No;
@@ -1168,16 +1215,16 @@ impl App {
         }
         match k.code {
             KeyCode::Char('c') if ctrl => return false,
-            // In the float, the config types ctrl-l back for a task with
-            // several links.
+            // The rest reach here only in the float (standalone_key acts on
+            // them): ctrl-l opens the chooser over several work items, and
+            // ctrl-l with one, ctrl-r and ctrl-t arm Enter.
             KeyCode::Char('l') if ctrl => {
-                self.open_chooser();
+                if !self.open_chooser() {
+                    self.arm(Armed::Link);
+                }
             }
-            // In the float, the config types ctrl-t back once it has
-            // pinned or unpinned the task.
-            KeyCode::Char('t') if ctrl => {
-                self.toggle_pin();
-            }
+            KeyCode::Char('r') if ctrl => self.arm(Armed::Review),
+            KeyCode::Char('t') if ctrl => self.arm(Armed::Pin),
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
@@ -1221,6 +1268,10 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    fn arm(&mut self, armed: Armed) {
+        self.armed = if self.can_arm(armed) { armed } else { Armed::No };
     }
 
     fn delete_word(&mut self) {
@@ -1630,7 +1681,7 @@ impl App {
     /// an archive is armed for it.
     fn row_style(&self, selected: bool) -> (Color, Span<'static>) {
         let p = &self.p;
-        let doomed = selected && self.armed != Armed::No;
+        let doomed = selected && self.armed.archives();
         let bg = if doomed { p.hl_med } else if selected { p.overlay } else { p.base };
         let edge = match (doomed, selected) {
             (true, _) => Span::styled("▎", Style::new().fg(p.love).bg(bg)),
@@ -1921,7 +1972,26 @@ impl App {
             f.render_widget(Line::from(spans), area);
             return;
         }
-        if let (true, Some(t)) = (self.armed != Armed::No, self.selected_task()) {
+        if let (Armed::Review | Armed::Link | Armed::Pin, Some(t)) = (self.armed, self.selected_task()) {
+            let what = match self.armed {
+                Armed::Review => format!("review {}", t.label()),
+                Armed::Pin if t.pinned => format!("unpin {}", t.label()),
+                Armed::Pin => format!("pin {}", t.label()),
+                _ => match self.selected_link() {
+                    Some(l) if l.kind == "pr" => "open PR".into(),
+                    _ => "open link".into(),
+                },
+            };
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("⏎", Style::new().fg(p.iris).add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" {what}"), Style::new().fg(p.text)),
+                Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
+            ]);
+            f.render_widget(line, area);
+            return;
+        }
+        if let (true, Some(t)) = (self.armed.archives(), self.selected_task()) {
             let mut spans = vec![Span::raw(" ")];
             let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
             let files = || {
@@ -2382,9 +2452,15 @@ mod tests {
     fn ctrl_t_pins_and_unpins_and_holds_over_stale_data() {
         let mut app = inbox_with_lifecycle();
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        // ctrl-t arms Enter; the config saves the pin and types Enter back.
         app.key(ctrl('t'));
+        assert!(!app.tasks[2].pinned);
+        assert!(app.pick().starts_with("pin:"));
+        app.key(enter);
         assert!(app.tasks[2].pinned);
+        assert!(app.armed == Armed::No);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
         // Done ranks above working, pinned or not.
         assert_eq!(&app.rows[..3], &[Item::Status("pinned"), Item::Tab(2), Item::Tab(0)]);
@@ -2394,7 +2470,14 @@ mod tests {
         // ... and once it agrees, it is the data's again.
         app.deliver(|app| app.tasks[2].pinned = true);
         assert!(app.pending.is_empty());
+        // Another key cancels an armed pin.
         app.key(ctrl('t'));
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.key(enter);
+        assert!(app.tasks[2].pinned);
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.key(ctrl('t'));
+        app.key(enter);
         assert!(!app.tasks[2].pinned);
         // Not in the archive.
         app.set_view(View::Archive);
