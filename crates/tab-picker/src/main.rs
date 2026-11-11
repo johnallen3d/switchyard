@@ -14,15 +14,17 @@
 //!   header says "tabs only".
 //!
 //! The highlighted row and an armed archive survive each delivery. Tasks
-//! link to tabs by (session_id, window_id). Three views, cycled with Tab:
+//! link to tabs by (session_id, window_id). Views, cycled with Tab:
 //!
-//! - All (default): tabs grouped by session; task tabs show their dirty
-//!   count and a profile tint.
-//! - Agents (`--view agents`, cmd+i): tabs with live agent status and open
-//!   tasks, grouped by status in inbox urgency order, with Pinned tasks
-//!   above and Snoozed ones below.
+//! - All (default): tabs grouped by session, sessions with an agent that
+//!   wants John (waiting, failed, done) first. In a session, its agents (tabs
+//!   with live agent status or an open task) go under status headings in
+//!   urgency order, then its other tabs. Pinned tasks lead the list,
+//!   Snoozed ones trail it, and open tasks whose session isn't listed come
+//!   just before Snoozed, under No tab.
 //! - Archive (ctrl-a): ended tasks, most recent first; ctrl-f hides the
 //!   archived ones, leaving those whose tab or worktree went without one.
+//! - Usage: read-only accounting (see usage.rs).
 //!
 //! ctrl-o cycles a profile filter (all, personal, work): the registry's
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
@@ -31,8 +33,8 @@
 //! moves on to "are you sure". Any other key disarms.
 //!
 //! ctrl-t pins or unpins the highlighted open task (`pinned` in the
-//! registry), which puts it in a Pinned group at the top of All and Agents.
-//! ctrl-s, in Agents, opens a prompt for when to wake the task (see
+//! registry), which puts it in a Pinned group at the top of All.
+//! ctrl-s, in All, opens a prompt for when to wake the task (see
 //! snooze.rs); Enter snoozes it into the Snoozed group until then
 //! (`snoozed_until`), and Enter on an empty prompt wakes a snoozed one. In
 //! the float the config saves both and types the key back (ctrl-t, or
@@ -55,8 +57,7 @@
 //! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
 //! reads as a time.
 //!
-//! Run bare from a shell (`rex-tab-picker`, or `rex-inbox` for the Agents
-//! view), it works without the float: it fetches the data and acts on its
+//! Run bare from a shell (`rex-tab-picker`), it works without the float: it fetches the data and acts on its
 //! picks itself, staying open after each action (see standalone.rs).
 
 mod model;
@@ -116,7 +117,6 @@ enum Tasks {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
     All,
-    Agents,
     Archive,
     Usage,
 }
@@ -124,17 +124,15 @@ enum View {
 impl View {
     fn next(self, back: bool) -> Self {
         match (self, back) {
-            (View::All, false) | (View::Archive, true) => View::Agents,
-            (View::Agents, false) | (View::Usage, true) => View::Archive,
+            (View::All, false) | (View::Usage, true) => View::Archive,
             (View::Archive, false) | (View::All, true) => View::Usage,
-            (View::Usage, false) | (View::Agents, true) => View::All,
+            (View::Usage, false) | (View::Archive, true) => View::All,
         }
     }
 
     fn name(self) -> &'static str {
         match self {
             View::All => "all tabs",
-            View::Agents => "agents",
             View::Archive => "archive",
             View::Usage => "usage",
         }
@@ -177,11 +175,27 @@ enum Armed {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
     Session(usize),
-    /// An Agents status heading; the empty string means no known status.
+    /// A heading over the whole list: `pinned`, `snoozed`, or `notab` (open
+    /// tasks whose session isn't listed).
     Status(&'static str),
+    /// A status heading within a session: an agent status (the empty
+    /// string means no known status), or `tabs` for its other tabs.
+    Sub(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
     Task(usize),
+}
+
+/// How draw_list draws a row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Draw {
+    Header,
+    /// A row with a project column.
+    Flat,
+    /// An agent under its session.
+    Nested,
+    /// A tab under its session.
+    Tab,
 }
 
 /// Highlighted character positions: the name, and the folder (grouped
@@ -440,7 +454,7 @@ impl App {
     /// The (session_id, window_id) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
-            Item::Session(_) | Item::Status(_) => None,
+            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
@@ -461,7 +475,7 @@ impl App {
     /// The task a row stands for: a tab's open task, or the row's own.
     fn task_of(&self, item: Item) -> Option<&Task> {
         match item {
-            Item::Session(_) | Item::Status(_) => None,
+            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task.map(|k| &self.tasks[k]),
             Item::Task(k) => Some(&self.tasks[k]),
         }
@@ -474,14 +488,14 @@ impl App {
     /// The index of the task a row stands for.
     fn task_index(&self, item: Item) -> Option<usize> {
         match item {
-            Item::Session(_) | Item::Status(_) => None,
+            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task,
             Item::Task(k) => Some(k),
         }
     }
 
     /// The highlighted open task, which ctrl-t can pin (not in the archive)
-    /// and ctrl-s snooze (in the inbox).
+    /// and ctrl-s snooze (in All).
     fn selected_open_task(&self) -> Option<usize> {
         self.selected_item().and_then(|i| self.task_index(i)).filter(|&k| self.tasks[k].ended.is_none())
     }
@@ -491,7 +505,7 @@ impl App {
     }
 
     fn can_snooze(&self) -> bool {
-        self.view == View::Agents && self.selected_open_task().is_some()
+        self.view == View::All && self.selected_open_task().is_some()
     }
 
     /// The Agents group a row goes in: `pinned`, `snoozed` (which wins), or
@@ -525,13 +539,6 @@ impl App {
         self.sessions[tab.session].id == self.current.0 && tab.window_id == self.current.1
     }
 
-    fn tab_work(&self, t: usize) -> bool {
-        match self.tabs[t].task {
-            Some(k) => self.tasks[k].work(),
-            None => work_dir(&self.tabs[t].dir),
-        }
-    }
-
     fn profile_passes(&self, work: bool) -> bool {
         match self.profile {
             Profile::All => true,
@@ -540,38 +547,51 @@ impl App {
         }
     }
 
-    /// The Agents view's rows, before search: tabs with live agent status
-    /// or an open task, and open tasks with no listed tab. This is the one
-    /// place that says what an agent is.
-    fn agents(&self) -> Vec<Item> {
-        let tabs = (0..self.tabs.len())
-            .filter(|&t| self.tabs[t].state != State::Idle || self.tabs[t].task.is_some())
-            .map(Item::Tab);
-        let orphans = (0..self.tasks.len())
-            .filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none())
-            .map(Item::Task);
-        let mut rows: Vec<Item> = tabs.chain(orphans).collect();
-        // Pinned first and snoozed last. Most urgent first and, within a
-        // state that wants John, the one waiting longest first (unknown
-        // times last); the snoozed by when they wake. Working and idle
-        // agents go by name: their status time moves with every status
-        // message, and rows that swap as agents report are hard to pick.
-        // Ties go by name too, so the order never depends on which host
-        // answered first.
-        rows.sort_by_cached_key(|&i| {
-            let f = self.flat(i);
-            let name = (f.project.to_string(), f.name.to_string(), f.host.to_string());
-            let at = match f.state {
-                "working" | "idle" => 0,
-                _ if f.since == 0 => u64::MAX,
-                _ => f.since,
-            };
-            match self.agent_group(i) {
-                "snoozed" => (2, std::cmp::Reverse(0), f.wake, name),
-                group => (if group == "pinned" { 0 } else { 1 }, std::cmp::Reverse(urgency(f.state)), at, name),
-            }
-        });
-        rows
+    /// Whether a row is an agent: a tab with live agent status or an open
+    /// task, or an open task with no listed tab. This is the one place that
+    /// says what an agent is.
+    fn is_agent(&self, item: Item) -> bool {
+        match item {
+            Item::Tab(t) => self.tabs[t].state != State::Idle || self.tabs[t].task.is_some(),
+            Item::Task(k) => self.tasks[k].ended.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Open tasks with no listed tab.
+    fn orphans(&self) -> impl Iterator<Item = Item> + '_ {
+        (0..self.tasks.len()).filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none()).map(Item::Task)
+    }
+
+    /// The listed session a row belongs to: a tab's, or for a task with
+    /// no listed tab, the session it ran in if that is listed.
+    fn session_of(&self, item: Item) -> Option<usize> {
+        match item {
+            Item::Tab(t) => Some(self.tabs[t].session),
+            Item::Task(k) => self.sessions.iter().position(|s| s.id == self.tasks[k].session_id),
+            _ => None,
+        }
+    }
+
+    /// Where an agent goes among others in its group: most urgent first
+    /// and, within a state that wants John, the one waiting longest first
+    /// (unknown times last); the snoozed by when they wake. Working and idle
+    /// agents go by name: their status time moves with every status
+    /// message, and rows that swap as agents report are hard to pick. Ties
+    /// go by name too, so the order never depends on which host answered
+    /// first.
+    fn agent_key(&self, i: Item) -> (std::cmp::Reverse<u8>, u64, (String, String, String)) {
+        let f = self.flat(i);
+        let name = (f.project.to_string(), f.name.to_string(), f.host.to_string());
+        if self.agent_group(i) == "snoozed" {
+            return (std::cmp::Reverse(0), f.wake, name);
+        }
+        let at = match f.state {
+            "working" | "idle" => 0,
+            _ if f.since == 0 => u64::MAX,
+            _ => f.since,
+        };
+        (std::cmp::Reverse(urgency(f.state)), at, name)
     }
 
     /// The Archive view's rows, before search: ended tasks, most recent first.
@@ -624,7 +644,7 @@ impl App {
                 }
             }
             // Headers aren't flat rows.
-            Item::Session(_) | Item::Status(_) => Flat {
+            Item::Session(_) | Item::Status(_) | Item::Sub(_) => Flat {
                 project: "",
                 name: "",
                 msg: "",
@@ -673,11 +693,7 @@ impl App {
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let filtering = !self.query.trim().is_empty();
         let best = match self.view {
-            View::All => self.filter_grouped(&pattern, filtering),
-            View::Agents => {
-                let rows = self.agents();
-                self.filter_flat(rows, &pattern, filtering)
-            }
+            View::All => self.filter_merged(&pattern, filtering),
             View::Archive => {
                 let rows = self.archive();
                 self.filter_flat(rows, &pattern, filtering)
@@ -689,91 +705,134 @@ impl App {
         self.offset = 0;
     }
 
-    /// Whether a tab's open task is pinned, which puts it in All's Pinned
-    /// group rather than its session's.
-    fn tab_pinned(&self, t: usize) -> bool {
-        self.tabs[t].task.is_some_and(|k| self.tasks[k].is_pinned())
+    /// Score a row against the search, recording its highlights; None
+    /// when it doesn't match. `flat` is for rows drawn with a project
+    /// column, whose second highlight is the project rather than the folder.
+    fn score_row(&mut self, item: Item, pattern: &Pattern, flat: bool) -> Option<u32> {
+        let (name, project, host) = {
+            let f = self.flat(item);
+            (f.name.to_string(), f.project.to_string(), f.host.to_string())
+        };
+        let (dir, label) = match item {
+            Item::Tab(t) => (self.tabs[t].dir.clone(), self.sessions[self.tabs[t].session].label.clone()),
+            _ => (String::new(), String::new()),
+        };
+        let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
+        let (score, f) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &project, &label, &host, &links])?;
+        let second = if flat { f[2].clone() } else { f[1].clone() };
+        self.hits.insert(item, Hits { name: f[0].clone(), second });
+        Some(score)
     }
 
-    /// All: pinned tabs, then tabs grouped under their sessions. Returns the
-    /// best match.
-    fn filter_grouped(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
+    /// All: Pinned, then each session (most urgent first) with its agents
+    /// under status headings and its other tabs after them, then open tasks
+    /// whose session isn't listed, then Snoozed. A session with no agents
+    /// shows its tabs without headings. Matches name, folder, project,
+    /// session, host and work items. Returns the best match.
+    fn filter_merged(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
-        let mut pinned = Vec::new();
-        for t in 0..self.tabs.len() {
-            if !self.tab_pinned(t) || !self.profile_passes(self.tab_work(t)) {
+        let take = |best: &mut Option<(u32, Item)>, score: u32, item: Item| {
+            if best.is_none_or(|(b, _)| score > b) {
+                *best = Some((score, item));
+            }
+        };
+        let (mut pinned, mut snoozed, mut notab) = (Vec::new(), Vec::new(), Vec::new());
+        let mut by_session: Vec<Vec<Item>> = vec![Vec::new(); self.sessions.len()];
+        let items: Vec<Item> = (0..self.tabs.len()).map(Item::Tab).chain(self.orphans()).collect();
+        for item in items {
+            if !self.profile_passes(self.flat(item).work) {
                 continue;
             }
-            if filtering {
-                let s = self.tabs[t].session;
-                let (name, dir, label) = (self.tabs[t].name.clone(), self.tabs[t].dir.clone(), self.sessions[s].label.clone());
-                let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &label]) else { continue };
-                self.hits.insert(Item::Tab(t), Hits { name: f[0].clone(), second: f[1].clone() });
-                if best.is_none_or(|(b, _)| score > b) {
-                    best = Some((score, Item::Tab(t)));
-                }
+            match (self.agent_group(item), self.session_of(item)) {
+                ("pinned", _) => pinned.push(item),
+                ("snoozed", _) => snoozed.push(item),
+                (_, Some(s)) => by_session[s].push(item),
+                (_, None) => notab.push(item),
             }
-            pinned.push(Item::Tab(t));
         }
-        if !pinned.is_empty() {
-            self.rows.push(Item::Status("pinned"));
-            self.rows.extend(pinned);
-        }
-        for s in 0..self.sessions.len() {
-            let label = self.sessions[s].label.clone();
-            let host = self.sessions[s].host.clone();
-            let shown: Vec<usize> = self.sessions[s]
-                .tabs
-                .iter()
-                .copied()
-                .filter(|&t| !self.tab_pinned(t) && self.profile_passes(self.tab_work(t)))
-                .collect();
+        // A group over the whole list: its rows by urgency, with a heading.
+        let global = |app: &mut Self, best: &mut Option<(u32, Item)>, heading: &'static str, mut rows: Vec<Item>| {
+            rows.sort_by_cached_key(|&i| app.agent_key(i));
+            let mut shown = Vec::new();
+            for item in rows {
+                if filtering {
+                    let Some(score) = app.score_row(item, pattern, true) else { continue };
+                    take(best, score, item);
+                }
+                shown.push(item);
+            }
+            if !shown.is_empty() {
+                app.rows.push(Item::Status(heading));
+                app.rows.extend(shown);
+            }
+        };
+        global(self, &mut best, "pinned", pinned);
+        // Each session's rows, ranked by the most urgent agent that wants
+        // John (waiting, failed, done); the rest keep Rex's order.
+        let mut groups: Vec<(u8, usize, Vec<Item>)> = Vec::new();
+        for (s, shown) in by_session.into_iter().enumerate() {
             let mut matched = Vec::new();
-            for &t in &shown {
+            for &item in &shown {
                 if !filtering {
-                    matched.push(t);
+                    matched.push(item);
                     continue;
                 }
-                let (name, dir) = (self.tabs[t].name.clone(), self.tabs[t].dir.clone());
-                if let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &label]) {
-                    self.hits.insert(Item::Tab(t), Hits { name: f[0].clone(), second: f[1].clone() });
-                    if best.is_none_or(|(b, _)| score > b) {
-                        best = Some((score, Item::Tab(t)));
-                    }
-                    matched.push(t);
+                if let Some(score) = self.score_row(item, pattern, false) {
+                    take(&mut best, score, item);
+                    matched.push(item);
                 }
             }
-            // A search that matches a session's name or host shows its tabs.
-            let session_hit =
-                if filtering { score_fields(&mut self.matcher, pattern, &[&label, &host]) } else { None };
-            if let Some((score, f)) = session_hit {
-                self.hits.insert(Item::Session(s), Hits { name: f[0].clone(), second: Vec::new() });
-                if matched.is_empty() {
-                    matched = shown.clone();
-                }
-                if let Some(&first) = matched.first()
-                    && best.is_none_or(|(b, _)| score > b)
-                {
-                    best = Some((score, Item::Tab(first)));
+            // A search that matches a session's name or host shows its rows.
+            if filtering {
+                let (label, host) = (self.sessions[s].label.clone(), self.sessions[s].host.clone());
+                if let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&label, &host]) {
+                    self.hits.insert(Item::Session(s), Hits { name: f[0].clone(), second: Vec::new() });
+                    if matched.is_empty() {
+                        matched = shown.clone();
+                    }
+                    if let Some(&first) = matched.first() {
+                        take(&mut best, score, first);
+                    }
                 }
             }
             if matched.is_empty() {
                 continue;
             }
-            self.rows.push(Item::Session(s));
-            self.rows.extend(matched.into_iter().map(Item::Tab));
+            let (mut agents, plain): (Vec<Item>, Vec<Item>) = matched.into_iter().partition(|&i| self.is_agent(i));
+            agents.sort_by_cached_key(|&i| self.agent_key(i));
+            let rank = agents.iter().map(|&i| urgency(self.flat(i).state)).filter(|&u| u >= urgency("done")).max();
+            let mut rows = Vec::new();
+            let mut group = None;
+            for item in agents {
+                let state = self.agent_group(item);
+                if group != Some(state) {
+                    rows.push(Item::Sub(state));
+                    group = Some(state);
+                }
+                rows.push(item);
+            }
+            if group.is_some() && !plain.is_empty() {
+                rows.push(Item::Sub("tabs"));
+            }
+            rows.extend(plain);
+            groups.push((rank.unwrap_or(0), s, rows));
         }
+        groups.sort_by_key(|&(rank, s, _)| (std::cmp::Reverse(rank), s));
+        for (_, s, rows) in groups {
+            self.rows.push(Item::Session(s));
+            self.rows.extend(rows);
+        }
+        global(self, &mut best, "notab", notab);
+        global(self, &mut best, "snoozed", snoozed);
         best.map(|(_, i)| i)
     }
 
-    /// Agents and Archive: rows in the given order, with status headings
-    /// (and Pinned and Snoozed) for matching Agents only. Matches project (or session), name, host
-    /// and the task's work items (`#42`, `card 1041`, `PR #57`), so an
-    /// ended task can be found by its issue or card and resumed. Returns
-    /// the best match.
+    /// Archive: rows in the given order. Matches project, name, host and
+    /// the task's work items (`#42`, `card 1041`, `PR #57`), so an ended
+    /// task can be found by its issue or card and resumed. Returns the best
+    /// match.
     fn filter_flat(&mut self, rows: Vec<Item>, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
-        let mut group = None;
         for item in rows {
             let (project, name, host, work) = {
                 let f = self.flat(item);
@@ -791,13 +850,6 @@ impl App {
                 self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone() });
                 if best.is_none_or(|(b, _)| score > b) {
                     best = Some((score, item));
-                }
-            }
-            if self.view == View::Agents {
-                let state = self.agent_group(item);
-                if group != Some(state) {
-                    self.rows.push(Item::Status(state));
-                    group = Some(state);
                 }
             }
             self.rows.push(item);
@@ -885,7 +937,7 @@ impl App {
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
         let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
-            Item::Session(_) | Item::Status(_) => String::new(),
+            Item::Session(_) | Item::Status(_) | Item::Sub(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
@@ -931,7 +983,7 @@ impl App {
         self.pending.insert((t.host.clone(), t.window_id.clone()), (pinned, until, Instant::now()));
     }
 
-    /// Open the snooze prompt on the highlighted open task in the inbox.
+    /// Open the snooze prompt on the highlighted open task in All.
     fn open_snooze(&mut self) {
         if !self.can_snooze() {
             return;
@@ -1129,7 +1181,6 @@ impl App {
     fn draw(&mut self, f: &mut Frame) {
         let title = match self.view {
             View::All => "Go to tab",
-            View::Agents => "Agents",
             View::Archive => "Archive",
             View::Usage => "Usage",
         };
@@ -1281,8 +1332,7 @@ impl App {
         let p = &self.p;
         let typing = !self.query.is_empty();
         let placeholder = match self.view {
-            View::All => "Search tabs, sessions, and folders",
-            View::Agents => "Search agents",
+            View::All => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
         };
@@ -1296,12 +1346,13 @@ impl App {
             Tasks::Live => right.push(Span::styled(format!("{spin} checking worktrees  "), Style::new().fg(p.muted))),
             _ => {}
         }
-        if self.view == View::Agents {
-            // Counts by what needs attention.
+        if self.view == View::All {
+            // Counts by what needs attention, the snoozed aside.
             let count = |st: &str| {
                 self.rows
                     .iter()
-                    .filter(|&&i| selectable(&i) && self.flat(i).state == st && self.agent_group(i) != "snoozed")
+                    .filter(|&&i| selectable(&i) && self.is_agent(i) && self.flat(i).state == st)
+                    .filter(|&&i| self.agent_group(i) != "snoozed")
                     .count()
             };
             for (n, label, color) in [
@@ -1314,17 +1365,16 @@ impl App {
                     right.push(Span::styled(format!("{n} {label}  "), Style::new().fg(color)));
                 }
             }
+        }
+        let (total, kind) = match self.view {
+            View::Archive => (self.tasks.iter().filter(|t| t.ended.is_some()).count(), "ended"),
+            _ => (self.tabs.len() + self.orphans().count(), "tabs"),
+        };
+        if typing || shown != total {
+            right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
+            right.push(Span::styled(format!(" of {total} {kind} "), Style::new().fg(p.muted)));
         } else {
-            let (total, kind) = match self.view {
-                View::Archive => (self.tasks.iter().filter(|t| t.ended.is_some()).count(), "ended"),
-                _ => (self.tabs.len(), "tabs"),
-            };
-            if typing || shown != total {
-                right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
-                right.push(Span::styled(format!(" of {total} {kind} "), Style::new().fg(p.muted)));
-            } else {
-                right.push(Span::styled(format!("{total} {kind} "), Style::new().fg(p.muted)));
-            }
+            right.push(Span::styled(format!("{total} {kind} "), Style::new().fg(p.muted)));
         }
         f.render_widget(Line::from(right).right_aligned(), area);
     }
@@ -1346,29 +1396,51 @@ impl App {
         let overflow = self.rows.len() > h && h > 0;
         // Leave a column for the scrollbar only when there is one.
         let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
+        // How each row is drawn: under a session, agents as flat rows on
+        // the tree (no project column) and other tabs as tab rows; in the
+        // groups over the whole list and the archive, flat rows.
+        let mut style = Vec::with_capacity(self.rows.len());
+        let mut nested = false;
+        for &row in &self.rows {
+            style.push(match row {
+                Item::Session(_) | Item::Sub(_) => {
+                    nested = true;
+                    Draw::Header
+                }
+                Item::Status(_) => {
+                    nested = false;
+                    Draw::Header
+                }
+                _ if !nested => Draw::Flat,
+                _ if self.is_agent(row) => Draw::Nested,
+                _ => Draw::Tab,
+            });
+        }
         // Flat rows line up their project and name columns: size them for
         // the widest values, within what the busiest right side leaves.
-        let cols = if self.view == View::All {
-            (0, 0)
-        } else {
-            let shown = || self.rows.iter().filter(|i| selectable(i)).map(|&i| self.flat(i));
-            let right_w = shown().map(|t| self.right_spans(&t, self.p.base, "", list.width).1).max().unwrap_or(0);
-            let room = (list.width as usize).saturating_sub(3 + right_w + 1);
-            let proj_w = shown().map(|t| str_width(t.project)).max().unwrap_or(0).min(room / 4);
-            let name_w =
-                shown().map(|t| str_width(t.name)).max().unwrap_or(0).min(room.saturating_sub(proj_w + 2) * 2 / 3);
-            (proj_w, name_w)
+        let flat = || {
+            self.rows.iter().zip(&style).filter(|(_, d)| matches!(d, Draw::Flat | Draw::Nested)).map(|(&i, d)| (self.flat(i), *d))
         };
+        let right_w = flat().map(|(t, _)| self.right_spans(&t, self.p.base, "", list.width).1).max().unwrap_or(0);
+        let room = (list.width as usize).saturating_sub(3 + right_w + 1);
+        let proj_w =
+            flat().filter(|(_, d)| *d == Draw::Flat).map(|(t, _)| str_width(t.project)).max().unwrap_or(0).min(room / 4);
+        let name_w =
+            flat().map(|(t, _)| str_width(t.name)).max().unwrap_or(0).min(room.saturating_sub(proj_w + 2) * 2 / 3);
+        let cols = (proj_w, name_w);
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
             let selected = self.selected == Some(i);
-            if let Item::Status(state) = row {
-                self.draw_status_header(f, r, state);
-            } else if self.view == View::All {
-                let last = !self.rows.get(i + 1).is_some_and(selectable);
-                self.draw_grouped_row(f, r, row, selected, last, tick);
-            } else {
-                self.draw_flat_row(f, r, *row, selected, tick, cols);
+            let last = !self.rows.get(i + 1).is_some_and(selectable);
+            match (row, style[i]) {
+                (Item::Status(state), _) => self.draw_status_header(f, r, state),
+                (Item::Sub(state), _) => self.draw_sub_header(f, r, state),
+                (_, Draw::Flat) => self.draw_flat_row(f, r, *row, selected, tick, cols, None),
+                (_, Draw::Nested) => {
+                    let guide = if last { "╰─ " } else { "├─ " };
+                    self.draw_flat_row(f, r, *row, selected, tick, cols, Some(guide))
+                }
+                _ => self.draw_grouped_row(f, r, row, selected, last, tick),
             }
         }
         if overflow {
@@ -1386,6 +1458,7 @@ impl App {
             "idle" => ("·", "Idle", p.muted),
             "pinned" => (ICON_PIN, "Pinned", p.iris),
             "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
+            "notab" => (ICON_SESSION, "No tab", p.muted),
             _ => ("?", "No status", p.muted),
         };
         let heading = format!(" {glyph} {label} ");
@@ -1394,6 +1467,27 @@ impl App {
             Line::from(vec![
                 Span::styled(heading, Style::new().fg(color).add_modifier(Modifier::BOLD)),
                 Span::styled(rule, Style::new().fg(p.hl_med)),
+            ]),
+            area,
+        );
+    }
+
+    /// A status heading within a session, indented under it.
+    fn draw_sub_header(&self, f: &mut Frame, area: Rect, state: &str) {
+        let p = &self.p;
+        let (glyph, label, color) = match state {
+            "blocked" => ("●", "Waiting", p.gold),
+            "error" => ("✗", "Failed", p.love),
+            "done" => ("✓", "Done", p.pine),
+            "working" => ("●", "Working", p.foam),
+            "idle" => ("·", "Idle", p.muted),
+            "tabs" => ("·", "Tabs", p.subtle),
+            _ => ("?", "No status", p.muted),
+        };
+        f.render_widget(
+            Line::from(vec![
+                Span::raw("   "),
+                Span::styled(format!("{glyph} {label}"), Style::new().fg(color).add_modifier(Modifier::BOLD)),
             ]),
             area,
         );
@@ -1443,26 +1537,6 @@ impl App {
                         draw::key_hint(p, "⌃O", " changes profile"),
                     ],
                 },
-                View::Agents => {
-                    let waiting = matches!(self.load, Load::Waiting) || matches!(self.tasks_load, Tasks::Waiting);
-                    if waiting {
-                        vec![spin(), Line::from(""), text("Loading agents…".into())]
-                    } else if let Some(profile) = filtered {
-                        vec![
-                            icon(ICON_INBOX, p.hl_high),
-                            Line::from(""),
-                            text(format!("No {profile} agents")),
-                            draw::key_hint(p, "⌃O", " changes profile"),
-                        ]
-                    } else {
-                        vec![
-                            icon(ICON_INBOX, p.hl_high),
-                            Line::from(""),
-                            text("No agents running".into()),
-                            draw::key_hint(p, "⌃⌘N", " spawns one"),
-                        ]
-                    }
-                }
                 View::Archive => match self.tasks_load {
                     Tasks::Waiting => vec![spin(), Line::from(""), text("Loading tasks…".into())],
                     Tasks::Failed => vec![
@@ -1533,6 +1607,10 @@ impl App {
                 if errors > 0 {
                     chip(format!("✗ {errors} failed"), p.love);
                 }
+                let done = count(State::Done);
+                if done > 0 {
+                    chip(format!("✓ {done} done"), p.pine);
+                }
                 let n = s.tabs.len();
                 chip(format!("{n} tab{}", if n == 1 { "" } else { "s" }), p.subtle);
                 let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
@@ -1547,8 +1625,8 @@ impl App {
                 f.render_widget(Line::from(spans), r);
                 f.render_widget(Line::from(right).right_aligned(), r);
             }
-            // Task and status rows only appear in the Agents/Archive views.
-            Item::Task(_) | Item::Status(_) => {}
+            // Headings and tasks with no tab are drawn elsewhere.
+            Item::Task(_) | Item::Status(_) | Item::Sub(_) => {}
             Item::Tab(t) => {
                 let tab = &self.tabs[*t];
                 let task = tab.task.map(|k| &self.tasks[k]);
@@ -1569,7 +1647,11 @@ impl App {
                 let dir_room = (width.saturating_sub(lead + dirty_w) * 2 / 5).min(48);
                 let dir_w = str_width(&tab.dir).min(dir_room);
                 let here_w = if here { 2 + here_label.len() } else { 0 };
-                let name_room = width.saturating_sub(lead + dir_w + dirty_w + 3 + here_w);
+                // A long name (a title a program set, say) stops at a third
+                // of the row, so it can't crowd out the folder and the rows
+                // around it.
+                let name_cap = (width.saturating_sub(lead) / 3).max(24);
+                let name_room = width.saturating_sub(lead + dir_w + dirty_w + 3 + here_w).min(name_cap);
                 let name_style = if selected {
                     Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
                 } else {
@@ -1657,7 +1739,19 @@ impl App {
         (right, w)
     }
 
-    fn draw_flat_row(&self, f: &mut Frame, r: Rect, item: Item, selected: bool, tick: usize, cols: (usize, usize)) {
+    /// A flat row; with a guide, on a session's tree, without the project
+    /// column (the session heading says it).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_flat_row(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        item: Item,
+        selected: bool,
+        tick: usize,
+        cols: (usize, usize),
+        guide: Option<&str>,
+    ) {
         let p = &self.p;
         let t = self.flat(item);
         let (bg, edge) = self.row_style(selected);
@@ -1680,9 +1774,16 @@ impl App {
         let verb = if t.wake > 0 { "snoozed" } else { verb };
         // Right side first, so the columns and message get what is left.
         let (right, right_w) = self.right_spans(&t, bg, verb, r.width);
-        let mut left = vec![edge, Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg))];
-        let room = (r.width as usize).saturating_sub(3 + right_w + 1);
+        let mut left = vec![edge];
+        if let Some(guide) = guide {
+            left.push(Span::styled(" ", Style::new().bg(bg)));
+            left.push(Span::styled(guide.to_string(), Style::new().fg(p.hl_med).bg(bg)));
+        }
+        left.push(Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)));
+        let lead = if guide.is_some() { 4 } else { 0 };
+        let room = (r.width as usize).saturating_sub(3 + lead + right_w + 1);
         let (proj_w, name_w) = cols;
+        let proj_w = if guide.is_some() { 0 } else { proj_w };
         let name_style = if selected {
             Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
         } else {
@@ -1696,9 +1797,11 @@ impl App {
             left.extend(spans);
             left.push(Span::styled(" ".repeat(w.saturating_sub(used) + 2), Style::new().bg(bg)));
         };
-        column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
+        if guide.is_none() {
+            column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
+        }
         column(t.name, &hits.name, name_w, name_style);
-        let msg_room = room.saturating_sub(proj_w + name_w + 4);
+        let msg_room = room.saturating_sub(if guide.is_none() { proj_w + 2 } else { 0 } + name_w + 2);
         if !t.msg.is_empty() && msg_room > 4 {
             let msg_style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle }).bg(bg);
             left.extend(highlight(t.msg, &[], msg_room, false, msg_style, msg_style));
@@ -1795,12 +1898,8 @@ impl App {
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
             View::Usage => {}
-            View::All => keys.push(("⌥↑↓", "session")),
+            View::All => keys.push(("⌥↑↓", "group")),
             View::Archive => keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" })),
-            View::Agents => {
-                keys.push(("⌥↑↓", "status"));
-                keys.push(("⌃A", "archive"));
-            }
         }
         keys.push(("esc", "close"));
         let keys: Vec<_> = keys.into_iter().map(|(k, label)| (k, label, p.subtle)).collect();
@@ -1989,7 +2088,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     fn inbox() -> App {
-        let mut app = App::new((String::new(), String::new()), View::Agents);
+        let mut app = App::new((String::new(), String::new()), View::All);
         app.follow = false;
         app.deliver(|app| {
             (app.sessions, app.tabs) = parse_rows(concat!(
@@ -2015,15 +2114,16 @@ mod tests {
     }
 
     #[test]
-    fn inbox_groups_by_status_and_preserves_urgency_and_age_order() {
+    fn agents_group_by_status_in_their_session_by_urgency_and_age() {
         let app = inbox();
         assert_eq!(app.rows, vec![
-            Item::Status("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
-            Item::Status("error"), Item::Tab(2),
-            Item::Status("done"), Item::Tab(3),
-            Item::Status("working"), Item::Tab(0),
-            Item::Status("idle"), Item::Tab(4),
-            Item::Status(""), Item::Task(3), Item::Task(4),
+            Item::Session(0),
+            Item::Sub("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
+            Item::Sub("error"), Item::Tab(2),
+            Item::Sub("done"), Item::Tab(3),
+            Item::Sub("working"), Item::Tab(0),
+            Item::Sub("idle"), Item::Tab(4),
+            Item::Sub(""), Item::Task(3), Item::Task(4),
         ]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
     }
@@ -2031,7 +2131,7 @@ mod tests {
     #[test]
     fn working_agents_keep_their_order_as_they_report() {
         let order = |a: u64, b: u64| {
-            let mut app = App::new((String::new(), String::new()), View::Agents);
+            let mut app = App::new((String::new(), String::new()), View::All);
             app.follow = false;
             app.deliver(|app| {
                 app.tasks = parse_tasks(&serde_json::json!([
@@ -2043,7 +2143,7 @@ mod tests {
             });
             app.rows
         };
-        let expected = vec![Item::Status("working"), Item::Task(1), Item::Task(0)];
+        let expected = vec![Item::Status("notab"), Item::Task(1), Item::Task(0)];
         assert_eq!(order(10, 20), expected);
         assert_eq!(order(20, 10), expected);
     }
@@ -2053,12 +2153,12 @@ mod tests {
         let mut app = inbox();
         app.query = "older".into();
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(1)]);
+        assert_eq!(app.rows, vec![Item::Session(0), Item::Sub("blocked"), Item::Task(1)]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
         app.query.clear();
         app.profile = Profile::Work;
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(2)]);
+        assert_eq!(app.rows, vec![Item::Session(0), Item::Sub("blocked"), Item::Task(2)]);
         app.query = "no-match".into();
         app.refilter();
         assert!(app.rows.is_empty());
@@ -2078,7 +2178,7 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Task(4)));
         app.edge(false);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
-        app.selected = Some(4);
+        app.selected = Some(5);
         assert!(app.pick().is_empty());
         assert!(app.selected_key().is_none());
         assert!(app.selected_task().is_none());
@@ -2094,11 +2194,11 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
         assert!(app.armed == Armed::Archive);
         let at = app.selected.unwrap();
-        assert_eq!(app.rows[at - 1], Item::Status("working"));
+        assert_eq!(app.rows[at - 1], Item::Sub("working"));
     }
 
     fn inbox_with_lifecycle() -> App {
-        let mut app = App::new((String::new(), String::new()), View::Agents);
+        let mut app = App::new((String::new(), String::new()), View::All);
         app.follow = false;
         app.now = 1000;
         app.deliver(|app| {
@@ -2122,11 +2222,11 @@ mod tests {
     }
 
     #[test]
-    fn pinned_tasks_lead_and_snoozed_ones_trail_the_inbox() {
+    fn pinned_tasks_lead_and_snoozed_ones_trail_the_list() {
         let mut app = inbox_with_lifecycle();
         assert_eq!(app.rows, vec![
             Item::Status("pinned"), Item::Tab(0),
-            Item::Status("done"), Item::Tab(2),
+            Item::Session(0), Item::Sub("done"), Item::Tab(2),
             Item::Status("snoozed"), Item::Tab(3), Item::Tab(1),
         ]);
         // A snoozed blocked task isn't counted as waiting.
@@ -2141,16 +2241,48 @@ mod tests {
     }
 
     #[test]
-    fn pinned_tabs_get_their_own_group_in_all_tabs() {
+    fn searching_a_session_finds_its_rows_in_every_group() {
         let mut app = inbox_with_lifecycle();
-        app.set_view(View::All);
-        assert_eq!(app.rows, vec![
-            Item::Status("pinned"), Item::Tab(0), Item::Tab(3),
-            Item::Session(0), Item::Tab(1), Item::Tab(2),
-        ]);
         app.query = "demo".into();
         app.refilter();
-        assert!(app.rows.contains(&Item::Tab(0)) && app.rows.contains(&Item::Tab(1)));
+        for tab in 0..4 {
+            assert!(app.rows.contains(&Item::Tab(tab)), "missing tab {tab}");
+        }
+    }
+
+    #[test]
+    fn sessions_wanting_john_lead_and_keep_their_other_tabs_last() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        app.follow = false;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ta\tquiet\n",
+                "T\tshell\t\tshell\t~\n",
+                "T\tbusy\tworking\tbuilding\t~\n",
+                "S\t-\tlocal\tb\tbusy\n",
+                "T\tnotes\t\tnotes\t~\n",
+                "T\tasks\tblocked\tapproval\t~\n",
+                "S\t-\tlocal\tc\tplain\n",
+                "T\tsh\t\tsh\t~\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"gone", "window_id":"w", "name":"stray", "status":"done"}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        assert_eq!(app.rows, vec![
+            Item::Session(1), Item::Sub("blocked"), Item::Tab(3), Item::Sub("tabs"), Item::Tab(2),
+            Item::Session(0), Item::Sub("working"), Item::Tab(1), Item::Sub("tabs"), Item::Tab(0),
+            Item::Session(2), Item::Tab(4),
+            Item::Status("notab"), Item::Task(0),
+        ]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        for label in ["Waiting", "Working", "Tabs", "No tab", "approval", "stray"] {
+            assert!(text.contains(label), "{label}: {text}");
+        }
     }
 
     #[test]
@@ -2213,11 +2345,11 @@ mod tests {
         app.key(plain(KeyCode::Enter));
         assert_eq!(app.tasks[2].snoozed_until, 0);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
-        // Escape closes the prompt; only the inbox snoozes.
+        // Escape closes the prompt; the archive doesn't snooze.
         app.key(ctrl('s'));
         app.key(plain(KeyCode::Esc));
         assert!(app.snooze.is_none());
-        app.set_view(View::All);
+        app.set_view(View::Archive);
         app.key(ctrl('s'));
         assert!(app.snooze.is_none());
     }
@@ -2238,7 +2370,7 @@ mod tests {
 
     #[test]
     fn task_rows_show_work_item_badges_and_open_hint() {
-        let mut app = App::new((String::new(), String::new()), View::Agents);
+        let mut app = App::new((String::new(), String::new()), View::All);
         app.follow = false;
         app.deliver(|app| {
             app.tasks = parse_tasks(&serde_json::json!([
@@ -2263,7 +2395,7 @@ mod tests {
 
     #[test]
     fn ctrl_l_chooses_among_several_links_prs_first() {
-        let mut app = App::new((String::new(), String::new()), View::Agents);
+        let mut app = App::new((String::new(), String::new()), View::All);
         app.follow = false;
         app.deliver(|app| {
             app.tasks = parse_tasks(&serde_json::json!([
@@ -2345,10 +2477,6 @@ mod tests {
         for label in ["Waiting", "Failed", "Done", "Working", "Idle", "No status"] {
             assert!(text.contains(label), "missing status heading: {label}");
         }
-        app.set_view(View::All);
-        assert_eq!(app.rows, vec![
-            Item::Session(0), Item::Tab(0), Item::Tab(1), Item::Tab(2), Item::Tab(3), Item::Tab(4),
-        ]);
         app.set_view(View::Archive);
         assert_eq!(app.rows, vec![Item::Task(5)]);
     }
@@ -2357,7 +2485,7 @@ mod tests {
     fn usage_is_integrated_read_only_and_handles_narrow_frames() {
         let mut app = inbox();
         let mut view = View::All;
-        for expected in [View::Agents, View::Archive, View::Usage, View::All] {
+        for expected in [View::Archive, View::Usage, View::All] {
             view = view.next(false);
             assert!(view == expected);
             assert!(view.next(true).next(false) == view);
@@ -2373,8 +2501,21 @@ mod tests {
             terminal.draw(|f| app.draw(f)).unwrap();
             assert_eq!(app.pick(), "");
         }
-        app.set_view(View::Agents);
+        app.set_view(View::All);
         assert!(!app.rows.is_empty());
+    }
+
+    #[test]
+    fn long_tab_names_stop_at_a_third_of_the_row() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        let long = "x".repeat(200);
+        app.paste(&format!("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\t{long}\t~/dev/src/project\n"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let buf = terminal.backend().buffer();
+        let row: String = (0..100).map(|x| buf[(x, 1)].symbol().to_string()).collect();
+        let shown = row.matches('x').count();
+        assert!(row.contains('…') && row.contains("~/dev/src/project") && (24..=34).contains(&shown), "{row}");
     }
 
     /// Set in the child run of `split_paste_reader`.
@@ -2392,7 +2533,7 @@ mod tests {
         println!("ready");
         loop {
             if let Event::Paste(text) = event::read().unwrap() {
-                let mut app = App::new((String::new(), String::new()), View::Agents);
+                let mut app = App::new((String::new(), String::new()), View::All);
                 app.paste(&text);
                 println!("result bytes={} tasks={} ready={}", text.len(), app.tasks.len(), matches!(app.tasks_load, Tasks::Ready));
                 break;
@@ -2468,27 +2609,28 @@ mod tests {
 
 // ---------------------------------------------------------------- main
 
-const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|agents|archive|usage] [ROWS | - | --wait]
+const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|archive|usage] [ROWS | - | --wait]
 
-Shows Rex tabs grouped by session, the agents among them, and ended tasks,
-and reports the highlighted row in the terminal title as
+Shows Rex tabs grouped by session, the agents among them under status
+headings, and ended tasks, and reports the highlighted row in the terminal
+title as
 rex-tab-picker:ACTION:TARGET/SESSION/WINDOW. ROWS are the tab separated rows
 built by the Rex config; `-` or no argument reads stdin. --wait opens at
 once and takes the data from bracketed pastes of rex-data:KIND, a newline
 and the body: KIND rows (or error and a message), live and tasks
 (rex-spawn --tasks JSON), tasks-error, usage (accounting JSON), or usage-error.
 
-Tab cycles All, Agents, Archive, Usage; Usage is read-only and refreshes every
+Tab cycles All, Archive, Usage; Usage is read-only and refreshes every
 60 seconds. --usage-json prints sanitized accounting JSON across configured
 hosts; --usage-local prints this host only (also the remote collector protocol).
 Only active profiles are read by default. Configure usage.sessions, usage.quotas
 and usage.rates in the Home Manager settings for account labels and prices.
 
-Run bare from a terminal (or as rex-inbox, on the agents view), it gets the
+Run bare from a terminal, it gets the
 tabs and tasks itself, from switchyard-server as they change when it runs,
 else directly every few seconds, and acts on Enter, ctrl-r, ctrl-l (open
 the task's work item, or choose among several), ctrl-t (pin or unpin a task)
-and ctrl-s (snooze or wake a task in the inbox), staying open until Escape
+and ctrl-s (snooze or wake a task), staying open until Escape
 or ctrl-c.";
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
@@ -2531,11 +2673,9 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 }
 
 fn main() -> io::Result<()> {
-    let mut args = std::env::args();
-    // rex-inbox is this binary under another name: standalone, on Agents.
-    let inbox = args.next().is_some_and(|a| a.rsplit('/').next() == Some("rex-inbox"));
+    let mut args = std::env::args().skip(1);
     let mut current = (String::new(), String::new());
-    let mut view = if inbox { View::Agents } else { View::All };
+    let mut view = View::All;
     let mut rows: Option<String> = None;
     let mut stdin = false;
     let mut wait = false;
@@ -2553,7 +2693,6 @@ fn main() -> io::Result<()> {
             "--view" => {
                 view = match args.next().as_deref() {
                     Some("all") => View::All,
-                    Some("agents") => View::Agents,
                     Some("archive") => View::Archive,
                     Some("usage") => View::Usage,
                     _ => {
@@ -2580,7 +2719,7 @@ fn main() -> io::Result<()> {
         }
     }
     // Nothing to read: the standalone picker.
-    let standalone = !wait && rows.is_none() && !stdin && (inbox || io::stdin().is_terminal());
+    let standalone = !wait && rows.is_none() && !stdin && io::stdin().is_terminal();
     let input = match rows {
         _ if wait || standalone => None,
         Some(r) => Some(r),

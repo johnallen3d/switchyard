@@ -1,4 +1,4 @@
-//! When a snooze typed into the Agents view's ctrl-s prompt ends.
+//! When a snooze typed into the tab picker's ctrl-s prompt ends.
 //!
 //! - A duration: `90m`, `2h`, `1h30m`, `3d`, `1w` (spaces allowed).
 //! - A clock time, the next one to come: `9am`, `5:30pm`, `17:00`.

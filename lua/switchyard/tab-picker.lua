@@ -1,6 +1,6 @@
--- The cmd+k picker: every tab across sessions and hosts, the agents among
--- them, and ended tasks, in one rex-tab-picker float (cmd+i opens it on the
--- agents view). The float opens at once, waiting, on the focused session's
+-- The cmd+k picker: every tab across sessions and hosts, with the agents
+-- among them under status headings in each session, and ended tasks, in one
+-- rex-tab-picker float. The float opens at once, waiting, on the focused session's
 -- host; a background `rex do` on the config host fills it (see
 -- util.open_filled_float).
 --
@@ -188,12 +188,6 @@ rex.action{
   run   = function(ctx, args) open_picker(ctx, "all") end,
 }
 
-rex.action{
-  name  = "tab_picker_agents",
-  title = "Agents…",
-  run   = function(ctx, args) open_picker(ctx, "agents") end,
-}
-
 local function float_title(ctx, block_id)
   local t = rex.block.call("com.superlogical.terminal", "title", {
     session_id = ctx.session_id, block_id = block_id,
@@ -359,7 +353,6 @@ rex.action{
 }
 
 rex.bind("cmd+k", "tab_picker")
-rex.bind("cmd+i", "tab_picker_agents")
 rex.bind("tab_picker/enter", "tab_picker_go")
 rex.bind("tab_picker/ctrl+r", "tab_picker_review")
 rex.bind("tab_picker/ctrl+l", "tab_picker_open_link")

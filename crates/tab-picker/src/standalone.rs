@@ -1,5 +1,5 @@
-//! The picker run bare from a shell (`rex-tab-picker`, or `rex-inbox` for
-//! the Agents view), without the config's float.
+//! The picker run bare from a shell (`rex-tab-picker`), without the
+//! config's float.
 //!
 //! It gets what the float's fill script would paste, in the background (see
 //! `Feed`): from switchyard-server when one answers, as pushed updates,

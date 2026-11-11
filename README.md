@@ -5,8 +5,7 @@ Rust binaries, Lua actions, and a Home Manager module.
 
 | Key           | Opens                                |
 | ------------- | ------------------------------------ |
-| `cmd+k`       | Tab picker: All, Agents, Archive     |
-| `cmd+i`       | The same picker, starting on Agents  |
+| `cmd+k`       | Tab picker: tabs and agents, Archive |
 | `cmd+shift+n` | New session                          |
 | `ctrl+cmd+n`  | New agent task in a project worktree |
 
@@ -22,7 +21,6 @@ With Cargo/Rust installed, run from the checkout containing the change:
 ```bash
 cargo build --locked --workspace
 ./target/debug/rex-tab-picker
-./target/debug/rex-inbox                 # Agents view
 ./target/debug/rex-spawn --kind session
 ./target/debug/rex-spawn --kind agent
 ./target/debug/switchyard-server         # foreground; Ctrl-C stops it

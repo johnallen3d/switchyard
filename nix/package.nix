@@ -1,8 +1,7 @@
 # The Rex float tools, one Cargo workspace:
 #
-# - rex-tab-picker: the cmd+k picker for tabs, agents (also cmd+i) and ended
-#   tasks (lua/switchyard/tab-picker.lua); rex-inbox is its standalone Agents
-#   view.
+# - rex-tab-picker: the cmd+k picker for tabs and agents, grouped by session
+#   and status, and ended tasks (lua/switchyard/tab-picker.lua).
 # - rex-spawn: the new-session picker (lua/switchyard/new.lua), which opens a
 #   plain session in a zoxide folder or starts agent work in a new worktree of
 #   a catalog project on a chosen host. Its --launch and --run modes do the
@@ -46,7 +45,7 @@ rustPlatform.buildRustPackage {
     wrapProgram $out/bin/rex-spawn --prefix PATH : ${lib.makeBinPath [zoxide]}
   '';
   meta = {
-    description = "Rex float tools: tab picker, inbox, new-session picker and data server";
+    description = "Rex float tools: tab picker, new-session picker and data server";
     mainProgram = "rex-spawn";
     platforms = lib.platforms.unix;
   };
