@@ -784,16 +784,16 @@ impl Usage {
             width,
             query.is_empty() && profile.is_none(),
         ));
-        lines.push(Line::default());
-        lines.push(Line::from(bold("COVERAGE", p.iris)));
-        lines.push(secondary(
-            "Configured/active profiles only. Missing logs and unknown prices are not zero usage."
-                .into(),
-        ));
-        lines.push(secondary(
-            "Shared account labels deduplicate copied events; distinct accounts need distinct labels.".into(),
-        ));
         if !snap.warnings.is_empty() {
+            lines.push(Line::default());
+            lines.push(Line::from(bold("COVERAGE", p.iris)));
+            lines.push(secondary(
+                "Configured/active profiles only. Missing logs and unknown prices are not zero usage."
+                    .into(),
+            ));
+            lines.push(secondary(
+                "Shared account labels deduplicate copied events; distinct accounts need distinct labels.".into(),
+            ));
             lines.push(Line::default());
             lines.push(Line::from(bold(
                 format!(
@@ -874,10 +874,17 @@ mod tests {
             }),
             ..Usage::default()
         };
-        let text = text(&usage, None, 100);
-        assert!(text.contains("STALE"));
-        assert!(text.contains("not zero usage"));
-        assert!(text.contains("No quota data"));
+        let clean = text(&usage, None, 100);
+        assert!(clean.contains("STALE"));
+        assert!(clean.contains("No quota data"));
+        assert!(!clean.contains("COVERAGE"));
+
+        let mut warned = usage;
+        warned.snapshot.as_mut().unwrap().warnings = vec!["host: logs unreadable".into()];
+        let warned = text(&warned, None, 100);
+        assert!(warned.contains("COVERAGE"));
+        assert!(warned.contains("not zero usage"));
+        assert!(warned.contains("Partial coverage"));
     }
 
     #[test]
