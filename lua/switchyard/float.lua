@@ -48,8 +48,10 @@ end
 -- The start of a `rex do` script that fills a float opened before its data
 -- was ready. Run with session= and block= naming the float; the rest of the
 -- script fetches and calls deliver(kind, body), which types
--- "rex-data:KIND\n" .. body into the float as a bracketed paste. Errors the
--- rest raises are delivered as kind "error". The float may be on any host,
+-- "rex-data:KIND\n" .. body into the float as a bracketed paste, in several
+-- writes. A paste Rex won't take is logged and, for rows, live, tasks and
+-- usage, reported as error, tasks-error or usage-error. Errors the rest
+-- raises are delivered as kind "error". The float may be on any host,
 -- so every server is asked for its session at once while the script fetches.
 M.deliver_prelude = [==[
 local T = "com.superlogical.terminal"
@@ -75,7 +77,13 @@ local function float_server()
   end
   error("can't find the float's session " .. float.session_id, 0)
 end
-local function deliver(kind, body)
+-- Bytes of paste body per terminal write: under Rex's limit even if the
+-- JSON request escapes every byte as \u00XX.
+local DELIVER_CHUNK = 8 * 1024
+-- What to deliver when a paste of a kind can't be written.
+local DELIVER_FAILURE = { rows = "error", live = "tasks-error", tasks = "tasks-error", usage = "usage-error" }
+local deliver
+function deliver(kind, body)
   local s = float_server()
   -- Wait (up to 5s) for the float program to take the terminal raw, so the
   -- paste isn't echoed or line-edited; give up if the float has closed.
@@ -85,9 +93,31 @@ local function deliver(kind, body)
     if not mode.canonical and not mode.echo then break end
     rex.sleep(0.05)
   end
-  -- An escape in the body could end the paste early.
-  local data = "\27[200~rex-data:" .. kind .. "\n" .. tostring(body):gsub("\27", "") .. "\27[201~"
-  s.block.call(T, "write", { session_id = float.session_id, block_id = float.block_id, data = data })
+  local function write(data)
+    return s.block.call(T, "write", { session_id = float.session_id, block_id = float.block_id, data = data }) ~= nil
+  end
+  -- Rex silently drops (returning nil) a write over about 64 KiB encoded,
+  -- so the paste goes out in pieces the float's reader joins up again:
+  -- start marker and header, the body in chunks, then the end marker. An
+  -- escape in the body could end the paste early.
+  body = tostring(body):gsub("\27", "")
+  local ok = write("\27[200~rex-data:" .. kind .. "\n")
+  local i = 1
+  while ok and i <= #body do
+    local j = math.min(i + DELIVER_CHUNK - 1, #body)
+    -- Cut on a UTF-8 boundary: back off while the next byte continues a character.
+    while j < #body and j > i and body:byte(j + 1) >= 0x80 and body:byte(j + 1) < 0xC0 do j = j - 1 end
+    ok = write(body:sub(i, j))
+    i = j + 1
+  end
+  -- Close the paste even after a failure, so what follows isn't swallowed.
+  ok = write("\27[201~") and ok
+  if ok then return end
+  local failed = "can't deliver " .. kind .. " (" .. #body .. " bytes): Rex dropped a write to the float"
+  io.stderr:write("switchyard: ", failed, "\n")
+  -- Tell the float, so it stops waiting; a failure paste that fails is only logged.
+  local report = DELIVER_FAILURE[kind]
+  if report ~= nil then deliver(report, failed) end
 end
 local function main(fetch)
   local ok, err = pcall(fetch)

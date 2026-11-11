@@ -2376,6 +2376,94 @@ mod tests {
         app.set_view(View::Agents);
         assert!(!app.rows.is_empty());
     }
+
+    /// Set in the child run of `split_paste_reader`.
+    const PASTE_CHILD: &str = "SWITCHYARD_PASTE_CHILD";
+
+    /// The float's side of `split_tasks_paste_over_64k_arrives_whole`: read
+    /// one paste from the terminal on stdin, as `run` does, and report what
+    /// the picker made of it.
+    #[test]
+    fn split_paste_reader() {
+        if std::env::var_os(PASTE_CHILD).is_none() {
+            return;
+        }
+        ratatui::crossterm::terminal::enable_raw_mode().unwrap();
+        println!("ready");
+        loop {
+            if let Event::Paste(text) = event::read().unwrap() {
+                let mut app = App::new((String::new(), String::new()), View::Agents);
+                app.paste(&text);
+                println!("result bytes={} tasks={} ready={}", text.len(), app.tasks.len(), matches!(app.tasks_load, Tasks::Ready));
+                break;
+            }
+        }
+        ratatui::crossterm::terminal::disable_raw_mode().unwrap();
+    }
+
+    /// Rex drops a terminal write over about 64 KiB, so float.lua's deliver
+    /// types a big paste in several writes; the reader must join them.
+    #[test]
+    fn split_tasks_paste_over_64k_arrives_whole() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::process::{Command, Stdio};
+
+        let tasks: Vec<_> = (0..400)
+            .map(|i| serde_json::json!({"session_id":"s", "window_id":format!("w{i}"), "name":format!("task {i} ✓"),
+                "status":"idle", "status_msg":"x".repeat(150)}))
+            .collect();
+        let body = serde_json::Value::Array(tasks).to_string();
+        assert!(body.len() > 64 * 1024);
+
+        let (mut master, mut slave) = (0, 0);
+        let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(r, 0, "openpty");
+        let (mut master, slave) = unsafe { (std::fs::File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+        // Kill the child even when an assertion fails, or it waits forever.
+        struct Kill(std::process::Child);
+        impl Drop for Kill {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::split_paste_reader", "--nocapture", "--test-threads=1"])
+            .env(PASTE_CHILD, "1")
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(Kill)
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = BufReader::new(child.0.stdout.take().unwrap());
+        std::thread::spawn(move || {
+            for line in out.lines().map_while(Result::ok) {
+                let _ = tx.send(line);
+            }
+        });
+        let line = |want: &str| loop {
+            let l = rx.recv_timeout(Duration::from_secs(10)).expect("child output");
+            // The harness may print its own text ahead on the same line.
+            if let Some(at) = l.find(want) {
+                break l[at..].to_string();
+            }
+        };
+        line("ready");
+
+        // As deliver writes it: marker and header, 8 KiB chunks, end marker.
+        let mut writes = vec![b"\x1b[200~rex-data:tasks\n".to_vec()];
+        writes.extend(body.as_bytes().chunks(8 * 1024).map(<[u8]>::to_vec));
+        writes.push(b"\x1b[201~".to_vec());
+        for w in writes {
+            master.write_all(&w).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let result = line("result");
+        assert_eq!(result, format!("result bytes={} tasks=400 ready=true", "rex-data:tasks\n".len() + body.len()));
+    }
 }
 
 // ---------------------------------------------------------------- main
