@@ -39,9 +39,10 @@ jobs:
           NIX_SYSTEM: ${{ matrix.system }}
         run: nix build --no-update-lock-file --print-build-logs ".#packages.${NIX_SYSTEM}.default"
       # PRs (including same-repo PRs) never receive the upload token.
+      # Manual dispatches on main publish too, so they can force a fresh build.
       # Push only the successful package's closure, not arbitrary store paths.
       - name: Publish trusted main build
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
