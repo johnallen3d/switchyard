@@ -49,6 +49,29 @@ fn worktree_for(repo: &Path, branch: &str) -> Option<PathBuf> {
     None
 }
 
+/// Fetch origin's default branch and return it (e.g. `origin/main`) as the
+/// base for a new branch, so work doesn't start from a stale local `main`.
+/// None, falling back to Worktrunk's local default, when the repo has no
+/// `origin/HEAD` or the fetch fails (offline).
+fn fresh_remote_base(repo: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .output()
+        .ok()?;
+    let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let branch = base.strip_prefix("origin/").filter(|b| out.status.success() && !b.is_empty())?;
+    status(&format!("Fetching {base}"));
+    match check(Command::new("git").arg("-C").arg(repo).args(["fetch", "--quiet", "origin", branch]), "git fetch") {
+        Ok(()) => Some(base),
+        Err(e) => {
+            eprintln!("\x1b[33mrex-spawn: {e}; branching from local {branch}\x1b[0m");
+            None
+        }
+    }
+}
+
 /// Set up the worktree; returns it, or the error and the best directory to
 /// leave the shell in.
 fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, PathBuf)> {
@@ -85,6 +108,9 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
     wt.arg("-C").arg(&repo).args(["--config-set", &template, "switch"]);
     if !exists {
         wt.arg("--create");
+        if let Some(base) = fresh_remote_base(&repo) {
+            wt.args(["--base", &base]);
+        }
     }
     wt.args([branch.as_str(), "--no-cd", "--yes"]);
     check(&mut wt, "wt switch").map_err(fail)?;
