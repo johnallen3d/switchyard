@@ -21,6 +21,17 @@ use crate::sessions::newest_session;
 /// inbox: Claude's default transcript cleanup (`cleanupPeriodDays`).
 const ENDED_KEEP_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// How long a new task may go without its worktree: `task launch` records
+/// it before `task run`, in the new tab, fetches (or clones) and creates
+/// the worktree, so a missing one only ends the task after this.
+const LAUNCH_GRACE_SECS: u64 = 10 * 60;
+
+/// Whether an open task is still within its launch grace at `now`, when a
+/// missing worktree may not have been created yet.
+fn launching(task: &serde_json::Value, now: u64) -> bool {
+    task["created_at"].as_u64().is_some_and(|created| now.saturating_sub(created) < LAUNCH_GRACE_SECS)
+}
+
 pub fn tasks_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -383,7 +394,8 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// links (saved): the branch's git config links, and derived ones such as
 /// their PR, with its live `state` and `checks` (not saved); see `links`.
 /// A host that can't be reached leaves its tasks as they were, without
-/// status.
+/// status. A new task's missing worktree ends it only after
+/// `LAUNCH_GRACE_SECS`, since `task run` may still be creating it.
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
     let before = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
@@ -441,6 +453,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
                 live.insert(window_id.to_string(), status.clone());
             }
             match worktree {
+                Some(w) if w.path.is_empty() && launching(task, stamp) => {}
                 Some(w) if w.path.is_empty() => {
                     task["ended_at"] = stamp.into();
                     task["ended_reason"] = "worktree removed".into();
@@ -633,6 +646,16 @@ mod tests {
         assert_eq!(tasks[1]["pinned"], true);
         // Gone from the later read (pruned or replaced): left alone.
         assert_eq!(tasks[2]["pinned"], true);
+    }
+
+    #[test]
+    fn a_new_task_waits_for_its_worktree() {
+        let task = serde_json::json!({"created_at": 1000});
+        assert!(launching(&task, 1000));
+        assert!(launching(&task, 1000 + LAUNCH_GRACE_SECS - 1));
+        assert!(!launching(&task, 1000 + LAUNCH_GRACE_SECS));
+        // An entry without a creation time gets no grace.
+        assert!(!launching(&serde_json::json!({}), 1000));
     }
 
     fn git(dir: &Path, args: &[&str]) {
