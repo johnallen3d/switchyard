@@ -1,4 +1,4 @@
-//! `rex-spawn --launch`: open a work's tab on its host and record the task.
+//! `switchyard task launch`: open a work's tab on its host and record the task.
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
 use crate::hosts::{AUTO, Project, catalog, choose_host};
@@ -164,7 +164,7 @@ pub fn launch(
         None => typed,
     };
     let mut run = vec![
-        "rex-spawn", "--run", &project.profile, &project.path, name, harness, &project.clone_url,
+        "switchyard", "task", "run", &project.profile, &project.path, name, harness, &project.clone_url,
         &agent_session, mode,
     ];
     if !prompt.is_empty() {
@@ -211,7 +211,7 @@ pub fn launch(
         "repo": cwd,
         "name": name,
         "branch": branch,
-        // Where `--run` puts a new worktree; `--tasks` corrects it when the
+        // Where `task run` puts a new worktree; `task list` corrects it when the
         // branch already had one elsewhere.
         "worktree": format!("{cwd}/.worktrees/{slug}"),
         "harness": harness,

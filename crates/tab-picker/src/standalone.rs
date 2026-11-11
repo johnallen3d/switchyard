@@ -1,4 +1,4 @@
-//! The picker run bare from a shell (`rex-tab-picker`), without the
+//! The picker run bare from a shell (bare `switchyard`), without the
 //! config's float.
 //!
 //! It gets what the float's fill script would paste, in the background (see
@@ -314,7 +314,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Log an action's outcome to the state log, as `rex-spawn --act` does.
+/// Log an action's outcome to the state log, as `switchyard task act` does.
 fn logged(action: &str, r: Result<String, String>) -> Result<String, String> {
     match &r {
         Ok(out) => log(out),

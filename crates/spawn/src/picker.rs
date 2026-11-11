@@ -1301,7 +1301,7 @@ pub fn run_picker(kind: Kind, home: String, home_folders: String, standalone: bo
             // Leave the shell's title as it was before the picks.
             clear_title();
             if let Some(note) = &app.exit_note {
-                eprintln!("rex-spawn: {note}");
+                eprintln!("switchyard: {note}");
             }
         } else {
             let _ = Command::new("rex")

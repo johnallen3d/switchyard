@@ -19,9 +19,6 @@ switchyard usage            # usage view (--json, --local: print JSON)
 switchyard server           # data server (normally the service)
 ```
 
-`rex-tab-picker` and `rex-spawn` remain as symlinks taking their old
-arguments until every host runs the single binary (card #1082).
-
 ## Develop
 
 Start `pi` or `claude` in `~/dev/src/playground/switchyard` and describe the

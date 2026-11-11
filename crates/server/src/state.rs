@@ -11,7 +11,7 @@
 //!   the float's `rows` paste carries it), `age_ms` (since the rows were
 //!   last read; null before the first), `error` (the last failure, cleared
 //!   by the next rows; old rows stay) and `watching` (a watcher is running).
-//! - `tasks`: the registry as `rex-spawn --tasks` prints it, with each open
+//! - `tasks`: the registry as `switchyard task list` prints it, with each open
 //!   task's live agent status from the rows. Null when unreadable.
 //! - `tasks_checked`: whether the tasks have been checked against their
 //!   hosts (worktrees, ended tabs) yet: true is the float's `tasks` paste,

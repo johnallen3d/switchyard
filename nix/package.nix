@@ -15,10 +15,6 @@
 # - `switchyard link REF`, which links the current branch to a work item
 #   (issue, card, PR) for the inbox.
 #
-# rex-tab-picker and rex-spawn are symlinks to switchyard that keep the old
-# arguments, for floats and other hosts that still call them (card #1082
-# removes them).
-#
 # The Lua ships separately (the Home Manager module links it on the Mac).
 {
   git,
@@ -49,9 +45,6 @@ rustPlatform.buildRustPackage {
     # The picker lists this host's folders with zoxide; rex, ssh and git stay
     # the caller's (the server's service sets its PATH).
     wrapProgram $out/bin/switchyard --prefix PATH : ${lib.makeBinPath [zoxide]}
-    # The old names; the wrapper passes its own name on as argv[0].
-    ln -s switchyard $out/bin/rex-spawn
-    ln -s switchyard $out/bin/rex-tab-picker
   '';
   meta = {
     description = "Rex float tools: tab picker, new-session picker and data server";

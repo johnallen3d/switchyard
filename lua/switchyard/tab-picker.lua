@@ -1,9 +1,8 @@
 -- The cmd+k picker: every tab across sessions and hosts, with the agents
 -- among them under status headings in each session, and ended tasks, in one
--- picker float (`switchyard float tabs`, run as rex-tab-picker until
--- #1082). The float opens at once, waiting, on the focused session's host;
--- a background `rex do` on the config host fills it (see
--- util.open_filled_float).
+-- picker float (`switchyard float tabs`). The float opens at once, waiting,
+-- on the focused session's host; a background `rex do` on the config host
+-- fills it (see util.open_filled_float).
 --
 -- It asks switchyard-server first: `switchyard server pastes` prints the
 -- pastes below from the server's snapshot in milliseconds (see
@@ -177,9 +176,7 @@ local function open_picker(ctx, view)
     label    = label,
     mode     = "tab_picker",
     bounds   = { 0.12, 0.1, 0.76, 0.75 },
-    -- The float runs on the focused session's host, which may not have the
-    -- switchyard binary yet, so it still calls the old name until card #1082.
-    command  = util.float_command("rex-tab-picker", "--current", current, "--view", view, "--wait"),
+    command  = util.float_command("switchyard", "float", "tabs", "--current", current, "--view", view, "--wait"),
     script   = fill_script,
     log_name = "tab-picker.log",
   })

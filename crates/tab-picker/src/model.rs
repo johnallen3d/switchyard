@@ -1,5 +1,5 @@
 //! What the picker shows: Rex tabs grouped by session (from the config's
-//! rows) and spawned tasks (from `rex-spawn --tasks` JSON), linked by
+//! rows) and spawned tasks (from `switchyard task list` JSON), linked by
 //! (session_id, window_id) because the two name hosts differently (`local`
 //! against `hostname -s`).
 
@@ -328,7 +328,7 @@ impl Task {
     }
 }
 
-/// Every task from `rex-spawn --tasks` output, open and ended.
+/// Every task from `switchyard task list` output, open and ended.
 pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
     let all: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| format!("tasks: {e}"))?;
     let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();

@@ -41,8 +41,8 @@
 
 - `crates/tab-picker`: tabs, agent tasks, archive, and standalone mode
 - `crates/spawn`: session/agent picker and launch commands
-- `crates/cli`: the `switchyard` binary: subcommands, `link`, and the old
-  `rex-tab-picker`/`rex-spawn` names
+- `crates/cli`: the `switchyard` binary: argument parsing, subcommands, and
+  `link`
 - `crates/core`: config, Rex/SSH, task registry, and worktree actions
 - `crates/ui`: shared drawing, filtering, and float protocol
 - `lua/switchyard`: Rex bindings and float actions

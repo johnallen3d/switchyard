@@ -725,6 +725,7 @@ dependencies = [
 name = "switchyard"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "switchyard-core",
  "switchyard-server",
  "switchyard-spawn",
@@ -758,7 +759,6 @@ dependencies = [
  "nucleo-matcher",
  "ratatui",
  "ratatui-textarea",
- "serde_json",
  "switchyard-core",
  "switchyard-ui",
  "unicode-width",

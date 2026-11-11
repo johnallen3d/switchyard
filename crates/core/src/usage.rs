@@ -682,7 +682,7 @@ pub struct Total {
 /// Only sanitized accounting JSON crosses the connection, never raw logs.
 fn remote(host: &str) -> Result<Snapshot, String> {
     let mut child = rex::ssh(host)
-        .arg("PATH=\"$HOME/.local/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH\" sh -c 'exec rex-tab-picker --usage-local'")
+        .arg("PATH=\"$HOME/.local/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH\" sh -c 'exec switchyard usage --local'")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("no collector output")?;

@@ -1,6 +1,6 @@
 //! The folders the new-session picker offers: a host's zoxide folders (this
 //! host's, the config host's as passed in, or another host's over SSH), and
-//! opening the session for one (`rex-spawn --open`).
+//! opening the session for one (`switchyard task open`).
 
 use std::process::{Command, Stdio};
 

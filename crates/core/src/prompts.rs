@@ -1,13 +1,13 @@
 //! Spawn prompts. Titles are capped at about 1 KiB, too little for a prompt,
 //! so the picker keeps a typed prompt in a file on its own host, and the
-//! title carries only its `LABEL:ID` reference; `--launch` collects it.
+//! title carries only its `LABEL:ID` reference; `task launch` collects it.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::rex::{home, host_bash, log};
 
-/// Where the picker keeps prompts until `--launch` collects them, relative
+/// Where the picker keeps prompts until `task launch` collects them, relative
 /// to the state directory (`$XDG_STATE_HOME`, else ~/.local/state).
 pub const PROMPT_DIR: &str = "rex/spawn-prompts";
 

@@ -105,7 +105,7 @@ pub fn runtime_dir() -> Option<PathBuf> {
 }
 
 /// Append a line to the state log the Lua action also uses
-/// (`$XDG_STATE_HOME/rex/spawn.log`); the action drops --launch's stderr
+/// (`$XDG_STATE_HOME/rex/spawn.log`); the action drops `task launch`'s stderr
 /// on success.
 pub fn log(line: &str) {
     let state = std::env::var("XDG_STATE_HOME")
@@ -114,7 +114,7 @@ pub fn log(line: &str) {
     let dir = state.join("rex");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("spawn.log")) {
-        let _ = writeln!(f, "rex-spawn: {line}");
+        let _ = writeln!(f, "switchyard: {line}");
     }
 }
 

@@ -1,4 +1,4 @@
-//! Actions on a spawned task: `rex-spawn --act ACTION HOST SESSION WINDOW`.
+//! Actions on a spawned task: `switchyard task act ACTION HOST SESSION WINDOW`.
 //!
 //! Runs on the config host, which holds the task registry and reaches every
 //! Rex host; the config's tab_picker mode calls it, then jumps to the task's tab
@@ -25,13 +25,13 @@
 //!   open on the client machine.
 //! - pin: pin an open task to the top of the inbox, or unpin a pinned one
 //!   (`pinned` in the registry).
-//! - snooze (`rex-spawn --act snooze HOST SESSION WINDOW UNTIL`): hide an
+//! - snooze (`task act snooze HOST SESSION WINDOW UNTIL`): hide an
 //!   open task in the inbox's Snoozed group until UNTIL, Unix seconds
 //!   (`snoozed_until`); 0 wakes it now.
 //! - resume: for an ended task (archived, or its tab or worktree gone), open
 //!   a new tab on the task's host that recreates the worktree on its branch
 //!   and resumes the agent session, replace the ended entry with the new
-//!   task, and print the tab as `--launch` does. SESSION is unused here.
+//!   task, and print the tab as `task launch` does. SESSION is unused here.
 //!
 //! Archiving doesn't delete an unmerged branch: only uncommitted work can be
 //! lost, and a resume finds its commits again.

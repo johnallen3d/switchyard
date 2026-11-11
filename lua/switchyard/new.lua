@@ -78,9 +78,7 @@ local function open_picker(ctx, kind)
     return close_picker(ctx)
   end
   local folders = rex.exec({ "zoxide", "query", "-l" }, { env = { PATH = util.user_path() } })
-  -- The float runs on the focused session's host, which may not have the
-  -- switchyard binary yet, so it still calls the old name until card #1082.
-  local command = util.float_command("rex-spawn", "--kind", kind, "--home", host_label(),
+  local command = util.float_command("switchyard", "float", "new", "--kind", kind, "--home", host_label(),
     (folders and folders.ok and folders.stdout) or "")
   local _, err = rex.session.new_layer{
     session_id = session_id,
@@ -156,7 +154,7 @@ rex.action{
       local r, err = rex.exec(argv, { env = env })
       if r == nil then error(err, 0) end
       if not r.ok then error(r.stderr, 0) end
-      -- With host "auto", --launch picks the host and reports it first.
+      -- With host "auto", `task launch` picks the host and reports it first.
       local session_id, window_id
       host, session_id, window_id = r.stdout:match("^(%S+)\t(%S+)\t(%S+)$")
       if session_id == nil then error("switchyard task launch: unexpected output: " .. r.stdout, 0) end

@@ -1,4 +1,4 @@
-//! `rex-spawn --run`: runs in the work's new tab. Clones a missing project,
+//! `switchyard task run`: runs in the work's new tab. Clones a missing project,
 //! creates or reuses the worktree with Worktrunk, then becomes the harness.
 
 use std::os::unix::process::CommandExt;
@@ -118,7 +118,7 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
 }
 
 /// `session` is the agent session to start (`mode` "new") or resume
-/// ("resume"); None for a tab opened by an older `--launch`. A new session
+/// ("resume"); None when the command gave none. A new session
 /// starts on `prompt` when there is one.
 pub fn run(
     profile: &str,
@@ -146,7 +146,7 @@ pub fn run(
                     Ok(env) => {
                         agent.envs(env);
                     }
-                    Err(e) => eprintln!("\x1b[31mrex-spawn: work profile: {e}\x1b[0m"),
+                    Err(e) => eprintln!("\x1b[31mswitchyard: work profile: {e}\x1b[0m"),
                 }
             }
             // Spawned Claude tasks always run without permission prompts.
@@ -157,7 +157,7 @@ pub fn run(
             if let Some((id, mode)) = session {
                 let here = worktree.display().to_string();
                 if mode == "resume" && !session_exists_here(profile, harness, &here, id) {
-                    eprintln!("\x1b[33mrex-spawn: agent session {id} is gone; starting a new one\x1b[0m");
+                    eprintln!("\x1b[33mswitchyard: agent session {id} is gone; starting a new one\x1b[0m");
                     agent.args(["--session-id", &new_session_id()]);
                 } else if mode == "resume" && harness == "claude" {
                     resuming = true;
@@ -183,13 +183,13 @@ pub fn run(
             worktree
         }
         Err((e, dir)) => {
-            eprintln!("\x1b[31mrex-spawn: {e}\x1b[0m");
+            eprintln!("\x1b[31mswitchyard: {e}\x1b[0m");
             dir
         }
     };
     // Only reached on failure: keep a shell so the error stays readable.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
     let err = Command::new(&shell).current_dir(&dir).env("PWD", &dir).exec();
-    eprintln!("rex-spawn: {shell}: {err}");
+    eprintln!("switchyard: {shell}: {err}");
     std::process::exit(1);
 }

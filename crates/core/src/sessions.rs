@@ -75,7 +75,7 @@ pub fn session_exists_here(profile: &str, harness: &str, worktree: &str, id: &st
 }
 
 /// The newest agent session for a task's worktree, asked of its host
-/// (`rex-spawn --session-of`). None when there is none or the host can't
+/// (`switchyard task session-of`). None when there is none or the host can't
 /// be reached.
 pub fn newest_session(task: &serde_json::Value) -> Option<String> {
     let f = |k: &str| task[k].as_str().unwrap_or("").to_string();
@@ -85,7 +85,7 @@ pub fn newest_session(task: &serde_json::Value) -> Option<String> {
         h => h.to_string(),
     };
     let script = format!(
-        "rex-spawn --session-of {} {} {}",
+        "switchyard task session-of {} {} {}",
         sh_quote(&f("profile")),
         sh_quote(&harness),
         sh_quote(&f("worktree"))

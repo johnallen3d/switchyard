@@ -7,9 +7,9 @@
 //! - `rows`: every tab across sessions and hosts (format in model.rs),
 //!   with a note for each host that couldn't be listed, named in the
 //!   header; `error` when no host could.
-//! - `live`: `rex-spawn --tasks --live`, the task registry with each open
+//! - `live`: `switchyard task list --live`, the task registry with each open
 //!   task's live agent status; never replaces `tasks`.
-//! - `tasks`: `rex-spawn --tasks`, the same after the worktree check.
+//! - `tasks`: `switchyard task list`, the same after the worktree check.
 //! - `tasks-error`: the registry couldn't be read. The tabs stay, and the
 //!   header says "tabs only".
 //!
@@ -69,7 +69,7 @@ mod standalone;
 mod usage;
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Read};
+use std::io;
 use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
@@ -118,14 +118,25 @@ enum Tasks {
     Failed,
 }
 
+/// The picker's views, along its top bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum View {
+pub enum View {
     All,
     Archive,
     Usage,
 }
 
 impl View {
+    /// `all`, `archive` or `usage`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "all" => Some(View::All),
+            "archive" => Some(View::Archive),
+            "usage" => Some(View::Usage),
+            _ => None,
+        }
+    }
+
     fn next(self, back: bool) -> Self {
         match (self, back) {
             (View::All, false) | (View::Usage, true) => View::Archive,
@@ -1038,7 +1049,7 @@ impl App {
     }
 
     /// The prompt's Enter, once the snooze is saved (in the float, the
-    /// config types Enter back after `rex-spawn --act snooze`): show it
+    /// config types Enter back after `switchyard task act snooze`): show it
     /// here, moving on from a task just snoozed to the next.
     fn finish_snooze(&mut self) {
         let Some(z) = self.snooze.take() else { return };
@@ -2744,30 +2755,6 @@ fn ending(t: &Task) -> &'static str {
     }
 }
 
-const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|archive|usage] [ROWS | - | --wait]
-
-Shows Rex tabs grouped by session, the agents among them under status
-headings, and ended tasks, and reports the highlighted row in the terminal
-title as
-rex-tab-picker:ACTION:TARGET/SESSION/WINDOW. ROWS are the tab separated rows
-built by the Rex config; `-` or no argument reads stdin. --wait opens at
-once and takes the data from bracketed pastes of rex-data:KIND, a newline
-and the body: KIND rows (or error and a message), live and tasks
-(rex-spawn --tasks JSON), tasks-error, usage (accounting JSON), or usage-error.
-
-h and l (with nothing typed) move along the top bar: All, Archive, Usage. Usage is read-only and refreshes every
-60 seconds. --usage-json prints sanitized accounting JSON across configured
-hosts; --usage-local prints this host only (also the remote collector protocol).
-Only active profiles are read by default. Configure usage.sessions, usage.quotas
-and usage.rates in the Home Manager settings for account labels and prices.
-
-Run bare from a terminal, it gets the
-tabs and tasks itself, from switchyard-server as they change when it runs,
-else directly every few seconds, and acts on Enter, ctrl-r, ctrl-l (open
-the task's work item, or choose among several), ctrl-t (pin or unpin a task)
-and ctrl-s (snooze or wake a task), staying open until Escape
-or ctrl-c.";
-
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.take_fetched();
@@ -2807,75 +2794,39 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     }
 }
 
-pub fn main(args: Vec<String>) -> io::Result<()> {
-    let mut args = args.into_iter();
-    let mut current = (String::new(), String::new());
-    let mut view = View::All;
-    let mut rows: Option<String> = None;
-    let mut stdin = false;
-    let mut wait = false;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                return Ok(());
-            }
-            "--current" => {
-                let v = args.next().unwrap_or_default();
-                let (s, w) = v.split_once('/').unwrap_or((&v, ""));
-                current = (s.to_string(), w.to_string());
-            }
-            "--view" => {
-                view = match args.next().as_deref() {
-                    Some("all") => View::All,
-                    Some("archive") => View::Archive,
-                    Some("usage") => View::Usage,
-                    _ => {
-                        eprintln!("{USAGE}");
-                        std::process::exit(2);
-                    }
-                }
-            }
-            "--usage-json" | "--usage-local" => {
-                let mut collector = switchyard_core::usage::Collector::default();
-                let snapshot = if arg == "--usage-local" {
-                    let settings = switchyard_core::config::read().map(|c| c.usage).unwrap_or_default();
-                    collector.local(&settings, &switchyard_core::rex::local_label(), now())
-                } else { collector.collect() };
-                println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
-                return Ok(());
-            }
-            "--wait" => wait = true,
-            "-" => {
-                rows = None;
-                stdin = true;
-            }
-            other => rows = Some(other.to_string()),
-        }
-    }
-    // Nothing to read: the standalone picker.
-    let standalone = !wait && rows.is_none() && !stdin && io::stdin().is_terminal();
-    let input = match rows {
-        _ if wait || standalone => None,
-        Some(r) => Some(r),
-        None => {
-            let mut s = String::new();
-            io::stdin().read_to_string(&mut s)?;
-            Some(s)
-        }
+/// The picker in a float: it opens at once and takes its data from the
+/// config's bracketed pastes (see the crate docs). `current` is the
+/// SESSION/WINDOW the float was opened from.
+pub fn float(current: &str, view: View) -> io::Result<()> {
+    let (s, w) = current.split_once('/').unwrap_or((current, ""));
+    picker(App::new((s.to_string(), w.to_string()), view))
+}
+
+/// The picker from a terminal: it fetches its own tabs and tasks and acts on
+/// Enter itself.
+pub fn standalone(view: View) -> io::Result<()> {
+    standalone::detach_env();
+    let mut app = App::new((String::new(), String::new()), view);
+    app.standalone = true;
+    app.start_feed();
+    picker(app)
+}
+
+/// Sanitized usage accounting as JSON: across configured hosts, or with
+/// `local` this host only (the remote collector protocol).
+pub fn usage_json(local: bool) -> io::Result<()> {
+    let mut collector = switchyard_core::usage::Collector::default();
+    let snapshot = if local {
+        let settings = switchyard_core::config::read().map(|c| c.usage).unwrap_or_default();
+        collector.local(&settings, &switchyard_core::rex::local_label(), now())
+    } else {
+        collector.collect()
     };
-    if standalone {
-        standalone::detach_env();
-    }
-    let mut app = App::new(current, view);
-    if standalone {
-        app.standalone = true;
-        app.start_feed();
-    }
-    if let Some(input) = input {
-        app.tasks_load = Tasks::Failed;
-        app.paste(&format!("{}rows\n{input}", protocol::DATA));
-    }
+    println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
+    Ok(())
+}
+
+fn picker(mut app: App) -> io::Result<()> {
     let mut term = ratatui::init();
     // No mouse capture, so the terminal's own selection and copy work.
     let result = run(&mut term, &mut app);

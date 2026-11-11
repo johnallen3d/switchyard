@@ -10,8 +10,8 @@
 #                      `switchyard task` plumbing
 #   crates/server      `switchyard server` (rows and tasks kept current from
 #                      Rex events, served on a Unix socket)
-#   crates/cli         the `switchyard` binary: subcommands, `link`, and the
-#                      rex-tab-picker/rex-spawn names (argv[0])
+#   crates/cli         the `switchyard` binary: argument parsing,
+#                      subcommands, and `link`
 [workspace]
 resolver = "3"
 members = ["crates/*"]
