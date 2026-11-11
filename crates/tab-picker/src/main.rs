@@ -22,7 +22,9 @@
 //!   urgency order, then its other tabs. Pinned tasks lead the list,
 //!   Snoozed ones trail it, and open tasks whose session isn't listed come
 //!   just before Snoozed, under No tab.
-//! - Archive (ctrl-a): ended tasks, most recent first; ctrl-f hides the
+//! - Archive (ctrl-a): ended tasks grouped by project (those with a
+//!   worktree left behind first), under headings for how they ended
+//!   (Left behind, Merged, Archived, Closed), newest first; ctrl-f hides the
 //!   archived ones, leaving those whose tab or worktree went without one.
 //! - Usage: read-only accounting (see usage.rs).
 //!
@@ -92,6 +94,7 @@ const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
 const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
+const ICON_PROJECT: &str = "\u{f024b}"; // nf-md-folder
 
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
@@ -178,11 +181,14 @@ enum Armed {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
     Session(usize),
+    /// An Archive project heading, by the index of its first task.
+    Project(usize),
     /// A heading over the whole list: `pinned`, `snoozed`, or `notab` (open
     /// tasks whose session isn't listed).
     Status(&'static str),
     /// A status heading within a session: an agent status (the empty
-    /// string means no known status), or `tabs` for its other tabs.
+    /// string means no known status), or `tabs` for its other tabs; within
+    /// an Archive project, how its tasks ended (see `ending`).
     Sub(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
@@ -457,7 +463,7 @@ impl App {
     /// The (session_id, window_id) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
-            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
@@ -478,7 +484,7 @@ impl App {
     /// The task a row stands for: a tab's open task, or the row's own.
     fn task_of(&self, item: Item) -> Option<&Task> {
         match item {
-            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task.map(|k| &self.tasks[k]),
             Item::Task(k) => Some(&self.tasks[k]),
         }
@@ -491,7 +497,7 @@ impl App {
     /// The index of the task a row stands for.
     fn task_index(&self, item: Item) -> Option<usize> {
         match item {
-            Item::Session(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task,
             Item::Task(k) => Some(k),
         }
@@ -647,7 +653,7 @@ impl App {
                 }
             }
             // Headers aren't flat rows.
-            Item::Session(_) | Item::Status(_) | Item::Sub(_) => Flat {
+            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => Flat {
                 project: "",
                 name: "",
                 msg: "",
@@ -697,10 +703,7 @@ impl App {
         let filtering = !self.query.trim().is_empty();
         let best = match self.view {
             View::All => self.filter_merged(&pattern, filtering),
-            View::Archive => {
-                let rows = self.archive();
-                self.filter_flat(rows, &pattern, filtering)
-            }
+            View::Archive => self.filter_archive(&pattern, filtering),
             View::Usage => None,
         };
         let want = if filtering { best.and_then(|i| self.key_of(i)) } else { want };
@@ -830,13 +833,17 @@ impl App {
         best.map(|(_, i)| i)
     }
 
-    /// Archive: rows in the given order. Matches project, name, host and
-    /// the task's work items (`#42`, `card 1041`, `PR #57`), so an ended
-    /// task can be found by its issue or card and resumed. Returns the best
-    /// match.
-    fn filter_flat(&mut self, rows: Vec<Item>, pattern: &Pattern, filtering: bool) -> Option<Item> {
+    /// Archive: ended tasks by project, under headings for how they
+    /// ended (see `ending`), newest first within each. Projects with a
+    /// worktree left behind come first, then the most recently ended.
+    /// Matches project, name, host and the task's work items (`#42`,
+    /// `card 1041`, `PR #57`), so an ended task can be found by its issue or
+    /// card and resumed. Returns the best match.
+    fn filter_archive(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
-        for item in rows {
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for item in self.archive() {
+            let Item::Task(k) = item else { continue };
             let (project, name, host, work) = {
                 let f = self.flat(item);
                 (f.project.to_string(), f.name.to_string(), f.host.to_string(), f.work)
@@ -855,7 +862,36 @@ impl App {
                     best = Some((score, item));
                 }
             }
-            self.rows.push(item);
+            match groups.iter_mut().find(|(p, _)| *p == project) {
+                Some((_, ks)) => ks.push(k),
+                None => groups.push((project, vec![k])),
+            }
+        }
+        let tasks = &self.tasks;
+        for (_, ks) in &mut groups {
+            // Stable: newest first within each heading, as archive() sorts.
+            ks.sort_by_key(|&k| ENDINGS.iter().position(|&e| e == ending(&tasks[k])));
+        }
+        groups.sort_by_cached_key(|(project, ks)| {
+            let left = ks.iter().any(|&k| tasks[k].left);
+            let latest = ks.iter().map(|&k| tasks[k].since).max().unwrap_or(0);
+            (!left, std::cmp::Reverse(latest), project.clone())
+        });
+        for (project, ks) in groups {
+            let head = Item::Project(ks[0]);
+            if filtering && let Some((_, f)) = score_fields(&mut self.matcher, pattern, &[&project]) {
+                self.hits.insert(head, Hits { name: f[0].clone(), second: Vec::new() });
+            }
+            self.rows.push(head);
+            let mut group = None;
+            for k in ks {
+                let state = ending(&self.tasks[k]);
+                if group != Some(state) {
+                    self.rows.push(Item::Sub(state));
+                    group = Some(state);
+                }
+                self.rows.push(Item::Task(k));
+            }
         }
         best.map(|(_, i)| i)
     }
@@ -940,7 +976,7 @@ impl App {
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
         let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
-            Item::Session(_) | Item::Status(_) | Item::Sub(_) => String::new(),
+            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
@@ -1406,7 +1442,7 @@ impl App {
         let mut nested = false;
         for &row in &self.rows {
             style.push(match row {
-                Item::Session(_) | Item::Sub(_) => {
+                Item::Session(_) | Item::Project(_) | Item::Sub(_) => {
                     nested = true;
                     Draw::Header
                 }
@@ -1415,6 +1451,8 @@ impl App {
                     Draw::Header
                 }
                 _ if !nested => Draw::Flat,
+                // Agents, and ended tasks under their Archive project.
+                Item::Task(_) => Draw::Nested,
                 _ if self.is_agent(row) => Draw::Nested,
                 _ => Draw::Tab,
             });
@@ -1485,6 +1523,10 @@ impl App {
             "working" => ("●", "Working", p.foam),
             "idle" => ("·", "Idle", p.muted),
             "tabs" => ("·", "Tabs", p.subtle),
+            "left" => ("▢", "Left behind", p.gold),
+            "merged" => ("▢", "Merged", p.iris),
+            "archived" => ("▢", "Archived", p.iris),
+            "closed" => ("▢", "Closed", p.muted),
             _ => ("?", "No status", p.muted),
         };
         f.render_widget(
@@ -1625,6 +1667,37 @@ impl App {
                     Span::styled("  ", Style::new().bg(bg)),
                 ];
                 spans.extend(highlight(&s.label, &hits.name, avail, false, label, hl));
+                f.render_widget(Line::from(spans), r);
+                f.render_widget(Line::from(right).right_aligned(), r);
+            }
+            Item::Project(k) => {
+                let project = &self.tasks[*k].project;
+                // This project's rows, up to the next heading over a group.
+                let rows = self.rows.iter().skip_while(|&&i| i != *item).skip(1);
+                let tasks: Vec<&Task> = rows
+                    .take_while(|i| !matches!(i, Item::Project(_)))
+                    .filter_map(|&i| self.task_of(i))
+                    .collect();
+                let mut right: Vec<Span> = Vec::new();
+                let mut chip = |text: String, fg: Color| {
+                    right.extend(pill(vec![Span::styled(text, Style::new().fg(fg))], chip_bg, bg));
+                    right.push(Span::styled(" ", Style::new().bg(bg)));
+                };
+                let left = tasks.iter().filter(|t| t.left).count();
+                if left > 0 {
+                    chip(format!("▢ {left} left"), p.gold);
+                }
+                let n = tasks.len();
+                chip(format!("{n} task{}", if n == 1 { "" } else { "s" }), p.subtle);
+                let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
+                let avail = width.saturating_sub(4 + right_w + 2);
+                let label = Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD);
+                let mut spans = vec![
+                    edge,
+                    Span::styled(ICON_PROJECT, Style::new().fg(if selected { p.iris } else { p.subtle }).bg(bg)),
+                    Span::styled("  ", Style::new().bg(bg)),
+                ];
+                spans.extend(highlight(project, &hits.name, avail, false, label, hl));
                 f.render_widget(Line::from(spans), r);
                 f.render_widget(Line::from(right).right_aligned(), r);
             }
@@ -1904,7 +1977,10 @@ impl App {
         match self.view {
             View::Usage => {}
             View::All => keys.push(("⌥↑↓", "group")),
-            View::Archive => keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" })),
+            View::Archive => {
+                keys.push(("⌥↑↓", "group"));
+                keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" }));
+            }
         }
         keys.push(("esc", "close"));
         let keys: Vec<_> = keys.into_iter().map(|(k, label)| (k, label, p.subtle)).collect();
@@ -2466,7 +2542,7 @@ mod tests {
         });
         app.query = "card 1041".into();
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Task(0)]);
+        assert_eq!(app.rows, vec![Item::Project(0), Item::Sub("merged"), Item::Task(0)]);
         assert_eq!(app.pick(), format!("resume:{}/s/a", hex("")));
         assert!(app.tasks[0].archived());
         assert!(!app.tasks[0].safe() && app.tasks[1].safe() && !app.tasks[2].safe() && app.tasks[3].safe());
@@ -2483,7 +2559,45 @@ mod tests {
             assert!(text.contains(label), "missing status heading: {label}");
         }
         app.set_view(View::Archive);
-        assert_eq!(app.rows, vec![Item::Task(5)]);
+        assert_eq!(app.rows, vec![Item::Project(5), Item::Sub("closed"), Item::Task(5)]);
+    }
+
+    #[test]
+    fn archive_groups_by_project_left_behind_first() {
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "project":"alpha", "name":"merged", "ended_at":50, "ended_reason":"merged"},
+                {"session_id":"s", "window_id":"b", "project":"beta", "name":"closed", "ended_at":10, "ended_reason":"tab closed"},
+                {"session_id":"s", "window_id":"c", "project":"beta", "name":"left", "ended_at":5, "ended_reason":"tab closed",
+                 "worktree_left":true},
+                {"session_id":"s", "window_id":"d", "project":"alpha", "name":"archived", "ended_at":40, "ended_reason":"archived"},
+                {"session_id":"s", "window_id":"e", "project":"alpha", "name":"newer", "ended_at":60, "ended_reason":"archived"},
+                {"session_id":"s", "window_id":"f", "project":"alpha", "name":"open"}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        // beta has a worktree left behind, so it leads though alpha ended
+        // more recently; within a project, actionable headings first, then
+        // newest first.
+        #[rustfmt::skip]
+        assert_eq!(app.rows, vec![
+            Item::Project(2), Item::Sub("left"), Item::Task(2), Item::Sub("closed"), Item::Task(1),
+            Item::Project(0), Item::Sub("merged"), Item::Task(0), Item::Sub("archived"), Item::Task(4), Item::Task(3),
+        ]);
+        assert_eq!(app.selected, Some(2));
+        app.jump_group(true);
+        assert_eq!(app.rows[app.selected.unwrap()], Item::Task(1));
+        // ctrl-f hides the archived ones, and with them alpha.
+        app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.rows, vec![Item::Project(2), Item::Sub("left"), Item::Task(2), Item::Sub("closed"), Item::Task(1)]);
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        for want in ["beta", "1 left", "2 tasks", "Left behind", "Closed", "╰─"] {
+            assert!(text.contains(want), "missing {want}");
+        }
     }
 
     #[test]
@@ -2613,6 +2727,21 @@ mod tests {
 }
 
 // ---------------------------------------------------------------- main
+
+/// The Archive headings within a project, most actionable first.
+const ENDINGS: [&str; 4] = ["left", "merged", "archived", "closed"];
+
+/// How an ended task ended, as an Archive heading: `left` (its worktree is
+/// still there, for ctrl-x), `merged`, `archived` (or discarded), or
+/// `closed` (its tab closed or worktree went away).
+fn ending(t: &Task) -> &'static str {
+    match t.ended.as_deref() {
+        _ if t.left => "left",
+        Some("merged") => "merged",
+        _ if t.archived() => "archived",
+        _ => "closed",
+    }
+}
 
 const USAGE: &str = "usage: rex-tab-picker [--current SESSION/WINDOW] [--view all|archive|usage] [ROWS | - | --wait]
 
