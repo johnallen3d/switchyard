@@ -99,6 +99,37 @@ fn wrap(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
+/// Split rows into profile groups (personal, work, …) in a stable order so the
+/// two accounts never interleave. Unlabelled rows sort last.
+fn by_profile<'a, T>(rows: &[&'a T], profile: impl Fn(&T) -> &str) -> Vec<(String, Vec<&'a T>)> {
+    let mut groups: Vec<(String, Vec<&'a T>)> = Vec::new();
+    for &row in rows {
+        let name = profile(row);
+        match groups.iter_mut().find(|(n, _)| n == name) {
+            Some((_, items)) => items.push(row),
+            None => groups.push((name.to_string(), vec![row])),
+        }
+    }
+    groups.sort_by(|(a, _), (b, _)| (a.is_empty(), a).cmp(&(b.is_empty(), b)));
+    groups
+}
+
+/// A full-width labelled rule that separates profile groups.
+fn profile_rule(name: &str, p: &Palette, width: usize) -> Line<'static> {
+    let label = if name.is_empty() {
+        "OTHER".to_string()
+    } else {
+        name.to_uppercase()
+    };
+    let label = format!(" {label} ");
+    let rest = width.saturating_sub(draw::str_width(&label) + 2);
+    Line::from(vec![
+        span("──", p.hl_high),
+        bold(label, p.rose),
+        span("─".repeat(rest), p.hl_high),
+    ])
+}
+
 fn stale(q: &Quota, now: u64) -> bool {
     q.fetched == 0 || now.saturating_sub(q.fetched) > STALE
 }
@@ -225,13 +256,19 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize) -> Vec<Line<'stati
         Line::from(span(format!("╭{}╮", "─".repeat(width.saturating_sub(2))), border))
     };
     let mut rows = vec![top];
+    // Fill only the cells between the border glyphs; a background on the
+    // glyph cells themselves bleeds past the thin vertical rules.
+    let fill = Style::new().bg(p.surface);
     for line in body.into_iter().flat_map(|line| wrap(line, inner)) {
         let padding = inner.saturating_sub(line.width());
-        let mut spans = vec![span("│ ", border)];
-        spans.extend(line.spans);
-        spans.push(Span::raw(" ".repeat(padding)));
-        spans.push(span(" │", border));
-        rows.push(Line::from(spans).style(Style::new().bg(p.surface)));
+        let mut spans = vec![span("│", border), Span::styled(" ", fill)];
+        spans.extend(line.spans.into_iter().map(|s| {
+            let style = fill.patch(s.style);
+            s.style(style)
+        }));
+        spans.push(Span::styled(" ".repeat(padding + 1), fill));
+        spans.push(span("│", border));
+        rows.push(Line::from(spans));
     }
     rows.push(Line::from(span(
         format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
@@ -321,27 +358,28 @@ impl Usage {
         // Two cards only when both can hold aligned meters and reset columns.
         let columns = if width >= 68 { 2 } else { 1 };
         let card_width = (width.saturating_sub((columns - 1) * 2) / columns).max(5);
-        for chunk in quotas.chunks(columns) {
-            let cards: Vec<_> = chunk.iter().map(|q| quota_card(q, p, now, card_width)).collect();
-            let height = cards.iter().map(Vec::len).max().unwrap_or(0);
-            for row in 0..height {
-                let mut spans = Vec::new();
-                for (column, card) in cards.iter().enumerate() {
-                    if column > 0 {
-                        spans.push(Span::raw("  "));
-                    }
-                    if let Some(line) = card.get(row) {
-                        spans.extend(line.spans.iter().cloned().map(|s| {
-                            let style = line.style.patch(s.style);
-                            s.style(style)
-                        }));
-                    } else {
-                        spans.push(Span::raw(" ".repeat(card_width)));
-                    }
-                }
-                lines.push(Line::from(spans));
-            }
+        for (name, group) in by_profile(&quotas, |q| &q.profile) {
+            lines.push(profile_rule(&name, p, width));
             lines.push(Line::default());
+            for chunk in group.chunks(columns) {
+                let cards: Vec<_> = chunk.iter().map(|q| quota_card(q, p, now, card_width)).collect();
+                let height = cards.iter().map(Vec::len).max().unwrap_or(0);
+                for row in 0..height {
+                    let mut spans = Vec::new();
+                    for (column, card) in cards.iter().enumerate() {
+                        if column > 0 {
+                            spans.push(Span::raw("  "));
+                        }
+                        if let Some(line) = card.get(row) {
+                            spans.extend(line.spans.iter().cloned());
+                        } else {
+                            spans.push(Span::raw(" ".repeat(card_width)));
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::default());
+            }
         }
         if quotas.is_empty() {
             lines.push(secondary(if query.is_empty() && profile.is_none() {
@@ -390,37 +428,41 @@ impl Usage {
             }
         }
         lines.push(Line::default());
-        for t in &totals {
-            let cost = if t.unpriced == t.requests {
-                "cost unknown".into()
-            } else if t.unpriced > 0 {
-                format!("≈ ${:.4} known portion · {} unpriced requests", t.cost, t.unpriced)
-            } else {
-                format!("≈ ${:.4}", t.cost)
-            };
-            lines.push(Line::from(bold(&t.model, p.text)));
-            lines.push(secondary(format!(
-                "{} · {} / {} · {}",
-                t.account,
-                t.harness,
-                t.provider,
-                t.hosts.join(", ")
-            )));
-            lines.push(Line::from(vec![
-                bold(amount(t.tokens.total()), p.foam),
-                span(" tokens   ", p.subtle),
-                bold(t.requests.to_string(), p.text),
-                span(" requests   ", p.subtle),
-                span(cost, if t.unpriced > 0 { p.gold } else { p.foam }),
-            ]));
-            lines.push(secondary(format!(
-                "In {} · Out {} · Cache read {} / write {}",
-                amount(t.tokens.input),
-                amount(t.tokens.output),
-                amount(t.tokens.cache_read),
-                amount(t.tokens.cache_write)
-            )));
+        for (name, group) in by_profile(&totals, |t| &t.profile) {
+            lines.push(profile_rule(&name, p, width));
             lines.push(Line::default());
+            for t in group {
+                let cost = if t.unpriced == t.requests {
+                    "cost unknown".into()
+                } else if t.unpriced > 0 {
+                    format!("≈ ${:.4} known portion · {} unpriced requests", t.cost, t.unpriced)
+                } else {
+                    format!("≈ ${:.4}", t.cost)
+                };
+                lines.push(Line::from(bold(&t.model, p.text)));
+                lines.push(secondary(format!(
+                    "{} · {} / {} · {}",
+                    t.account,
+                    t.harness,
+                    t.provider,
+                    t.hosts.join(", ")
+                )));
+                lines.push(Line::from(vec![
+                    bold(amount(t.tokens.total()), p.foam),
+                    span(" tokens   ", p.subtle),
+                    bold(t.requests.to_string(), p.text),
+                    span(" requests   ", p.subtle),
+                    span(cost, if t.unpriced > 0 { p.gold } else { p.foam }),
+                ]));
+                lines.push(secondary(format!(
+                    "In {} · Out {} · Cache read {} / write {}",
+                    amount(t.tokens.input),
+                    amount(t.tokens.output),
+                    amount(t.tokens.cache_read),
+                    amount(t.tokens.cache_write)
+                )));
+                lines.push(Line::default());
+            }
         }
         if totals.is_empty() {
             lines.push(secondary("No matching recorded usage in the last 7 days".into()));
