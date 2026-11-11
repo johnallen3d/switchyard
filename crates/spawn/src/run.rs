@@ -66,7 +66,7 @@ fn fresh_remote_base(repo: &Path) -> Option<String> {
     match check(Command::new("git").arg("-C").arg(repo).args(["fetch", "--quiet", "origin", branch]), "git fetch") {
         Ok(()) => Some(base),
         Err(e) => {
-            eprintln!("\x1b[33mrex-spawn: {e}; branching from local {branch}\x1b[0m");
+            eprintln!("\x1b[33mswitchyard: {e}; branching from local {branch}\x1b[0m");
             None
         }
     }
