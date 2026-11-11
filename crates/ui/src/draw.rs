@@ -26,14 +26,39 @@ pub fn delete_word(s: &mut String) {
 /// spans, on the left, and the `shortcut` that opens it on the right.
 /// Returns the area inside, less `margin`.
 pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
-    let area = f.area();
-    f.buffer_mut().set_style(area, Style::new().bg(p.base).fg(p.text));
     let mut left = vec![
         Span::styled(" ", Style::new().bg(p.base)),
         Span::styled(title.to_string(), Style::new().fg(p.iris).add_modifier(Modifier::BOLD)),
         Span::styled(" ", Style::new().bg(p.base)),
     ];
     left.extend(extra);
+    frame_spans(f, p, left, shortcut, margin)
+}
+
+/// A top bar of views for the frame's title, as gh-dash shows its
+/// sections: the `active` one as an iris pill, the others muted, `│`
+/// between them.
+pub fn tabs(p: &Palette, names: &[&str], active: usize) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(" ", Style::new().bg(p.base))];
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", Style::new().fg(p.hl_med)));
+        }
+        if i == active {
+            let label = Span::styled(format!(" {name} "), Style::new().fg(p.iris).add_modifier(Modifier::BOLD));
+            spans.extend(pill(vec![label], p.overlay, p.base));
+        } else {
+            spans.push(Span::styled(format!("  {name}  "), Style::new().fg(p.muted)));
+        }
+    }
+    spans.push(Span::styled(" ", Style::new().bg(p.base)));
+    spans
+}
+
+/// [`frame`] with the title's spans given whole.
+pub fn frame_spans(f: &mut Frame, p: &Palette, left: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
+    let area = f.area();
+    f.buffer_mut().set_style(area, Style::new().bg(p.base).fg(p.text));
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(p.hl_med).bg(p.base))

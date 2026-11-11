@@ -130,11 +130,14 @@ impl View {
         }
     }
 
-    fn name(self) -> &'static str {
+    const ALL: [View; 3] = [View::All, View::Archive, View::Usage];
+
+    /// Its label in the top bar.
+    fn label(self) -> &'static str {
         match self {
-            View::All => "all tabs",
-            View::Archive => "archive",
-            View::Usage => "usage",
+            View::All => "All tabs",
+            View::Archive => "Archive",
+            View::Usage => "Usage",
         }
     }
 }
@@ -1151,6 +1154,9 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
+            // With nothing typed, h and l move along the top bar.
+            KeyCode::Char('h') if !ctrl && !alt && self.query.is_empty() => self.set_view(self.view.next(true)),
+            KeyCode::Char('l') if !ctrl && !alt && self.query.is_empty() => self.set_view(self.view.next(false)),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.query.push(c);
                 self.moved();
@@ -1164,8 +1170,6 @@ impl App {
             KeyCode::PageDown => self.step(page),
             KeyCode::Home => self.edge(false),
             KeyCode::End => self.edge(true),
-            KeyCode::Tab => self.set_view(self.view.next(false)),
-            KeyCode::BackTab => self.set_view(self.view.next(true)),
             _ => {}
         }
         true
@@ -1179,12 +1183,11 @@ impl App {
     // ------------------------------------------------------------ drawing
 
     fn draw(&mut self, f: &mut Frame) {
-        let title = match self.view {
-            View::All => "Go to tab",
-            View::Archive => "Archive",
-            View::Usage => "Usage",
-        };
-        let inner = draw::frame(f, &self.p, title, self.header_chips(), "⌘K", Margin::new(2, 1));
+        let labels = View::ALL.map(View::label);
+        let active = View::ALL.iter().position(|&v| v == self.view).unwrap_or(0);
+        let mut top = draw::tabs(&self.p, &labels, active);
+        top.extend(self.header_chips());
+        let inner = draw::frame_spans(f, &self.p, top, "⌘K", Margin::new(2, 1));
         let [search, rule, _, body, _, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1561,7 +1564,7 @@ impl App {
                             Some(profile) => format!("No ended {profile} tasks"),
                             None => "No ended tasks".into(),
                         }),
-                        draw::key_hint(p, "⇥", " shows all tabs"),
+                        draw::key_hint(p, "h", " shows all tabs"),
                     ],
                 },
             }
@@ -1867,7 +1870,7 @@ impl App {
             return;
         }
         if self.view == View::Usage {
-            let keys = [("↑↓", "scroll", p.subtle), ("⇥", "all tabs", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
+            let keys = [("↑↓", "scroll", p.subtle), ("h/l", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
             let (spans, _) = draw::hints(p, &keys, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
@@ -1894,7 +1897,9 @@ impl App {
         if self.can_snooze() {
             keys.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
         }
-        keys.push(("⇥", self.view.next(false).name()));
+        if self.query.is_empty() {
+            keys.push(("h/l", "views"));
+        }
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
             View::Usage => {}
@@ -2620,7 +2625,7 @@ once and takes the data from bracketed pastes of rex-data:KIND, a newline
 and the body: KIND rows (or error and a message), live and tasks
 (rex-spawn --tasks JSON), tasks-error, usage (accounting JSON), or usage-error.
 
-Tab cycles All, Archive, Usage; Usage is read-only and refreshes every
+h and l (with nothing typed) move along the top bar: All, Archive, Usage. Usage is read-only and refreshes every
 60 seconds. --usage-json prints sanitized accounting JSON across configured
 hosts; --usage-local prints this host only (also the remote collector protocol).
 Only active profiles are read by default. Configure usage.sessions, usage.quotas
