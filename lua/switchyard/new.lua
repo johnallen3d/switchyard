@@ -1,4 +1,4 @@
--- New sessions and agent work in one float, rex-spawn's picker: cmd+shift+n
+-- New sessions and agent work in one float, the picker of `switchyard new`: cmd+shift+n
 -- opens it as a plain session, ctrl+cmd+n as agent work (ctrl-s switches).
 -- It lists the catalog's projects and the zoxide folders of one host (ctrl-o
 -- picks the host; `auto` runs agent work on the least busy dev host, and a
@@ -8,8 +8,8 @@
 --   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]
 -- (PROMPT_REF is empty when only a work item follows).
 -- Enter acts from this config host, the only one that can reach every Rex
--- host: a session opens with `rex-spawn --open`, and agent work launches
--- with `rex-spawn --launch`, which opens a tab running `--run` on the target
+-- host: a session opens with `switchyard task open`, and agent work launches
+-- with `switchyard task launch`, which opens a tab running `task run` on the target
 -- host (the worktree and the harness are made there). See
 -- ../../crates/spawn/src/main.rs.
 local util = require("switchyard.float")
@@ -78,6 +78,8 @@ local function open_picker(ctx, kind)
     return close_picker(ctx)
   end
   local folders = rex.exec({ "zoxide", "query", "-l" }, { env = { PATH = util.user_path() } })
+  -- The float runs on the focused session's host, which may not have the
+  -- switchyard binary yet, so it still calls the old name until card #1082.
   local command = util.float_command("rex-spawn", "--kind", kind, "--home", host_label(),
     (folders and folders.ok and folders.stdout) or "")
   local _, err = rex.session.new_layer{
@@ -129,7 +131,7 @@ rex.action{
       if host == nil then return end
       close_picker(ctx)
       host, dir = util.unhex(host), util.unhex(dir)
-      local r, err = rex.exec({ "rex-spawn", "--open", host, dir }, { env = env })
+      local r, err = rex.exec({ "switchyard", "task", "open", host, dir }, { env = env })
       if r == nil then error(err, 0) end
       if not r.ok or r.stdout == "" then error(r.stderr, 0) end
       show(ctx, host, r.stdout)
@@ -148,7 +150,7 @@ rex.action{
       -- An incomplete form reports nothing; keep the float open.
       if host == nil then return end
       close_picker(ctx)
-      local argv = { "rex-spawn", "--launch", util.unhex(host), util.unhex(path), util.unhex(name), harness }
+      local argv = { "switchyard", "task", "launch", util.unhex(host), util.unhex(path), util.unhex(name), harness }
       if prompt_ref ~= nil then table.insert(argv, util.unhex(prompt_ref)) end
       if work_item ~= nil then table.insert(argv, util.unhex(work_item)) end
       local r, err = rex.exec(argv, { env = env })
@@ -157,7 +159,7 @@ rex.action{
       -- With host "auto", --launch picks the host and reports it first.
       local session_id, window_id
       host, session_id, window_id = r.stdout:match("^(%S+)\t(%S+)\t(%S+)$")
-      if session_id == nil then error("rex-spawn: unexpected launch output: " .. r.stdout, 0) end
+      if session_id == nil then error("switchyard task launch: unexpected output: " .. r.stdout, 0) end
       show(ctx, host, session_id, window_id)
     end
   end,

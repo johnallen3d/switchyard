@@ -37,7 +37,7 @@
     XDG_CONFIG_HOME = config.xdg.configHome;
     XDG_STATE_HOME = config.xdg.stateHome;
   };
-  serverExe = lib.getExe' cfg.package "switchyard-server";
+  serverExe = lib.getExe' cfg.package "switchyard";
 in {
   options.programs.switchyard = {
     enable = mkEnableOption "switchyard, the Rex float tools";
@@ -200,7 +200,7 @@ in {
       launchd.agents.switchyard-server = {
         enable = true;
         config = {
-          ProgramArguments = [serverExe];
+          ProgramArguments = [serverExe "server"];
           EnvironmentVariables = serviceEnv;
           RunAtLoad = true;
           KeepAlive = true;
@@ -214,7 +214,7 @@ in {
       systemd.user.services.switchyard-server = {
         Unit.Description = "switchyard-server: Rex picker data kept current";
         Service = {
-          ExecStart = serverExe;
+          ExecStart = "${serverExe} server";
           Environment = lib.mapAttrsToList (k: v: "${k}=${v}") serviceEnv;
           Restart = "always";
           RestartSec = 5;

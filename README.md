@@ -1,13 +1,26 @@
 # Switchyard
 
 Rex pickers for switching tabs, managing agent tasks, and starting sessions.
-Rust binaries, Lua actions, and a Home Manager module.
+One Rust binary (`switchyard`), Lua actions, and a Home Manager module.
 
 | Key           | Opens                                |
 | ------------- | ------------------------------------ |
 | `cmd+k`       | Tab picker: tabs and agents, Archive |
 | `cmd+shift+n` | New session                          |
 | `ctrl+cmd+n`  | New agent task in a project worktree |
+
+From a terminal on the Mac:
+
+```bash
+switchyard                  # tab picker: tabs, agents, archive
+switchyard new              # new agent task (--session: plain session)
+switchyard link [REF...]    # link the current branch to work items
+switchyard usage            # usage view (--json, --local: print JSON)
+switchyard server           # data server (normally the service)
+```
+
+`rex-tab-picker` and `rex-spawn` remain as symlinks taking their old
+arguments until every host runs the single binary (card #1082).
 
 ## Develop
 
@@ -20,10 +33,10 @@ With Cargo/Rust installed, run from the checkout containing the change:
 
 ```bash
 cargo build --locked --workspace
-./target/debug/rex-tab-picker
-./target/debug/rex-spawn --kind session
-./target/debug/rex-spawn --kind agent
-./target/debug/switchyard-server         # foreground; Ctrl-C stops it
+./target/debug/switchyard
+./target/debug/switchyard new --session
+./target/debug/switchyard new
+./target/debug/switchyard server         # foreground; Ctrl-C stops it
 ```
 
 Run these in an interactive terminal. They use your existing Rex setup, runtime
@@ -76,7 +89,7 @@ tabs only.
 
 ## Server
 
-`switchyard-server` keeps the pickers' data current on the Mac: one
+`switchyard server` keeps the pickers' data current on the Mac: one
 `rex do --all` watcher per Rex server refreshes tab rows on Rex events, and the
 task registry is checked against the hosts in the background. Pickers and
 floats ask it over a Unix socket and fall back to querying the hosts directly
@@ -90,9 +103,9 @@ profile, and the system directories, so it finds `rex`, `ssh`, `git`, and
 `bash`.
 
 ```bash
-switchyard-server             # run in the foreground (stop the service first)
-switchyard-server snapshot    # the running server's rows, tasks, errors (JSON)
-switchyard-server subscribe   # a snapshot per change, until interrupted
+switchyard server             # run in the foreground (stop the service first)
+switchyard server snapshot    # the running server's rows, tasks, errors (JSON)
+switchyard server subscribe   # a snapshot per change, until interrupted
 launchctl kickstart -k "gui/$(id -u)/org.nix-community.home.switchyard-server"
 ```
 

@@ -1,14 +1,17 @@
-# Switchyard: the Rex float tools (see nix/package.nix). Library crates
-# hold what the tools share; each binary crate is one tool.
+# Switchyard: the Rex float tools (see nix/package.nix), one binary. Library
+# crates hold the tools; crates/cli is the `switchyard` binary over them.
 #
 #   crates/ui          palette, glyphs, chrome, list drawing, float protocol
 #   crates/core        Rex and SSH calls, hosts and catalog, task registry,
 #                      launches and task actions
-#   crates/tab-picker  rex-tab-picker (cmd+k tabs, agents and archive;
+#   crates/tab-picker  bare `switchyard` (cmd+k tabs, agents and archive;
 #                      standalone from a shell)
-#   crates/spawn       rex-spawn (cmd+shift+n, ctrl+cmd+n, plus --tasks and --act)
-#   crates/server      switchyard-server (rows and tasks kept current from Rex
-#                      events, served on a Unix socket)
+#   crates/spawn       `switchyard new` (cmd+shift+n, ctrl+cmd+n) and the
+#                      `switchyard task` plumbing
+#   crates/server      `switchyard server` (rows and tasks kept current from
+#                      Rex events, served on a Unix socket)
+#   crates/cli         the `switchyard` binary: subcommands, `link`, and the
+#                      rex-tab-picker/rex-spawn names (argv[0])
 [workspace]
 resolver = "3"
 members = ["crates/*"]
@@ -20,6 +23,9 @@ edition = "2024"
 [workspace.dependencies]
 switchyard-core = { path = "crates/core" }
 switchyard-ui = { path = "crates/ui" }
+switchyard-server = { path = "crates/server" }
+switchyard-spawn = { path = "crates/spawn" }
+switchyard-tabs = { path = "crates/tab-picker" }
 libc = "0.2"
 nucleo-matcher = "0.3"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

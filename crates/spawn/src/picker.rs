@@ -1320,7 +1320,7 @@ pub fn run_picker(kind: Kind, home: String, home_folders: String, standalone: bo
 pub fn run_standalone(kind: Kind) -> io::Result<()> {
     if !cfg!(target_os = "macos") {
         return Err(io::Error::other(
-            "spawning runs on the Mac; run rex-spawn there, or press ctrl+cmd+n in Rex",
+            "spawning runs on the Mac; run switchyard new there, or press ctrl+cmd+n in Rex",
         ));
     }
     // Act as the config's action does: rex CLI calls name their own targets

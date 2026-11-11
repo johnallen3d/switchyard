@@ -1,5 +1,5 @@
 [package]
-name = "rex-tab-picker"
+name = "switchyard-tabs"
 version.workspace = true
 edition.workspace = true
 
@@ -10,7 +10,3 @@ nucleo-matcher.workspace = true
 ratatui.workspace = true
 libc.workspace = true
 serde_json.workspace = true
-
-[[bin]]
-name = "rex-tab-picker"
-path = "src/main.rs"

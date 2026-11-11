@@ -1,17 +1,23 @@
-# The Rex float tools, one Cargo workspace:
+# The Rex float tools, one Cargo workspace and one binary, `switchyard`:
 #
-# - rex-tab-picker: the cmd+k picker for tabs and agents, grouped by session
-#   and status, and ended tasks (lua/switchyard/tab-picker.lua).
-# - rex-spawn: the new-session picker (lua/switchyard/new.lua), which opens a
-#   plain session in a zoxide folder or starts agent work in a new worktree of
-#   a catalog project on a chosen host. Its --launch and --run modes do the
-#   work, and it holds the task registry behind the tab picker's tasks.
-# - switchyard-server: keeps the pickers' rows and tasks current from Rex
-#   events on the config host and serves them on a Unix socket; the tools
-#   fall back to direct queries without it (the Home Manager module runs it
-#   as a service).
-# - switchyard: `switchyard link REF`, which links the current branch to a
-#   work item (issue, card, PR) for the inbox.
+# - bare `switchyard` (crates/tab-picker): the cmd+k picker for tabs and
+#   agents, grouped by session and status, and ended tasks
+#   (lua/switchyard/tab-picker.lua).
+# - `switchyard new` (crates/spawn): the new-session picker
+#   (lua/switchyard/new.lua), which opens a plain session in a zoxide folder
+#   or starts agent work in a new worktree of a catalog project on a chosen
+#   host. Its `task` subcommands do the work and hold the task registry
+#   behind the tab picker's tasks.
+# - `switchyard server` (crates/server): keeps the pickers' rows and tasks
+#   current from Rex events on the config host and serves them on a Unix
+#   socket; the tools fall back to direct queries without it (the Home
+#   Manager module runs it as a service).
+# - `switchyard link REF`, which links the current branch to a work item
+#   (issue, card, PR) for the inbox.
+#
+# rex-tab-picker and rex-spawn are symlinks to switchyard that keep the old
+# arguments, for floats and other hosts that still call them (card #1082
+# removes them).
 #
 # The Lua ships separately (the Home Manager module links it on the Mac).
 {
@@ -27,7 +33,7 @@ rustPlatform.buildRustPackage {
   src = lib.cleanSourceWith {
     src = ../.;
     # The Rex Lua ships separately (the Home Manager module), except
-    # host_rows.lua, which rex-tab-picker and switchyard-server build in.
+    # host_rows.lua, which switchyard builds in.
     filter = path: type: let
       rel = lib.removePrefix "${toString ../.}/" (toString path);
     in
@@ -42,11 +48,14 @@ rustPlatform.buildRustPackage {
   postInstall = ''
     # The picker lists this host's folders with zoxide; rex, ssh and git stay
     # the caller's (the server's service sets its PATH).
-    wrapProgram $out/bin/rex-spawn --prefix PATH : ${lib.makeBinPath [zoxide]}
+    wrapProgram $out/bin/switchyard --prefix PATH : ${lib.makeBinPath [zoxide]}
+    # The old names; the wrapper passes its own name on as argv[0].
+    ln -s switchyard $out/bin/rex-spawn
+    ln -s switchyard $out/bin/rex-tab-picker
   '';
   meta = {
     description = "Rex float tools: tab picker, new-session picker and data server";
-    mainProgram = "rex-spawn";
+    mainProgram = "switchyard";
     platforms = lib.platforms.unix;
   };
 }

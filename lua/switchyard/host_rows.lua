@@ -1,6 +1,6 @@
 -- One server's rows, run as `rex [-S HOST] do -e SCRIPT host=HOST`, or for
 -- the config host `host=local`, which also shows its home as ~. The float
--- (tab-picker.lua) reads this file; rex-tab-picker builds it in for its
+-- (tab-picker.lua) reads this file; switchyard builds it in for its
 -- standalone mode. (`rex do` reads an argument value with a slash as a
 -- script path and one like 6e6173 as a number, so the script looks up $HOME
 -- and hex-encodes the label itself.) With `status=yes`, as switchyard-server
@@ -73,7 +73,7 @@ do
   end
 end
 
--- rex-tab-picker draws the rows; see its source for the format. A W row
+-- The tabs picker draws the rows; see its source for the format. A W row
 -- is WINDOW_ID, STATE, UPDATED_AT (RFC 3339) and MSG, empty for a tab with
 -- no status, as the registry's status fields want them (see
 -- crates/core/src/tasks.rs). The B row is the busy pane count.

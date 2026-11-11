@@ -554,31 +554,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rex-spawn"
-version = "0.1.0"
-dependencies = [
- "nucleo-matcher",
- "ratatui",
- "ratatui-textarea",
- "serde_json",
- "switchyard-core",
- "switchyard-ui",
- "unicode-width",
-]
-
-[[package]]
-name = "rex-tab-picker"
-version = "0.1.0"
-dependencies = [
- "libc",
- "nucleo-matcher",
- "ratatui",
- "serde_json",
- "switchyard-core",
- "switchyard-ui",
-]
-
-[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -747,6 +722,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "switchyard"
+version = "0.1.0"
+dependencies = [
+ "switchyard-core",
+ "switchyard-server",
+ "switchyard-spawn",
+ "switchyard-tabs",
+]
+
+[[package]]
 name = "switchyard-core"
 version = "0.1.0"
 dependencies = [
@@ -764,6 +749,31 @@ dependencies = [
  "libc",
  "serde_json",
  "switchyard-core",
+]
+
+[[package]]
+name = "switchyard-spawn"
+version = "0.1.0"
+dependencies = [
+ "nucleo-matcher",
+ "ratatui",
+ "ratatui-textarea",
+ "serde_json",
+ "switchyard-core",
+ "switchyard-ui",
+ "unicode-width",
+]
+
+[[package]]
+name = "switchyard-tabs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "nucleo-matcher",
+ "ratatui",
+ "serde_json",
+ "switchyard-core",
+ "switchyard-ui",
 ]
 
 [[package]]

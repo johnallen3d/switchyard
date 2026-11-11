@@ -116,8 +116,7 @@ fn picker_args(rest: &[&str]) -> Option<(Kind, Option<(String, String)>)> {
     }
 }
 
-fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn main(args: Vec<String>) -> io::Result<()> {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     match a.as_slice() {
         ["-h"] | ["--help"] => println!("{USAGE}"),

@@ -42,10 +42,10 @@ use switchyard_core::server;
 use crate::state::Shared;
 use crate::watch::Events;
 
-const USAGE: &str = "usage: switchyard-server [serve]
-       switchyard-server snapshot
-       switchyard-server subscribe
-       switchyard-server pastes [--checked]
+const USAGE: &str = "usage: switchyard server [serve]
+       switchyard server snapshot
+       switchyard server subscribe
+       switchyard server pastes [--checked]
 
 serve (the default) runs the server in the foreground: it watches every Rex
 server's tabs and the task registry and answers on a Unix socket. snapshot
@@ -59,8 +59,7 @@ pub fn log(line: &str) {
     eprintln!("switchyard-server: {line}");
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+pub fn main(args: Vec<String>) {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match a.as_slice() {
         [] | ["serve"] => serve(),

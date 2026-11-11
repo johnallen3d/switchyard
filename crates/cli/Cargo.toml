@@ -1,0 +1,10 @@
+[package]
+name = "switchyard"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+switchyard-core.workspace = true
+switchyard-server.workspace = true
+switchyard-spawn.workspace = true
+switchyard-tabs.workspace = true

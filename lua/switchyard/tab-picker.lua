@@ -1,10 +1,11 @@
 -- The cmd+k picker: every tab across sessions and hosts, with the agents
 -- among them under status headings in each session, and ended tasks, in one
--- rex-tab-picker float. The float opens at once, waiting, on the focused session's
--- host; a background `rex do` on the config host fills it (see
+-- picker float (`switchyard float tabs`, run as rex-tab-picker until
+-- #1082). The float opens at once, waiting, on the focused session's host;
+-- a background `rex do` on the config host fills it (see
 -- util.open_filled_float).
 --
--- It asks switchyard-server first: `switchyard-server pastes` prints the
+-- It asks switchyard-server first: `switchyard server pastes` prints the
 -- pastes below from the server's snapshot in milliseconds (see
 -- ../../crates/core/src/server.rs). Without a server, or when it fails, it
 -- fans out instead, running at once:
@@ -12,8 +13,8 @@
 -- - one `rex do` per server listing its tabs (each attaching to all its
 --   sessions), delivered together as `rows`, with an E row naming each host
 --   that failed (`error` when they all did);
--- - `rex-spawn --tasks --live`, the task registry with each tab's live agent
---   status (`live`), and `rex-spawn --tasks`, which also checks each task's
+-- - `switchyard task list --live`, the task registry with each tab's live agent
+--   status (`live`), and `switchyard task list`, which also checks each task's
 --   worktree over SSH and ends the gone ones (`tasks`); a registry failure
 --   is `tasks-error`, and the float shows tabs only.
 --
@@ -23,17 +24,17 @@
 -- new tab and jumps there (resume), or runs an archive armed with ctrl+x in
 -- the float (archive, force-archive; for ask, a dirty worktree, it types
 -- ctrl+x back so the float asks "are you sure"); ctrl+r reviews a task, and
--- ctrl+l opens its main work item (`rex-spawn --act link`). A task with
+-- ctrl+l opens its main work item (`switchyard task act link`). A task with
 -- several links adds their count, ACTION:TARGET/SESSION/WINDOW/N, and
 -- ctrl+l types ctrl+l back so the float opens its link chooser; while that
 -- is open the title is rex-tab-picker:link:URL (hex-encoded), Enter or
 -- ctrl+l opens URL and Escape types Escape back to close the chooser.
--- ctrl+t pins or unpins an open task (`rex-spawn --act pin`), then types
+-- ctrl+t pins or unpins an open task (`switchyard task act pin`), then types
 -- ctrl+t back so the float shows it. ctrl+s reaches the float, which opens
 -- its snooze prompt; while that is open the title is
 -- rex-tab-picker:snooze:UNTIL:TARGET/SESSION/WINDOW (UNTIL in Unix
 -- seconds, 0 to wake), or rex-tab-picker:snooze-invalid while the typed
--- time can't be read. Enter snoozes (`rex-spawn --act snooze ... UNTIL`)
+-- time can't be read. Enter snoozes (`switchyard task act snooze ... UNTIL`)
 -- and types Enter back so the float shows it; Escape types Escape back to
 -- close the prompt.
 -- TARGET is "-" for this host or the hex-encoded host label. See
@@ -43,7 +44,7 @@ local util = require("switchyard.float")
 
 local label = "tab-picker"
 
--- One server's rows: host_rows.lua beside this file, which rex-tab-picker
+-- One server's rows: host_rows.lua beside this file, which switchyard
 -- also builds in for its standalone mode, run as `rex [-S HOST] do -e SCRIPT
 -- host=HOST`, or for the config host `host=local`.
 local host_rows_script
@@ -62,7 +63,7 @@ local fill_script = "local host_rows_script = " .. string.format("%q", host_rows
 
 local function deliver_result(kind, r, err)
   if r == nil then
-    deliver("tasks-error", tostring(err or "can't run rex-spawn"))
+    deliver("tasks-error", tostring(err or "can't run switchyard task list"))
   elseif not r.ok then
     deliver("tasks-error", (r.stderr:gsub("^rex%-spawn: ", "")))
   else
@@ -73,7 +74,7 @@ end
 -- The pastes `switchyard-server pastes [--checked]` prints, or nil when no
 -- server answered in time (or none is installed).
 local function server_pastes(...)
-  local r = rex.exec({ "switchyard-server", "pastes", ... })
+  local r = rex.exec({ "switchyard", "server", "pastes", ... })
   if r == nil or not r.ok then return nil end
   local ok, pastes = pcall(rex.json.decode, r.stdout)
   if not ok or type(pastes) ~= "table" then return nil end
@@ -83,7 +84,7 @@ end
 -- From the server: one snapshot, which normally has checked tasks. Only in
 -- the server's first moments are they `live`; then a second call waits
 -- (briefly) for the check rather than leave the float on live status, and
--- if the server can't say, rex-spawn checks as the fan-out would.
+-- if the server can't say, `switchyard task list` checks as the fan-out would.
 local function from_server()
   local pastes = server_pastes()
   if pastes == nil then return false end
@@ -96,7 +97,7 @@ local function from_server()
   if pending then
     local checked = server_pastes("--checked")
     if checked == nil then
-      deliver_result("tasks", rex.exec({ "rex-spawn", "--tasks" }))
+      deliver_result("tasks", rex.exec({ "switchyard", "task", "list" }))
     else
       for _, p in ipairs(checked) do deliver(p.kind, p.body) end
     end
@@ -112,7 +113,7 @@ local function fan_out()
   end
   local steps = {}
   for _, step in ipairs({ { "live", "--live" }, { "tasks" } }) do
-    local job, err = rex.exec.start({ "rex-spawn", "--tasks", step[2] })
+    local job, err = rex.exec.start({ "switchyard", "task", "list", step[2] })
     steps[#steps + 1] = { kind = step[1], job = job, err = err }
   end
   -- A host that fails gets an E row, so the float shows the rest and names
@@ -138,7 +139,7 @@ end
 main(function()
   -- Accounting is independent of tab/task delivery, including the server
   -- fast path. Never delay opening the picker for a log scan or remote host.
-  local usage_job = rex.exec.start({ "rex-tab-picker", "--usage-json" })
+  local usage_job = rex.exec.start({ "switchyard", "usage", "--json" })
   if not from_server() then fan_out() end
   while true do
     local r = usage_job and usage_job:wait()
@@ -149,7 +150,7 @@ main(function()
       rex.sleep(1)
       if float_server().block.call("com.superlogical.terminal", "input_mode", float) == nil then return end
     end
-    usage_job = rex.exec.start({ "rex-tab-picker", "--usage-json" })
+    usage_job = rex.exec.start({ "switchyard", "usage", "--json" })
   end
 end)
 ]==]
@@ -176,6 +177,8 @@ local function open_picker(ctx, view)
     label    = label,
     mode     = "tab_picker",
     bounds   = { 0.12, 0.1, 0.76, 0.75 },
+    -- The float runs on the focused session's host, which may not have the
+    -- switchyard binary yet, so it still calls the old name until card #1082.
     command  = util.float_command("rex-tab-picker", "--current", current, "--view", view, "--wait"),
     script   = fill_script,
     log_name = "tab-picker.log",
@@ -247,10 +250,10 @@ local function jump(pick)
   util.select_on_host(pick.host, "tab-picker.log", util.cli_env(), pick.session_id, pick.window_id)
 end
 
--- Run `rex-spawn --act` for the pick and return its output; a refusal (such
+-- Run `switchyard task act` for the pick and return its output; a refusal (such
 -- as a dirty worktree) comes back as the action's error.
 local function act(action, pick, ...)
-  local r, err = rex.exec({ "rex-spawn", "--act", action, pick.host, pick.session_id, pick.window_id, ... },
+  local r, err = rex.exec({ "switchyard", "task", "act", action, pick.host, pick.session_id, pick.window_id, ... },
     { env = util.cli_env() })
   if r == nil then error(err, 0) end
   if not r.ok then error((r.stderr:gsub("^rex%-spawn: ", "")), 0) end
@@ -260,7 +263,7 @@ end
 -- Resume prints the new tab as HOST<TAB>SESSION_ID<TAB>WINDOW_ID.
 local function resume(pick)
   local host, session_id, window_id = act("resume", pick):match("^([^\t]+)\t([^\t]+)\t([^\t\n]+)")
-  if host == nil then error("rex-spawn --act resume printed no tab", 0) end
+  if host == nil then error("switchyard task act resume printed no tab", 0) end
   jump({ host = host, session_id = session_id, window_id = window_id })
 end
 

@@ -75,9 +75,8 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("-h" | "--help")) {
+pub fn main(args: Vec<String>) -> ExitCode {
+    if matches!(args.get(1).map(String::as_str), Some("-h" | "--help")) {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }

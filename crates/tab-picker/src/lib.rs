@@ -59,8 +59,9 @@
 //! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
 //! reads as a time.
 //!
-//! Run bare from a shell (`rex-tab-picker`), it works without the float: it fetches the data and acts on its
-//! picks itself, staying open after each action (see standalone.rs).
+//! Run bare from a shell (`switchyard`), it works without the float: it
+//! fetches the data and acts on its picks itself, staying open after each
+//! action (see standalone.rs).
 
 mod model;
 mod snooze;
@@ -2806,8 +2807,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     }
 }
 
-fn main() -> io::Result<()> {
-    let mut args = std::env::args().skip(1);
+pub fn main(args: Vec<String>) -> io::Result<()> {
+    let mut args = args.into_iter();
     let mut current = (String::new(), String::new());
     let mut view = View::All;
     let mut rows: Option<String> = None;
