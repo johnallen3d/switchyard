@@ -27,9 +27,9 @@ const USAGE: &str = "usage: switchyard [--view all|usage|archive]
 
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
-ctrl-r (review), ctrl-l (open the task's work item), ctrl-t (pin) and
-ctrl-s (snooze), staying open until Escape or ctrl-c. h and l (with
-nothing typed) move along the top bar: All, Usage, Archive. new opens the
+ctrl-r (review), ctrl-b (open the task's work item), ctrl-t (pin) and
+ctrl-s (snooze), staying open until Escape or ctrl-c. ctrl-h and ctrl-l
+move along the top bar: All, Usage, Archive. new opens the
 new-session picker: agent work by default, or a plain session with
 --session. link and unlink record the work items the current branch is
 for (see switchyard link --help). usage opens the picker's Usage view;

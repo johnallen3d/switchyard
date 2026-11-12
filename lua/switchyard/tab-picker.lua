@@ -30,7 +30,7 @@
 -- force-archive; for ask, a dirty worktree, it types ctrl+x back so the
 -- float asks "are you sure"), a review with ctrl+r (review), or a pin with
 -- ctrl+t (pin; `switchyard task act pin`, then it types Enter back so the
--- float shows it). ctrl+l in the float arms a task's only work item, or
+-- float shows it). ctrl+b in the float arms a task's only work item, or
 -- opens a chooser over several; either way the title is
 -- rex-tab-picker:link:URL (hex-encoded), Enter opens URL, and with the
 -- chooser open Escape types Escape back to close it. ctrl+s reaches the

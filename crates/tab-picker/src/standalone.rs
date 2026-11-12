@@ -7,7 +7,7 @@
 //! host that runs host_rows.lua on every server (as the fill script does),
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
-//! for the preview (see preview.rs). It acts on Enter, ctrl-r, ctrl-l (open
+//! for the preview (see preview.rs). It acts on Enter, ctrl-r, ctrl-b (open
 //! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
 //! "ask" confirm the way the config's
 //! tab_picker mode does, through core's actions and `rex do
@@ -255,7 +255,7 @@ pub struct Pick {
 
 pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (action, target) = pick.split_once(':')?;
-    // A fourth field, the count of links ctrl-l chooses from, is for the
+    // A fourth field, the count of links ctrl-b chooses from, is for the
     // config's mode.
     let mut parts = target.split('/');
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);

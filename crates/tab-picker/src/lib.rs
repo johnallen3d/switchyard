@@ -55,8 +55,8 @@
 //! and Escape, so Rex's key-mode popup stays small, and in the float this
 //! program never talks to Rex. ctrl-r and ctrl-t arm Enter instead, as
 //! ctrl-x does: the pick becomes `review` or `pin` until another key
-//! cancels it. ctrl-l opens the highlighted task's work item; task rows
-//! show their links as badges grouped by kind. With one, ctrl-l arms Enter
+//! cancels it. ctrl-b opens the highlighted task's work item; task rows
+//! show their links as badges grouped by kind. With one, ctrl-b arms Enter
 //! to open it; with several it opens a chooser over them (PRs, cards, then
 //! issues). Either way the pick is `link:URL` (URL hex-encoded), which the
 //! config opens on Enter; with the chooser open it types Escape back to
@@ -211,7 +211,7 @@ enum Armed {
     No,
     Archive,
     Force,
-    /// In the float, ctrl-r, ctrl-l (one work item) and ctrl-t arm these
+    /// In the float, ctrl-r, ctrl-b (one work item) and ctrl-t arm these
     /// for Enter, so the config's mode binds only Enter and Escape.
     Review,
     Link,
@@ -287,7 +287,7 @@ struct Flat<'a> {
 
 type Key = (String, String);
 
-/// The ctrl-l chooser over a task's links (see model's `chooser_links`),
+/// The ctrl-b chooser over a task's links (see model's `chooser_links`),
 /// open while the task has several.
 struct Chooser {
     links: Vec<Link>,
@@ -364,7 +364,7 @@ struct App {
     offset: usize,
     /// What ctrl-x has armed for the selected task; Enter confirms it.
     armed: Armed,
-    /// The open ctrl-l link chooser; Enter opens its pick, Escape closes it.
+    /// The open ctrl-b link chooser; Enter opens its pick, Escape closes it.
     chooser: Option<Chooser>,
     /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
@@ -647,7 +647,7 @@ impl App {
         }
     }
 
-    /// The highlighted task's only work item, which ctrl-l opens.
+    /// The highlighted task's only work item, which ctrl-b opens.
     fn selected_link(&self) -> Option<Link> {
         let mut links = chooser_links(&self.selected_task()?.links);
         if links.len() == 1 { links.pop() } else { None }
@@ -1073,7 +1073,7 @@ impl App {
         if let Some(c) = &self.chooser {
             return format!("link:{}", hex(c.url()));
         }
-        // ctrl-l on a task with one work item: Enter opens it, as from the
+        // ctrl-b on a task with one work item: Enter opens it, as from the
         // chooser.
         if let (Armed::Link, Some(l)) = (self.armed, self.selected_link()) {
             return format!("link:{}", hex(&l.url));
@@ -1112,7 +1112,7 @@ impl App {
                 None => "go",
             },
         };
-        // Several links: ctrl-l opens the chooser rather than the main one.
+        // Several links: ctrl-b opens the chooser rather than the main one.
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
         let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
@@ -1377,9 +1377,9 @@ impl App {
         match k.code {
             KeyCode::Char('c') if ctrl => return false,
             // The rest reach here only in the float (standalone_key acts on
-            // them): ctrl-l opens the chooser over several work items, and
-            // ctrl-l with one, ctrl-r and ctrl-t arm Enter.
-            KeyCode::Char('l') if ctrl => {
+            // them): ctrl-b opens the chooser over several work items, and
+            // ctrl-b with one, ctrl-r and ctrl-t arm Enter.
+            KeyCode::Char('b') if ctrl => {
                 if !self.open_chooser() {
                     self.arm(Armed::Link);
                 }
@@ -1412,9 +1412,10 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
-            // With nothing typed, h and l move along the top bar.
-            KeyCode::Char('h') if !ctrl && !alt && self.query.is_empty() => self.set_view(self.view.next(true)),
-            KeyCode::Char('l') if !ctrl && !alt && self.query.is_empty() => self.set_view(self.view.next(false)),
+            // ctrl-h and ctrl-b move along the top bar, so every letter
+            // stays free for the search.
+            KeyCode::Char('h') if ctrl => self.set_view(self.view.next(true)),
+            KeyCode::Char('l') if ctrl => self.set_view(self.view.next(false)),
             KeyCode::Char(c) if !ctrl && !alt => {
                 self.query.push(c);
                 self.moved();
@@ -1653,7 +1654,7 @@ impl App {
         f.render_widget(line, row);
     }
 
-    /// The ctrl-l chooser, when open: a small box over the list, one link a
+    /// The ctrl-b chooser, when open: a small box over the list, one link a
     /// line with its state and URL.
     fn draw_chooser(&self, f: &mut Frame, area: Rect) {
         let Some(c) = &self.chooser else { return };
@@ -1969,7 +1970,7 @@ impl App {
                             Some(profile) => format!("No ended {profile} tasks"),
                             None => "No ended tasks".into(),
                         }),
-                        draw::key_hint(p, "h", " shows all tabs"),
+                        draw::key_hint(p, "⌃A", " shows all tabs"),
                     ],
                 },
             }
@@ -2337,7 +2338,7 @@ impl App {
             return;
         }
         if self.view == View::Usage {
-            let keys = [("↑↓", "scroll", p.subtle), ("h/l", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
+            let keys = [("↑↓", "scroll", p.subtle), ("⌃H/L", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
             let (spans, _) = draw::hints(p, &keys, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
@@ -2351,12 +2352,12 @@ impl App {
             Some(_) => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive")],
             None => vec![("⏎", "go")],
         };
-        // ⌃L opens the task's only work item, or a chooser over several.
+        // ⌃B opens the task's only work item, or a chooser over several.
         let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
         match links.as_slice() {
             [] => {}
-            [link] => keys.push(("⌃L", if link.kind == "pr" { "open PR" } else { "open link" })),
-            _ => keys.push(("⌃L", "links")),
+            [link] => keys.push(("⌃B", if link.kind == "pr" { "open PR" } else { "open link" })),
+            _ => keys.push(("⌃B", "links")),
         }
         if self.can_pin() {
             keys.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
@@ -2367,9 +2368,7 @@ impl App {
         if self.preview_want().is_some() {
             keys.push(("⌃Y", "message"));
         }
-        if self.query.is_empty() {
-            keys.push(("h/l", "views"));
-        }
+        keys.push(("⌃H/L", "views"));
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
             View::Usage => {}
@@ -2454,7 +2453,7 @@ impl App {
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let review = matches!(k.code, KeyCode::Char('r') if ctrl);
-        let open = matches!(k.code, KeyCode::Char('l') if ctrl);
+        let open = matches!(k.code, KeyCode::Char('b') if ctrl);
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
         if let Some(r) = &self.reply {
@@ -2517,7 +2516,7 @@ impl App {
             self.refetch();
             return true;
         }
-        // The chooser's pick opens on Enter (or ctrl-l again); other keys
+        // The chooser's pick opens on Enter (or ctrl-b again); other keys
         // move in it.
         if let Some(c) = &self.chooser {
             if !open && !matches!(k.code, KeyCode::Enter) {
@@ -2631,6 +2630,24 @@ mod tests {
             app.tasks_load = Tasks::Ready;
         });
         app
+    }
+
+    #[test]
+    fn ctrl_h_and_l_move_along_the_top_bar_while_letters_search() {
+        let mut app = inbox();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.key(plain(KeyCode::Char('h')));
+        app.key(plain(KeyCode::Char('l')));
+        assert!(app.view == View::All && app.query == "hl");
+        app.key(ctrl('l'));
+        assert!(app.view == View::Usage);
+        app.key(ctrl('l'));
+        assert!(app.view == View::Archive);
+        app.key(ctrl('h'));
+        assert!(app.view == View::Usage);
+        app.key(ctrl('h'));
+        assert!(app.view == View::All);
     }
 
     #[test]
@@ -2963,7 +2980,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 3)).unwrap();
         terminal.draw(|f| app.draw_footer(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("⌃L links"), "{text}");
+        assert!(text.contains("⌃B links"), "{text}");
     }
 
     #[test]
@@ -2986,13 +3003,13 @@ mod tests {
         app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
         // One link: no chooser, and the pick carries no count.
         assert_eq!(app.pick(), format!("task:{}/s/b", hex("")));
-        app.key(ctrl('l'));
+        app.key(ctrl('b'));
         assert!(app.chooser.is_none());
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
         assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
         assert_eq!(standalone::parse_pick(&app.pick()).unwrap().window, "a");
-        app.key(ctrl('l'));
-        // The PR first and selected, so ctrl-l then Enter opens it.
+        app.key(ctrl('b'));
+        // The PR first and selected, so ctrl-b then Enter opens it.
         assert_eq!(app.pick(), format!("link:{}", hex("https://p")));
         app.key(plain(KeyCode::Char('j')));
         assert_eq!(app.pick(), format!("link:{}", hex("https://c")));

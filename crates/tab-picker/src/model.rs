@@ -245,7 +245,7 @@ pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
     }
 }
 
-/// The links the ctrl-l chooser offers, most likely first: those with a
+/// The links the ctrl-b chooser offers, most likely first: those with a
 /// URL, PRs, then cards, issues and commits.
 pub fn chooser_links(links: &[Link]) -> Vec<Link> {
     let rank = |k: &str| ["pr", "card", "issue", "commit"].iter().position(|x| *x == k).unwrap_or(4);
