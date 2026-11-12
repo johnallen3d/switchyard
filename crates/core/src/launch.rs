@@ -244,8 +244,12 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
+            // macOS clocks tick in microseconds, so parallel tests can read the
+            // same time; the counter keeps their directories distinct.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-            let path = std::env::temp_dir().join(format!("switchyard-folder-{}-{unique}-it's a repo", std::process::id()));
+            let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("switchyard-folder-{}-{unique}-{seq}-it's a repo", std::process::id()));
             std::fs::create_dir_all(path.join("nested folder")).unwrap();
             assert!(Command::new("git").args(["init", "--quiet"]).arg(&path).status().unwrap().success());
             Self(path.canonicalize().unwrap())
