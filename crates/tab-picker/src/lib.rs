@@ -1,22 +1,25 @@
-//! The cmd+k picker for Rex: tabs, agents and the task archive in one float.
+//! The tab picker for Rex: tabs, agents and the task archive, run bare from
+//! a shell (`switchyard`). cmd+k in the Rex config shows its tab in the
+//! Mac's agents session, opening it there when there is none (see
+//! lua/switchyard/tab-picker.lua).
 //!
-//! The config's `tab_picker` action opens this float at once (`--wait`) and
-//! a background job on the config host types the data into it as bracketed
-//! pastes (see `protocol::DATA`), in any order:
+//! It fetches its own data in the background (see standalone.rs), which
+//! arrives as the data pastes `protocol::DATA` describes, in any order:
 //!
 //! - `rows`: every tab across sessions and hosts (format in model.rs),
 //!   with a note for each host that couldn't be listed, named in the
 //!   header; `error` when no host could.
-//! - `live`: `switchyard task list --live`, the task registry with each open
-//!   task's live agent status; never replaces `tasks`.
-//! - `tasks`: `switchyard task list`, the same after the worktree check.
+//! - `live`: the task registry with each open task's live agent status;
+//!   never replaces `tasks`.
+//! - `tasks`: the same after the worktree check.
 //! - `tasks-error`: the registry couldn't be read. The tabs stay, and the
 //!   header says "tabs only".
-//! - `preview`: a capture of the highlighted agent's pane (see preview.rs),
-//!   which the config takes from the title's pick.
+//! - `usage` and `usage-error`: accounting for the Usage view.
+//! - `preview`: the highlighted agent's transcript (see preview.rs).
 //!
 //! The highlighted row and an armed archive survive each delivery. Tasks
-//! link to tabs by (session_id, window_id). Views, cycled with Tab:
+//! link to tabs by (session_id, window_id). Views, moved along with ctrl-h
+//! and ctrl-l:
 //!
 //! - All (default): tabs grouped by session, sessions with an agent that
 //!   wants John (waiting, failed, done) first. In a session, its agents (tabs
@@ -36,51 +39,33 @@
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
 //! archive of the highlighted task (open, or ended with its worktree left)
 //! or of any agent tab, even one with no open task (an agent at its prompt
-//! included); elsewhere it says in the footer why it can't. With
-//! uncommitted changes the config's "ask" types another ctrl-x, which
-//! moves on to "are you sure". Any other key disarms.
+//! included); elsewhere it says in the footer why it can't. Enter runs it;
+//! with uncommitted changes Enter first moves on to "are you sure". Any
+//! other key disarms.
 //!
-//! ctrl-t pins or unpins the highlighted open task (`pinned` in the
-//! registry), which puts it in a Pinned group at the top of All.
-//! ctrl-s, in All, opens a prompt for when to wake the task (see
-//! snooze.rs); Enter snoozes it into the Snoozed group until then
-//! (`snoozed_until`), and Enter on an empty prompt wakes a snoozed one. In
-//! the float the config saves both and types Enter back for the picker to
-//! show them.
-//!
-//! The pick goes out in the terminal title as
-//! `rex-tab-picker:ACTION:TARGET/SESSION/WINDOW`. ACTION is `go` (a tab),
-//! `task` (a row with an open task), `resume` (an ended task), or an armed
-//! `archive`, `ask`, `force-archive`, `review` or `pin`. TARGET is
-//! `-` for the config host, else the hex-encoded host label; task rows with
-//! no listed tab use the registry host. The config's mode binds only Enter
-//! and Escape, so Rex's key-mode popup stays small, and in the float this
-//! program never talks to Rex. ctrl-r and ctrl-t arm Enter instead, as
-//! ctrl-x does: the pick becomes `review` or `pin` until another key
-//! cancels it. ctrl-b opens the highlighted task's work item; task rows
-//! show their links as badges grouped by kind. With one, ctrl-b arms Enter
-//! to open it; with several it opens a chooser over them (PRs, cards, then
-//! issues). Either way the pick is `link:URL` (URL hex-encoded), which the
-//! config opens on Enter; with the chooser open it types Escape back to
-//! close it. A task with several links also adds their count
-//! (`.../WINDOW/N`).
-//! While the snooze prompt is open it is `snooze:UNTIL:TARGET/SESSION/WINDOW`
-//! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
-//! reads as a time.
+//! Enter jumps to the highlighted tab (or resumes an ended task's agent in
+//! a new tab), ctrl-r opens a review beside the task's agent, and ctrl-t
+//! pins or unpins the highlighted open task (`pinned` in the registry),
+//! which puts it in a Pinned group at the top of All. ctrl-s, in All, opens
+//! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
+//! into the Snoozed group until then (`snoozed_until`), and Enter on an
+//! empty prompt wakes a snoozed one. ctrl-b opens the highlighted task's
+//! work item; task rows show their links as badges grouped by kind. With
+//! several it opens a chooser over them (PRs, cards, then issues).
 //!
 //! ctrl-y, in All, opens a reply box on the highlighted agent, under its
 //! preview: the new-session picker's prompt box (see the ui crate's
 //! prompt_box), where alt- or shift-Enter adds a line, Escape closes it,
 //! and shift with the arrows (or the page keys) scrolls the preview. An
-//! agent waiting on a prompt is refused. The message is kept in a prompt
-//! file, and the pick is `message:PROMPT_REF:TARGET/SESSION/WINDOW`
-//! (PROMPT_REF hex-encoded), or `message-empty` with nothing to send. The
-//! config sends it on Enter (`switchyard task act message`; see core's
-//! actions) and types Enter back for the box to close.
+//! agent waiting on a prompt is refused. Enter sends the message (see
+//! core's actions).
 //!
-//! Run bare from a shell (`switchyard`), it works without the float: it
-//! fetches the data and acts on its picks itself, staying open after each
-//! action (see standalone.rs).
+//! Each action goes through `pick`, the highlighted row as
+//! `ACTION:TARGET/SESSION/WINDOW`: ACTION is `go` (a tab), `task` (a row
+//! with an open task), `resume` (an ended task), or an armed `archive`,
+//! `ask` or `force-archive`; TARGET is `-` for this host, else the
+//! hex-encoded host label. The picker stays open after each action,
+//! showing its outcome, until Escape or ctrl-c (see standalone.rs).
 
 mod model;
 mod preview;
@@ -114,7 +99,7 @@ use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
 use switchyard_ui::prompt_box::{self, PromptBox};
-use switchyard_ui::protocol::{self, Title, hex};
+use switchyard_ui::protocol::{self, hex};
 
 const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
@@ -213,11 +198,6 @@ enum Armed {
     No,
     Archive,
     Force,
-    /// In the float, ctrl-r, ctrl-b (one work item) and ctrl-t arm these
-    /// for Enter, so the config's mode binds only Enter and Escape.
-    Review,
-    Link,
-    Pin,
 }
 
 impl Armed {
@@ -325,8 +305,8 @@ impl Snooze {
 }
 
 /// The ctrl-y reply box: a message for the highlighted agent, typed in the
-/// prompt box the new-session picker uses and kept in a prompt file, so the
-/// float's title carries only its reference.
+/// prompt box the new-session picker uses and kept in a prompt file, which
+/// `switchyard task act message` sends.
 struct Reply {
     /// The agent's tab, as (session_id, window_id), which stays highlighted.
     key: Key,
@@ -376,20 +356,16 @@ struct App {
     /// snoozed_until, when), kept over deliveries until they agree.
     pending: HashMap<Key, (bool, u64, Instant)>,
     list_area: Rect,
-    title: Title,
     started: Instant,
     now: u64,
     load: Load,
     /// Hosts whose tabs the last rows lack or have from earlier.
     failed: Vec<String>,
     tasks_load: Tasks,
-    /// Run from a shell rather than in the config's float: Enter, ctrl-r
-    /// and Escape reach the picker, which acts on them itself.
-    standalone: bool,
     /// The last standalone action's outcome (and whether it failed), shown
     /// in the footer until the next key.
     note: Option<(String, bool)>,
-    /// A standalone picker's data, as the float's pastes would carry it.
+    /// The picker's data, as pastes (see standalone::Feed).
     feed: Option<standalone::Feed>,
     /// A standalone archive running on its own thread, so the picker stays
     /// live meanwhile; its outcome becomes the note.
@@ -431,13 +407,11 @@ impl App {
             reply: None,
             pending: HashMap::new(),
             list_area: Rect::default(),
-            title: Title::new("rex-tab-picker"),
             started: Instant::now(),
             now: now(),
             load: Load::Waiting,
             failed: Vec::new(),
             tasks_load: Tasks::Waiting,
-            standalone: false,
             note: None,
             feed: None,
             archiving: None,
@@ -657,16 +631,7 @@ impl App {
         match armed {
             Armed::No => true,
             Armed::Archive | Armed::Force => self.armable(),
-            Armed::Review => self.view != View::Usage && self.selected_open_task().is_some(),
-            Armed::Link => self.view != View::Usage && self.selected_link().is_some(),
-            Armed::Pin => self.view != View::Usage && self.can_pin(),
         }
-    }
-
-    /// The highlighted task's only work item, which ctrl-b opens.
-    fn selected_link(&self) -> Option<Link> {
-        let mut links = chooser_links(&self.selected_task()?.links);
-        if links.len() == 1 { links.pop() } else { None }
     }
 
     /// The tab whose agent to preview: the highlighted agent's, in All.
@@ -1082,37 +1047,9 @@ impl App {
 
     // ------------------------------------------------------------ the pick
 
-    /// What Enter would do, as the config's title protocol expects. With
-    /// the snooze prompt open, `snooze:UNTIL:` and the row's target, or
-    /// `snooze-invalid` while the text can't be read.
+    /// What Enter would do with the highlighted row, as standalone.rs's
+    /// parse_pick reads it.
     fn pick(&self) -> String {
-        if let Some(c) = &self.chooser {
-            return format!("link:{}", hex(c.url()));
-        }
-        // ctrl-b on a task with one work item: Enter opens it, as from the
-        // chooser.
-        if let (Armed::Link, Some(l)) = (self.armed, self.selected_link()) {
-            return format!("link:{}", hex(&l.url));
-        }
-        if let Some(r) = &self.reply {
-            let row = self.row_pick();
-            return match (r.prompt.saved_ref(), row.split_once(':')) {
-                (Some(saved), Some((_, target))) if !saved.is_empty() => format!("message:{}:{target}", hex(saved)),
-                _ => "message-empty".into(),
-            };
-        }
-        if let Some(z) = &self.snooze {
-            let row = self.row_pick();
-            return match (&z.until, row.split_once(':')) {
-                (Ok(until), Some((_, target))) => format!("snooze:{until}:{target}"),
-                _ => "snooze-invalid".into(),
-            };
-        }
-        self.row_pick()
-    }
-
-    /// The highlighted row's pick, whatever is open over it.
-    fn row_pick(&self) -> String {
         let Some(item) = self.selected_item() else { return String::new() };
         let task = self.task_of(item);
         let dirty = task.is_some_and(|t| t.dirty > 0);
@@ -1120,9 +1057,7 @@ impl App {
             Armed::Archive if dirty => "ask",
             Armed::Archive => "archive",
             Armed::Force => "force-archive",
-            Armed::Review => "review",
-            Armed::Pin => "pin",
-            Armed::No | Armed::Link => match task {
+            Armed::No => match task {
                 Some(t) if t.ended.is_some() => "resume",
                 Some(_) => "task",
                 None => "go",
@@ -1192,9 +1127,8 @@ impl App {
         self.snooze = Some(z);
     }
 
-    /// The prompt's Enter, once the snooze is saved (in the float, the
-    /// config types Enter back after `switchyard task act snooze`): show it
-    /// here, moving on from a task just snoozed to the next.
+    /// The prompt's Enter, once the snooze is saved: show it here, moving
+    /// on from a task just snoozed to the next.
     fn finish_snooze(&mut self) {
         let Some(z) = self.snooze.take() else { return };
         let Ok(until) = z.until else {
@@ -1244,8 +1178,7 @@ impl App {
     }
 
     /// Keys while the chooser is open: move, or Escape to close it. Enter
-    /// never gets here (the config's mode, or standalone_key, opens the
-    /// pick). False to quit.
+    /// never gets here (standalone_key opens the pick). False to quit.
     fn chooser_key(&mut self, k: KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(c) = &mut self.chooser else { return true };
@@ -1289,9 +1222,8 @@ impl App {
         }
     }
 
-    /// The reply box's Enter once the message is sent (in the float, the
-    /// config types Enter back after `switchyard task act message`, which
-    /// also removes the prompt file).
+    /// The reply box's Enter once the message is sent (`switchyard task act
+    /// message` also removes the prompt file).
     fn finish_reply(&mut self) {
         if let Some(r) = self.reply.take() {
             self.note = Some((format!("sent to {}", r.label), false));
@@ -1323,12 +1255,11 @@ impl App {
         true
     }
 
-    fn report(&mut self) -> io::Result<()> {
+    /// Keep the reply box's message in its prompt file as it is typed.
+    fn save_reply(&mut self) {
         if let Some(r) = &mut self.reply {
             r.prompt.save();
         }
-        let pick = self.pick();
-        self.title.report(pick)
     }
 
     // ------------------------------------------------------------ keys
@@ -1339,11 +1270,6 @@ impl App {
         }
         if self.snooze.is_some() {
             return self.snooze_key(k);
-        }
-        // In the float, a note (such as a sent message) lasts until a key;
-        // standalone, run clears it.
-        if !self.standalone {
-            self.note = None;
         }
         if self.reply.is_some() {
             return self.reply_key(k);
@@ -1373,12 +1299,8 @@ impl App {
             };
             return true;
         }
-        // In the float, Enter reaches here only when the config types it
-        // back after saving an armed pin: show it.
+        // standalone_key acts on Enter before it gets here.
         if k.code == KeyCode::Enter {
-            if self.armed == Armed::Pin {
-                self.toggle_pin();
-            }
             self.armed = Armed::No;
             return true;
         }
@@ -1400,16 +1322,7 @@ impl App {
         }
         match k.code {
             KeyCode::Char('c') if ctrl => return false,
-            // The rest reach here only in the float (standalone_key acts on
-            // them): ctrl-b opens the chooser over several work items, and
-            // ctrl-b with one, ctrl-r and ctrl-t arm Enter.
-            KeyCode::Char('b') if ctrl => {
-                if !self.open_chooser() {
-                    self.arm(Armed::Link);
-                }
-            }
-            KeyCode::Char('r') if ctrl => self.arm(Armed::Review),
-            KeyCode::Char('t') if ctrl => self.arm(Armed::Pin),
+            // standalone_key acts on ctrl-b, ctrl-r and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('y') if ctrl && self.view == View::All => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::All => self.expanded = !self.expanded,
@@ -1470,10 +1383,6 @@ impl App {
     /// within the capture.
     fn scroll_preview(&mut self, delta: isize) {
         self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
-    }
-
-    fn arm(&mut self, armed: Armed) {
-        self.armed = if self.can_arm(armed) { armed } else { Armed::No };
     }
 
     fn delete_word(&mut self) {
@@ -2310,25 +2219,6 @@ impl App {
             f.render_widget(Line::from(spans), area);
             return;
         }
-        if let (Armed::Review | Armed::Link | Armed::Pin, Some(t)) = (self.armed, self.selected_task()) {
-            let what = match self.armed {
-                Armed::Review => format!("review {}", t.label()),
-                Armed::Pin if t.pinned => format!("unpin {}", t.label()),
-                Armed::Pin => format!("pin {}", t.label()),
-                _ => match self.selected_link() {
-                    Some(l) if l.kind == "pr" => "open PR".into(),
-                    _ => "open link".into(),
-                },
-            };
-            let line = Line::from(vec![
-                Span::raw(" "),
-                Span::styled("⏎", Style::new().fg(p.iris).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {what}"), Style::new().fg(p.text)),
-                Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
-            ]);
-            f.render_widget(line, area);
-            return;
-        }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_task()) {
             let mut spans = vec![Span::raw(" ")];
             let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
@@ -2487,7 +2377,7 @@ impl App {
         }
     }
 
-    /// Data that has arrived, taken as the float takes pastes.
+    /// Data that has arrived from the feed.
     fn take_fetched(&mut self) {
         let Some(feed) = &self.feed else { return };
         let mut got = Vec::new();
@@ -2502,8 +2392,8 @@ impl App {
         }
     }
 
-    /// Enter, ctrl-r and Escape in a standalone picker, as the config's
-    /// tab_picker mode handles them; false for other keys.
+    /// The keys that act: Enter, ctrl-r, ctrl-b, ctrl-t, and Enter in the
+    /// snooze prompt and reply box; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let review = matches!(k.code, KeyCode::Char('r') if ctrl);
@@ -2519,7 +2409,7 @@ impl App {
             if text.is_empty() {
                 return true;
             }
-            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
             let label = r.label.clone();
             self.busy(term, format!("sending to {label}…"));
             self.note = Some(match standalone::message(&pick, &text) {
@@ -2538,7 +2428,7 @@ impl App {
             if !matches!(k.code, KeyCode::Enter) {
                 return false;
             }
-            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
             let label = z.label.clone();
             self.note = Some(match standalone::snooze(&pick, until) {
                 Ok(msg) => {
@@ -2559,7 +2449,7 @@ impl App {
             if !self.can_pin() {
                 return true;
             }
-            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
             self.note = Some(match standalone::pin(&pick) {
                 Ok(msg) => {
                     self.toggle_pin();
@@ -2885,16 +2775,11 @@ mod tests {
     #[test]
     fn ctrl_t_pins_and_unpins_and_holds_over_stale_data() {
         let mut app = inbox_with_lifecycle();
-        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        // ctrl-t arms Enter; the config saves the pin and types Enter back.
-        app.key(ctrl('t'));
-        assert!(!app.tasks[2].pinned);
-        assert!(app.pick().starts_with("pin:"));
-        app.key(enter);
+        // ctrl-t saves the pin in the registry (standalone_key), then shows it.
+        assert!(app.can_pin());
+        app.toggle_pin();
         assert!(app.tasks[2].pinned);
-        assert!(app.armed == Armed::No);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
         // Done ranks above working, pinned or not.
         assert_eq!(&app.rows[..3], &[Item::Status("pinned"), Item::Tab(2), Item::Tab(0)]);
@@ -2904,14 +2789,8 @@ mod tests {
         // ... and once it agrees, it is the data's again.
         app.deliver(|app| app.tasks[2].pinned = true);
         assert!(app.pending.is_empty());
-        // Another key cancels an armed pin.
-        app.key(ctrl('t'));
-        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.key(enter);
-        assert!(app.tasks[2].pinned);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        app.key(ctrl('t'));
-        app.key(enter);
+        app.toggle_pin();
         assert!(!app.tasks[2].pinned);
         // Not in the archive.
         app.set_view(View::Archive);
@@ -2924,20 +2803,20 @@ mod tests {
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        let target = app.row_pick().split_once(':').unwrap().1.to_string();
+        let target = app.pick().split_once(':').unwrap().1.to_string();
         app.key(ctrl('s'));
-        assert!(app.snooze.is_some());
-        assert_eq!(app.pick(), "snooze-invalid");
+        assert!(app.snooze.as_ref().is_some_and(|z| z.until.is_err()));
         for c in "2x".chars() {
             app.key(plain(KeyCode::Char(c)));
         }
-        assert_eq!(app.pick(), "snooze-invalid");
+        assert!(app.snooze.as_ref().is_some_and(|z| z.until.is_err()));
         // Enter on unreadable text does nothing; the search is untouched.
         app.key(plain(KeyCode::Enter));
         assert!(app.snooze.is_some() && app.query.is_empty());
         app.key(plain(KeyCode::Backspace));
         app.key(plain(KeyCode::Char('h')));
-        assert_eq!(app.pick(), format!("snooze:{}:{target}", 1000 + 7200));
+        assert_eq!(app.snooze.as_ref().unwrap().until, Ok(1000 + 7200));
+        assert_eq!(app.pick().split_once(':').unwrap().1, target);
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
@@ -2951,7 +2830,7 @@ mod tests {
         // On a snoozed task, an empty prompt wakes it.
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         app.key(ctrl('s'));
-        assert_eq!(app.pick(), format!("snooze:0:{target}"));
+        assert_eq!(app.snooze.as_ref().unwrap().until, Ok(0));
         app.key(plain(KeyCode::Enter));
         assert_eq!(app.tasks[2].snoozed_until, 0);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
@@ -2970,10 +2849,9 @@ mod tests {
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        let target = app.row_pick().split_once(':').unwrap().1.to_string();
+        let target = app.pick().split_once(':').unwrap().1.to_string();
         app.key(ctrl('y'));
-        assert!(app.reply.is_some());
-        assert_eq!(app.pick(), "message-empty");
+        assert!(app.reply.as_ref().is_some_and(|r| r.prompt.text().is_empty()));
         for c in "run the tests".chars() {
             app.key(plain(KeyCode::Char(c)));
         }
@@ -2983,7 +2861,8 @@ mod tests {
         app.paste("rex-data:usage-error\nx");
         let r = app.reply.as_ref().unwrap();
         assert_eq!(r.prompt.text(), "run the tests\nthen\nreport");
-        assert_eq!(app.pick(), format!("message:{}:{target}", hex(&r.prompt.file_ref)));
+        // The message goes to the highlighted agent's tab.
+        assert_eq!(app.pick().split_once(':').unwrap().1, target);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
@@ -3058,28 +2937,28 @@ mod tests {
             ]).to_string()).unwrap();
             app.tasks_load = Tasks::Ready;
         });
-        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let url = |app: &App| app.chooser.as_ref().map(|c| c.url().to_string());
         app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
-        // One link: no chooser, and the pick carries no count.
+        // One link: no chooser (standalone_key opens it), and the pick
+        // carries no count.
         assert_eq!(app.pick(), format!("task:{}/s/b", hex("")));
-        app.key(ctrl('b'));
-        assert!(app.chooser.is_none());
+        assert!(!app.open_chooser());
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
         assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
         assert_eq!(standalone::parse_pick(&app.pick()).unwrap().window, "a");
-        app.key(ctrl('b'));
+        assert!(app.open_chooser());
         // The PR first and selected, so ctrl-b then Enter opens it.
-        assert_eq!(app.pick(), format!("link:{}", hex("https://p")));
+        assert_eq!(url(&app).as_deref(), Some("https://p"));
         app.key(plain(KeyCode::Char('j')));
-        assert_eq!(app.pick(), format!("link:{}", hex("https://c")));
+        assert_eq!(url(&app).as_deref(), Some("https://c"));
         app.key(plain(KeyCode::Down));
         app.key(plain(KeyCode::Down));
-        assert_eq!(app.pick(), format!("link:{}", hex("https://i")));
+        assert_eq!(url(&app).as_deref(), Some("https://i"));
         app.key(plain(KeyCode::Up));
         app.key(plain(KeyCode::Char('k')));
         app.key(plain(KeyCode::Char('k')));
-        assert_eq!(app.pick(), format!("link:{}", hex("https://p")));
+        assert_eq!(url(&app).as_deref(), Some("https://p"));
         // Other keys don't type into the search.
         app.key(plain(KeyCode::Char('x')));
         assert!(app.query.is_empty());
@@ -3232,94 +3111,6 @@ mod tests {
         let shown = row.matches('x').count();
         assert!(row.contains('…') && row.contains("~/dev/src/project") && (24..=34).contains(&shown), "{row}");
     }
-
-    /// Set in the child run of `split_paste_reader`.
-    const PASTE_CHILD: &str = "SWITCHYARD_PASTE_CHILD";
-
-    /// The float's side of `split_tasks_paste_over_64k_arrives_whole`: read
-    /// one paste from the terminal on stdin, as `run` does, and report what
-    /// the picker made of it.
-    #[test]
-    fn split_paste_reader() {
-        if std::env::var_os(PASTE_CHILD).is_none() {
-            return;
-        }
-        ratatui::crossterm::terminal::enable_raw_mode().unwrap();
-        println!("ready");
-        loop {
-            if let Event::Paste(text) = event::read().unwrap() {
-                let mut app = App::new((String::new(), String::new()), View::All);
-                app.paste(&text);
-                println!("result bytes={} tasks={} ready={}", text.len(), app.tasks.len(), matches!(app.tasks_load, Tasks::Ready));
-                break;
-            }
-        }
-        ratatui::crossterm::terminal::disable_raw_mode().unwrap();
-    }
-
-    /// Rex drops a terminal write over about 64 KiB, so float.lua's deliver
-    /// types a big paste in several writes; the reader must join them.
-    #[test]
-    fn split_tasks_paste_over_64k_arrives_whole() {
-        use std::io::{BufRead, BufReader, Write};
-        use std::os::fd::{FromRawFd, OwnedFd};
-        use std::process::{Command, Stdio};
-
-        let tasks: Vec<_> = (0..400)
-            .map(|i| serde_json::json!({"session_id":"s", "window_id":format!("w{i}"), "name":format!("task {i} ✓"),
-                "status":"idle", "status_msg":"x".repeat(150)}))
-            .collect();
-        let body = serde_json::Value::Array(tasks).to_string();
-        assert!(body.len() > 64 * 1024);
-
-        let (mut master, mut slave) = (0, 0);
-        let r = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(r, 0, "openpty");
-        let (mut master, slave) = unsafe { (std::fs::File::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        // Kill the child even when an assertion fails, or it waits forever.
-        struct Kill(std::process::Child);
-        impl Drop for Kill {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::split_paste_reader", "--nocapture", "--test-threads=1"])
-            .env(PASTE_CHILD, "1")
-            .stdin(Stdio::from(slave))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map(Kill)
-            .unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        let out = BufReader::new(child.0.stdout.take().unwrap());
-        std::thread::spawn(move || {
-            for line in out.lines().map_while(Result::ok) {
-                let _ = tx.send(line);
-            }
-        });
-        let line = |want: &str| loop {
-            let l = rx.recv_timeout(Duration::from_secs(10)).expect("child output");
-            // The harness may print its own text ahead on the same line.
-            if let Some(at) = l.find(want) {
-                break l[at..].to_string();
-            }
-        };
-        line("ready");
-
-        // As deliver writes it: marker and header, 8 KiB chunks, end marker.
-        let mut writes = vec![b"\x1b[200~rex-data:tasks\n".to_vec()];
-        writes.extend(body.as_bytes().chunks(8 * 1024).map(<[u8]>::to_vec));
-        writes.push(b"\x1b[201~".to_vec());
-        for w in writes {
-            master.write_all(&w).unwrap();
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let result = line("result");
-        assert_eq!(result, format!("result bytes={} tasks=400 ready=true", "rex-data:tasks\n".len() + body.len()));
-    }
 }
 
 // ---------------------------------------------------------------- main
@@ -3351,7 +3142,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             app.refilter();
         }
         term.draw(|f| app.draw(f))?;
-        app.report()?;
+        app.save_reply();
         let animate = app.archiving.is_some()
             || matches!(app.load, Load::Waiting)
             || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
@@ -3362,32 +3153,22 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         }
         match event::read()? {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if app.standalone {
-                    if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() && app.reply.is_none() {
-                        return Ok(());
-                    }
-                    if app.standalone_key(k, term) {
-                        continue;
-                    }
-                    app.note = None;
+                if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() && app.reply.is_none() {
+                    return Ok(());
                 }
+                if app.standalone_key(k, term) {
+                    continue;
+                }
+                app.note = None;
                 if !app.key(k) {
                     return Ok(());
                 }
             }
-            // Standalone, only John's own pastes arrive, for the reply box.
-            Event::Paste(text) if !app.standalone || app.reply.is_some() => app.paste(&text),
+            // Only John's own pastes arrive, for the reply box.
+            Event::Paste(text) if app.reply.is_some() => app.paste(&text),
             _ => {}
         }
     }
-}
-
-/// The picker in a float: it opens at once and takes its data from the
-/// config's bracketed pastes (see the crate docs). `current` is the
-/// SESSION/WINDOW the float was opened from.
-pub fn float(current: &str, view: View) -> io::Result<()> {
-    let (s, w) = current.split_once('/').unwrap_or((current, ""));
-    picker(App::new((s.to_string(), w.to_string()), view))
 }
 
 /// The picker from a terminal: it fetches its own tabs and tasks and acts on
@@ -3395,7 +3176,6 @@ pub fn float(current: &str, view: View) -> io::Result<()> {
 pub fn standalone(view: View) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
-    app.standalone = true;
     app.start_feed();
     picker(app)
 }
@@ -3436,9 +3216,5 @@ fn picker(mut app: App) -> io::Result<()> {
     ratatui::restore();
     // A message typed but never sent.
     app.close_reply();
-    // Leave the shell's title as it was before the picks.
-    if app.standalone {
-        protocol::clear_title();
-    }
     result
 }

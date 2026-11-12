@@ -19,8 +19,7 @@
 //!
 //! Modes: bare (or `serve`) runs the server in the foreground; `snapshot`
 //! prints the running server's snapshot as JSON; `subscribe` prints one
-//! line per change until interrupted; `pastes` prints what the float's fill
-//! script delivers (see `pastes` below).
+//! line per change until interrupted.
 
 mod hostinfo;
 mod socket;
@@ -36,7 +35,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use serde_json::json;
 use switchyard_core::server;
 
 use crate::state::Shared;
@@ -45,15 +43,12 @@ use crate::watch::Events;
 const USAGE: &str = "usage: switchyard server [serve]
        switchyard server snapshot
        switchyard server subscribe
-       switchyard server pastes [--checked]
 
 serve (the default) runs the server in the foreground: it watches every Rex
 server's tabs and the task registry and answers on a Unix socket. snapshot
 prints the running server's rows, tasks and errors as JSON; subscribe
-prints a snapshot per change. pastes prints the float's data pastes as a
-JSON array of {kind, body}; with --checked, only the tasks once they have
-been checked against their hosts. Both fail when the server isn't running
-or doesn't get there in time, so the caller can fetch directly.";
+prints a snapshot per change. Both fail when the server isn't running, so
+the caller can fetch directly.";
 
 pub fn log(line: &str) {
     eprintln!("switchyard-server: {line}");
@@ -65,8 +60,6 @@ pub fn main(args: Vec<String>) {
         [] | ["serve"] => serve(),
         ["snapshot"] => server::snapshot().map(|snap| println!("{snap}")),
         ["subscribe"] => subscribe(),
-        ["pastes"] => pastes(false),
-        ["pastes", "--checked"] => pastes(true),
         ["-h"] | ["--help"] => {
             println!("{USAGE}");
             Ok(())
@@ -86,34 +79,6 @@ fn subscribe() -> Result<(), String> {
     for snap in server::subscribe()? {
         println!("{}", snap?);
     }
-    Ok(())
-}
-
-/// How long `pastes` waits for a server that has only just started to hear
-/// from every host. A running server is ready at once; past this, the
-/// direct fan-out is about as quick.
-const READY_WAIT: Duration = Duration::from_millis(1500);
-
-/// How long `pastes --checked` waits for the tasks' check, which takes a
-/// few hundred milliseconds and runs once at start before any snapshot has
-/// checked tasks; longer means a slow host, and the caller checks itself.
-const CHECKED_WAIT: Duration = Duration::from_secs(5);
-
-/// The float's pastes from the running server (see core's
-/// `server::pastes`), for the fill script in lua/switchyard/tab-picker.lua.
-/// A one-shot snapshot normally carries checked tasks, so the float needs
-/// one call. Only in the server's first moments are they `live`; the fill
-/// script then asks again with --checked, which waits for the check and
-/// prints just the tasks, rather than holding up the rows.
-fn pastes(checked: bool) -> Result<(), String> {
-    let pastes = if checked {
-        let snap = server::wait_for(CHECKED_WAIT, server::tasks_settled)?;
-        server::pastes(&snap).into_iter().filter(|(kind, _)| matches!(*kind, "tasks" | "tasks-error")).collect()
-    } else {
-        server::pastes(&server::wait_for(READY_WAIT, server::is_ready)?)
-    };
-    let pastes: Vec<_> = pastes.into_iter().map(|(kind, body)| json!({ "kind": kind, "body": body })).collect();
-    println!("{}", serde_json::Value::from(pastes));
     Ok(())
 }
 

@@ -1,4 +1,4 @@
--- Float helpers shared by the switchyard pickers and other Rex actions
+-- Float helpers shared by the switchyard Rex actions and others
 -- (yem.lua in system-config requires them as "switchyard.float").
 local M = {}
 
@@ -32,7 +32,7 @@ function M.user_path()
   return r.stdout
 end
 
--- A float command that runs program from the user's PATH on the float's host.
+-- A pane command that runs program from the user's PATH on the pane's host.
 function M.float_command(program, ...)
   return {
     "sh", "-c", 'PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH"; export PATH; exec ' .. program .. ' "$@"',
@@ -43,113 +43,6 @@ end
 -- Environment for rex CLI calls that must not inherit this server's targets.
 function M.cli_env()
   return { PATH = M.user_path(), REX_SERVER = false, REX_CLIENT = false, REX_SESSION = false, REX_BLOCK = false }
-end
-
--- The start of a `rex do` script that fills a float opened before its data
--- was ready. Run with session= and block= naming the float; the rest of the
--- script fetches and calls deliver(kind, body), which types
--- "rex-data:KIND\n" .. body into the float as a bracketed paste, in several
--- writes. A paste Rex won't take is logged and, for rows, live, tasks and
--- usage, reported as error, tasks-error or usage-error. Errors the rest
--- raises are delivered as kind "error". The float may be on any host,
--- so every server is asked for its session at once while the script fetches.
-M.deliver_prelude = [==[
-local T = "com.superlogical.terminal"
-local float = { session_id = rex.args.session, block_id = rex.args.block }
-local lookups = {}
-for _, host in ipairs(rex.servers()) do
-  lookups[#lookups + 1] = { host = host, job = rex.exec.start({ "rex", "-S", host, "do", "-e",
-    -- `rex do` prints nothing for a boolean, so answer with a string.
-    'local _, err = rex.session.attach{ session_id = rex.args.session } return err == nil and "found" or ""',
-    "session=" .. float.session_id }) }
-end
-local server
-local function float_server()
-  if server ~= nil then return server end
-  local _, err = rex.session.attach{ session_id = float.session_id }
-  if err == nil then server = rex return server end
-  for _, l in ipairs(lookups) do
-    if (l.job:wait().stdout or ""):match("found") then
-      server = rex.server(l.host)
-      server.session.attach{ session_id = float.session_id }
-      return server
-    end
-  end
-  error("can't find the float's session " .. float.session_id, 0)
-end
--- Bytes of paste body per terminal write: under Rex's limit even if the
--- JSON request escapes every byte as \u00XX.
-local DELIVER_CHUNK = 8 * 1024
--- What to deliver when a paste of a kind can't be written.
-local DELIVER_FAILURE = { rows = "error", live = "tasks-error", tasks = "tasks-error", usage = "usage-error" }
-local deliver
-function deliver(kind, body)
-  local s = float_server()
-  -- Wait (up to 5s) for the float program to take the terminal raw, so the
-  -- paste isn't echoed or line-edited; give up if the float has closed.
-  for _ = 1, 100 do
-    local mode = s.block.call(T, "input_mode", float)
-    if mode == nil then return end
-    if not mode.canonical and not mode.echo then break end
-    rex.sleep(0.05)
-  end
-  local function write(data)
-    return s.block.call(T, "write", { session_id = float.session_id, block_id = float.block_id, data = data }) ~= nil
-  end
-  -- Rex silently drops (returning nil) a write over about 64 KiB encoded,
-  -- so the paste goes out in pieces the float's reader joins up again:
-  -- start marker and header, the body in chunks, then the end marker. An
-  -- escape in the body could end the paste early.
-  body = tostring(body):gsub("\27", "")
-  local ok = write("\27[200~rex-data:" .. kind .. "\n")
-  local i = 1
-  while ok and i <= #body do
-    local j = math.min(i + DELIVER_CHUNK - 1, #body)
-    -- Cut on a UTF-8 boundary: back off while the next byte continues a character.
-    while j < #body and j > i and body:byte(j + 1) >= 0x80 and body:byte(j + 1) < 0xC0 do j = j - 1 end
-    ok = write(body:sub(i, j))
-    i = j + 1
-  end
-  -- Close the paste even after a failure, so what follows isn't swallowed.
-  ok = write("\27[201~") and ok
-  if ok then return end
-  local failed = "can't deliver " .. kind .. " (" .. #body .. " bytes): Rex dropped a write to the float"
-  io.stderr:write("switchyard: ", failed, "\n")
-  -- Tell the float, so it stops waiting; a failure paste that fails is only logged.
-  local report = DELIVER_FAILURE[kind]
-  if report ~= nil then deliver(report, failed) end
-end
-local function main(fetch)
-  local ok, err = pcall(fetch)
-  if not ok then pcall(deliver, "error", tostring(err)) error(err, 0) end
-end
-]==]
-
--- Open a float running command at once and fill it in the background: a
--- detached `rex do` on this config host runs deliver_prelude .. script
--- against it, logging failures to log_name. Waiting in the action instead
--- would hold up the app's keys until the slowest host answered.
-function M.open_filled_float(ctx, opts)
-  local layer, layer_err = rex.session.new_layer{
-    session_id = ctx.session_id,
-    bounds     = opts.bounds,
-    focus      = true,
-    layout     = rex.layout.block{
-      flavor  = "com.superlogical.terminal.shell",
-      label   = opts.label,
-      options = { command = opts.command },
-    },
-  }
-  if layer == nil then error(layer_err, 0) end
-  local block_id = (layer.block_ids or {})[1]
-  if block_id == nil then error("new float has no block", 0) end
-  rex.client.queue("client.mode.enter", { name = opts.mode })
-  local job, err = rex.exec.start({
-    "sh", "-c", 'umask 077; log="${XDG_STATE_HOME:-$HOME/.local/state}/rex/' .. opts.log_name .. '"; mkdir -p "${log%/*}" || exit; exec "$@" >> "$log" 2>&1',
-    "sh", "rex", "do", "-e", M.deliver_prelude .. opts.script,
-    "session=" .. ctx.session_id, "block=" .. block_id,
-  }, { detach = true, env = M.cli_env() })
-  if job == nil then error(err, 0) end
 end
 
 -- Pickers hex-encode values so they survive the terminal-title payload.

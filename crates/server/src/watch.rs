@@ -1,7 +1,7 @@
 //! One watcher per Rex server: a long-lived `rex [-S HOST] do --all -e
 //! SCRIPT` that holds one connection to the server and hears every
 //! session's events. Its Lua runs here, on the server's machine, and is
-//! host_rows.lua (the float's row logic, kept in one place) wrapped in a
+//! host_rows.lua (the row logic, kept in one place) wrapped in a
 //! function it calls at start, shortly after relevant events, and on a slow
 //! timer in case an event is missed. Each run prints the host's rows as one
 //! line; closes and host list changes print a line of their own, for the
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::state::{Shared, split_rows};
 
-/// One server's rows: the script the float's tab-picker.lua reads.
+/// One server's rows (see host_rows.lua).
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
 
 /// Seconds between runs when no event says the rows changed.

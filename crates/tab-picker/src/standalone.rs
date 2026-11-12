@@ -1,17 +1,15 @@
-//! The picker run bare from a shell (bare `switchyard`), without the
-//! config's float.
+//! The picker's data and actions (bare `switchyard`).
 //!
-//! It gets what the float's fill script would paste, in the background (see
+//! It gets its data as pastes, in the background (see
 //! `Feed`): from switchyard-server when one answers, as pushed updates,
 //! else directly, every few seconds: the rows from one `rex do -e` on this
-//! host that runs host_rows.lua on every server (as the fill script does),
+//! host that runs host_rows.lua on every server,
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
 //! for the preview (see preview.rs). It acts on Enter, ctrl-r, ctrl-b (open
 //! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
-//! "ask" confirm the way the config's
-//! tab_picker mode does, through core's actions and `rex do
-//! session.select`, then stays open, showing the outcome and the data after
+//! "ask" confirm through core's actions and `rex do session.select`, then
+//! stays open, showing the outcome and the data after
 //! it. Escape or ctrl-c closes it. The registry is on the Mac; elsewhere it
 //! shows tabs only.
 
@@ -28,11 +26,11 @@ use switchyard_ui::protocol::{DATA, unhex};
 
 use crate::preview;
 
-/// One server's rows: the script the float's tab-picker.lua reads.
+/// One server's rows (see host_rows.lua).
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
 
 /// Runs HOST_ROWS on this host's server and every server it knows, at
-/// once, and returns their rows together, as the fill script does: a host
+/// once, and returns their rows together: a host
 /// that fails gets an `E` row naming it, and only when every host fails is
 /// it an error.
 const ALL_ROWS: &str = r#"
@@ -58,7 +56,7 @@ return table.concat(rows)
 "#;
 
 /// Clear the Rex session variables a shell in Rex carries, so rex CLI calls
-/// name their own targets as the float's do. Call before any thread starts.
+/// name their own targets. Call before any thread starts.
 pub fn detach_env() {
     for var in ["REX_SERVER", "REX_CLIENT", "REX_SESSION", "REX_BLOCK"] {
         // SAFETY: called from main before any thread starts.
@@ -72,8 +70,7 @@ const REFRESH: Duration = Duration::from_secs(5);
 /// How often to try for a server while fetching directly.
 const RETRY: Duration = Duration::from_secs(5);
 
-/// The picker's data in the background, as the float's pastes would carry
-/// it (`rx`).
+/// The picker's data in the background, as data pastes (`rx`).
 ///
 /// With switchyard-server answering, a subscription forwards each snapshot
 /// it pushes (see core's `server::pastes`), so the picker changes when Rex
@@ -244,7 +241,7 @@ fn all_rows() -> Result<String, String> {
     serde_json::from_slice::<String>(&out.stdout).map_err(|e| format!("rex do: {e}"))
 }
 
-/// A pick from the title protocol: ACTION, host, session and window.
+/// A pick (see the crate docs): ACTION, host, session and window.
 pub struct Pick {
     pub action: String,
     pub host: String,
@@ -254,8 +251,7 @@ pub struct Pick {
 
 pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (action, target) = pick.split_once(':')?;
-    // A fourth field, the count of links ctrl-b chooses from, is for the
-    // config's mode.
+    // A fourth field counts the links ctrl-b chooses from.
     let mut parts = target.split('/');
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Pick {

@@ -1,11 +1,9 @@
 //! The preview in the All view: what the highlighted agent has been
 //! saying, from its session log (see core's `transcript`).
 //!
-//! In the float, the fill script runs `switchyard transcript` for the tab
-//! the title names and pastes the result as `preview`; standalone, a thread
-//! here fetches it for the tab the picker asks for (see `follow`). Either
-//! way the paste body is `TARGET/SESSION/WINDOW`, a newline, then the
-//! transcript JSON, and the picker shows it only while that tab's row is
+//! A thread here fetches it for the tab the picker asks for (see `follow`)
+//! and sends it as a `preview` paste: `TARGET/SESSION/WINDOW`, a newline,
+//! then the transcript JSON, and the picker shows it only while that tab's row is
 //! highlighted. Fetches wait for the highlight to settle and repeat every
 //! REFRESH while it stays, one at a time. The picker wraps the entries to
 //! the preview's width by word and scrolls them.
@@ -25,7 +23,7 @@ pub const REFRESH: Duration = Duration::from_secs(2);
 /// How long the highlight must rest before a fetch.
 const SETTLE: Duration = Duration::from_millis(150);
 
-/// A tab, as the title names it: TARGET (`-` for the config host, else the
+/// A tab, as a pick names it: TARGET (`-` for the config host, else the
 /// hex-encoded host label), session and window.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pane {

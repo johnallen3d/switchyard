@@ -1,4 +1,4 @@
-//! What the picker shows: Rex tabs grouped by session (from the config's
+//! What the picker shows: Rex tabs grouped by session (from host_rows.lua's
 //! rows) and spawned tasks (from `switchyard task list` JSON), linked by
 //! (session_id, window_id) because the two name hosts differently (`local`
 //! against `hostname -s`).

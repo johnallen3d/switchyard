@@ -69,6 +69,8 @@ completion.
 - `lua/switchyard`: Rex bindings and float actions
 - `nix`: package and Home Manager module
 
-Floats dispatch actions through Lua; standalone binaries act directly. Consider
-both paths when changing a picker or protocol. `lua/switchyard/host_rows.lua`
-is shared by both paths and embedded into Rust.
+The new-session float dispatches actions through Lua; standalone binaries,
+including the tab picker cmd+k shows in its own tab, act directly. Consider
+both paths when changing the new-session picker or its protocol.
+`lua/switchyard/host_rows.lua` is embedded into Rust for the tab picker and
+switchyard-server.

@@ -1,4 +1,4 @@
-//! Read-only Usage view, shared by the float's pastes and standalone feed.
+//! Read-only Usage view, from the picker's usage pastes.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

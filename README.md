@@ -3,11 +3,16 @@
 Rex pickers for switching tabs, managing agent tasks, and starting sessions.
 One Rust binary (`switchyard`), Lua actions, and a Home Manager module.
 
-| Key           | Opens                                |
-| ------------- | ------------------------------------ |
-| `cmd+k`       | Tab picker: tabs and agents, Archive |
-| `cmd+shift+n` | New session                          |
-| `ctrl+cmd+n`  | New agent task in a project worktree |
+| Key           | Opens                                    |
+| ------------- | ---------------------------------------- |
+| `cmd+k`       | Tab picker tab: tabs and agents, Archive |
+| `cmd+shift+n` | New session                              |
+| `ctrl+cmd+n`  | New agent task in a project worktree     |
+
+cmd+k shows the tab picker's own tab, the bare `switchyard` picker in the
+Mac's `agents` session. Without one it opens the tab there, creating the
+session if needed; on that tab already, it does nothing. Quitting the picker
+(Escape or ctrl-c) closes the tab.
 
 From a terminal on the Mac:
 
@@ -88,8 +93,8 @@ tabs only.
 
 `switchyard server` keeps the pickers' data current on the Mac: one
 `rex do --all` watcher per Rex server refreshes tab rows on Rex events, and the
-task registry is checked against the hosts in the background. Pickers and
-floats ask it over a Unix socket and fall back to querying the hosts directly
+task registry is checked against the hosts in the background. The pickers
+ask it over a Unix socket and fall back to querying the hosts directly
 when it doesn't answer, so it is optional: it only makes them faster.
 
 `programs.switchyard.server.enable` (default on macOS) runs it as the launchd

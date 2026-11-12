@@ -1,5 +1,5 @@
 //! What an agent has been saying: the end of its session log, for the
-//! inbox's preview (`switchyard transcript`).
+//! tab picker's preview.
 //!
 //! `fetch` runs on the config host for a tab (host, session, window). It
 //! takes what the task registry says of the tab's task (profile, harness,

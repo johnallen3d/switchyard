@@ -30,14 +30,13 @@
 //!   `{"ok":true}`, comes at once and the result arrives as usual (pushed
 //!   to subscribers).
 //!
-//! `pastes` turns a snapshot into the float's data pastes (see the
-//! tab-picker), so the float's fill script (through `switchyard-server
-//! pastes`) and the standalone picker show the same thing from it.
+//! `pastes` turns a snapshot into the tab picker's data pastes (see the
+//! tab-picker's standalone.rs), the same as its direct fetch sends.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -119,26 +118,6 @@ pub fn subscribe() -> Result<Subscription, String> {
     Ok(Subscription { first: Some(first), reader: Some(reader) })
 }
 
-/// The first snapshot `ok` accepts, waiting up to `timeout` for the server
-/// to get there; for a client that would rather not show half an answer.
-pub fn wait_for(timeout: Duration, ok: impl Fn(&Value) -> bool) -> Result<Value, String> {
-    let deadline = Instant::now() + timeout;
-    let mut sub = subscribe()?;
-    loop {
-        let snap = sub.next().unwrap_or_else(|| Err("switchyard-server hung up".into()))?;
-        if ok(&snap) {
-            return Ok(snap);
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err("switchyard-server: still gathering".into());
-        }
-        if let Some(reader) = &sub.reader {
-            reader.get_ref().set_read_timeout(Some(left)).map_err(|e| e.to_string())?;
-        }
-    }
-}
-
 pub struct Subscription {
     first: Option<Value>,
     reader: Option<BufReader<UnixStream>>,
@@ -159,23 +138,7 @@ impl Iterator for Subscription {
     }
 }
 
-/// Whether every Rex server has answered (with rows or an error) and the
-/// registry has been read: a snapshot the float can show whole. A server
-/// that has only just started has neither.
-pub fn is_ready(snap: &Value) -> bool {
-    let hosts = snap["hosts"].as_array().map(Vec::as_slice).unwrap_or_default();
-    !hosts.is_empty()
-        && hosts.iter().all(|h| !h["age_ms"].is_null() || !h["error"].is_null())
-        && (!snap["tasks"].is_null() || !snap["tasks_error"].is_null())
-}
-
-/// Whether the snapshot's tasks are as good as they will get: checked
-/// against their hosts, or the check failed.
-pub fn tasks_settled(snap: &Value) -> bool {
-    snap["tasks_checked"].as_bool() == Some(true) || !snap["tasks_error"].is_null()
-}
-
-/// The float's data pastes for a snapshot, as (kind, body) in delivery
+/// The tab picker's data pastes for a snapshot, as (kind, body) in delivery
 /// order, leaving out what the server doesn't know yet:
 ///
 /// - `rows`: every host's rows, the config host first, then an `E` row
@@ -184,7 +147,7 @@ pub fn tasks_settled(snap: &Value) -> bool {
 ///   names the hosts missing. Only when no host has ever answered and one
 ///   failed is it `error`, as when the direct fan-out fails everywhere.
 /// - `tasks` once the registry has been checked against the hosts, else
-///   `live` (the same with live status), which the float shows until a
+///   `live` (the same with live status), which the picker shows until a
 ///   checked `tasks` replaces it.
 /// - `tasks-error` when the registry couldn't be read or checked; after
 ///   `live`, the picker keeps those tasks, as after the direct path's.
@@ -254,7 +217,6 @@ mod tests {
             "hosts": [host("local", "S\t-\tlocal\ts1\ta\n", Some(5), None), host("miller", "S\tx\tmiller\ts2\tb\n", Some(9), None)],
             "tasks": [{"window_id": "w"}], "tasks_checked": true, "tasks_error": null,
         });
-        assert!(is_ready(&snap) && tasks_settled(&snap));
         assert_eq!(pastes(&snap), vec![
             ("rows", "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n".to_string()),
             ("tasks", r#"[{"window_id":"w"}]"#.to_string()),
@@ -271,8 +233,6 @@ mod tests {
             ],
             "tasks": [], "tasks_checked": false, "tasks_error": null,
         });
-        // drummer hasn't answered yet: not one to show whole.
-        assert!(!is_ready(&snap) && !tasks_settled(&snap));
         assert_eq!(pastes(&snap), vec![
             ("rows", "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n\
                 E\tmiller\twatcher exited (1) ssh: gone\n\
@@ -287,7 +247,6 @@ mod tests {
             "hosts": [host("local", "", None, Some("can't start rex")), host("miller", "", None, None)],
             "tasks": null, "tasks_checked": false, "tasks_error": "bad json",
         });
-        assert!(!is_ready(&snap));
         assert_eq!(pastes(&snap), vec![
             ("error", "local: can't start rex".to_string()),
             ("tasks-error", "bad json".to_string()),
@@ -305,7 +264,6 @@ mod tests {
             "hosts": [host("local", "", Some(1), None)],
             "tasks": [], "tasks_checked": false, "tasks_error": "ssh: timeout",
         });
-        assert!(is_ready(&snap) && tasks_settled(&snap));
         assert_eq!(pastes(&snap), vec![
             ("rows", String::new()),
             ("live", "[]".to_string()),
