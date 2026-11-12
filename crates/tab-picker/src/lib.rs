@@ -17,6 +17,10 @@
 //! - `usage` and `usage-error`: accounting for the Usage view.
 //! - `preview`: the highlighted agent's transcript (see preview.rs).
 //!
+//! cmd+k also pastes `current`, SESSION/WINDOW, the tab it was pressed on,
+//! into the terminal (or passes it as `--current` when opening the picker),
+//! and the picker highlights that tab again.
+//!
 //! The highlighted row and an armed archive survive each delivery. Tasks
 //! link to tabs by (session_id, window_id). Views, moved along with ctrl-h
 //! and ctrl-l:
@@ -463,8 +467,23 @@ impl App {
             "usage" => self.usage.paste(body),
             "usage-error" => self.usage.error = Some(body.trim().to_string()),
             "preview" => self.preview = preview::parse(body).or(self.preview.take()),
+            "current" => self.set_current(body),
             _ => {}
         }
+    }
+
+    /// cmd+k came from the tab `current` (SESSION/WINDOW): highlight it, as
+    /// a fresh picker would, unless a prompt is open over another row.
+    fn set_current(&mut self, current: &str) {
+        let (s, w) = current.trim().split_once('/').unwrap_or((current.trim(), ""));
+        self.current = (s.to_string(), w.to_string());
+        if self.chooser.is_some() || self.snooze.is_some() || self.reply.is_some() {
+            return;
+        }
+        self.follow = true;
+        self.query.clear();
+        self.armed = Armed::No;
+        self.refilter_to(Some(self.current.clone()));
     }
 
     /// Before any tasks, show tabs only; after, keep them (only their
@@ -3068,18 +3087,23 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                     return Ok(());
                 }
             }
-            // Only John's own pastes arrive, for the reply box.
-            Event::Paste(text) if app.reply.is_some() => app.paste(&text),
+            // cmd+k's `current`, and John's own pastes, for the reply box.
+            Event::Paste(text) if app.reply.is_some() || protocol::data(&text).is_some_and(|(k, _)| k == "current") => {
+                app.paste(&text)
+            }
             _ => {}
         }
     }
 }
 
 /// The picker from a terminal: it fetches its own tabs and tasks and acts on
-/// Enter itself.
-pub fn standalone(view: View) -> io::Result<()> {
+/// Enter itself. `current` is the SESSION/WINDOW to highlight, if any.
+pub fn standalone(view: View, current: Option<&str>) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
+    if let Some(c) = current {
+        app.set_current(c);
+    }
     app.start_feed();
     picker(app)
 }
