@@ -53,7 +53,8 @@ do
         end
         if pane_busy then busy = busy + 1 end
       end
-      local state = best and (urgency[best.state] or 0) > urgency.idle and best.state or nil
+      -- An agent at its prompt is "idle"; a tab with no agent has no state.
+      local state = best and urgency[best.state] and best.state or nil
       local args = { session_id = session.session_id, block_id = block_id }
       local name = window.label or ""
       local dir = ""

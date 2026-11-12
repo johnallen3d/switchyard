@@ -20,6 +20,12 @@
 //!   Both also work on an ended task whose tab was closed without an
 //!   archive, which leaves its worktree behind: they remove the worktree
 //!   and mark the task archived.
+//!
+//!   On a tab that is still open with no open task, they first reopen its
+//!   latest ended task (one ended by mistake), or else adopt the agent in
+//!   it as a task (its checkout, branch and harness from the agent's
+//!   pane), so any agent tab can be archived. A primary checkout is never
+//!   removed: its archive only closes the tab.
 //! - link: print the URL of the task's main work item (its PR, else an
 //!   issue, card or commit; see `links`), open or ended, for the caller to
 //!   open on the client machine.
@@ -60,6 +66,69 @@ fn agent_block(host: &str, session: &str, window: &str) -> Result<String, String
         .and_then(|l| l["blocks"][0]["block_id"].as_str())
         .map(String::from)
         .ok_or_else(|| "the task's tab is gone".to_string())
+}
+
+/// Where the agent in a tab works, from its foreground process's folder on
+/// `host`: PATH (the checkout's top), REPO (the primary checkout) and
+/// BRANCH, tab separated; exit 3 when that isn't a Git checkout.
+fn checkout_script(cwd: &str) -> String {
+    format!(
+        "cd {} 2>/dev/null || exit 3\n\
+         top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 3\n\
+         main=$(git worktree list --porcelain | sed -n '1s/^worktree //p')\n\
+         printf '%s\\t%s\\t%s\\n' \"$top\" \"${{main:-$top}}\" \"$(git symbolic-ref --quiet --short HEAD)\"\n",
+        sh_quote(cwd)
+    )
+}
+
+/// A task record for an agent tab Switchyard has none for (started by hand,
+/// say), so it can be archived like a spawned one: its checkout, branch
+/// and harness from the agent's pane. In a primary checkout, the archive
+/// only closes the tab.
+fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, String> {
+    let pane = crate::transcript::agent_pane(host, session, window)?;
+    let cwd = pane["cwd"].as_str().unwrap_or("");
+    if cwd.is_empty() {
+        return Err("no agent in that tab to archive".into());
+    }
+    let out = host_bash(host, &checkout_script(cwd)).ok_or_else(|| format!("{host} can't be reached"))?;
+    if !out.status.success() {
+        return Err(format!("{cwd} isn't a Git checkout: nothing to archive but the tab"));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut f = text.trim_end_matches('\n').split('\t');
+    let (top, repo, branch) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+    let base = |p: &str| p.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+    if top != repo && branch.is_empty() {
+        return Err(format!("{top} is on a detached HEAD; check out its branch to archive it"));
+    }
+    // Rex names Claude Code `claude-code`; spawned tasks record `claude`.
+    let app = pane["app"].as_str().unwrap_or("");
+    let harness = app.strip_suffix("-code").unwrap_or(app);
+    Ok(serde_json::json!({
+        "host": host,
+        "session_id": session,
+        "window_id": window,
+        "project": base(repo),
+        "repo": repo,
+        "name": base(top),
+        "branch": branch,
+        "worktree": top,
+        "harness": harness,
+        "adopted": true,
+        "created_at": now(),
+        "ended_at": null,
+        "ended_reason": null,
+    }))
+}
+
+/// A session spawn created for the project goes when its last tab does.
+fn kill_if_empty(host: &str, session: &str) {
+    if let Ok(list) = rex_json(host, &["window", "ls", "-s", session, "--json"])
+        && list["windows"].as_array().is_some_and(|w| w.is_empty())
+    {
+        let _ = rex(host, &["kill", session]);
+    }
 }
 
 /// Resume the ended task that had `window` on `host`.
@@ -232,13 +301,35 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
     }
     let mut tasks = load_tasks()?;
     let here = |t: &serde_json::Value| in_window(t, window);
-    // An open task, or for an archive, the latest ended one (closing its tab
-    // left the worktree).
+    let archiving = matches!(action, "archive" | "force-archive");
+    // An open task. For an archive of a tab that is still open, the latest
+    // ended task reopened (it ended by mistake), or else one adopted for
+    // the agent in it, so any agent tab can be archived. Otherwise the
+    // latest ended task (closing its tab left the worktree).
     let i = match tasks.iter().position(|t| t["ended_at"].is_null() && here(t)) {
         Some(i) => i,
+        None if archiving && agent_block(host, session, window).is_ok() => {
+            match tasks.iter().rposition(here) {
+                Some(i) => {
+                    let task = tasks[i].as_object_mut().ok_or("bad task record")?;
+                    task.insert("ended_at".into(), serde_json::Value::Null);
+                    task.insert("ended_reason".into(), serde_json::Value::Null);
+                    i
+                }
+                None => {
+                    tasks.push(adopt(host, session, window)?);
+                    tasks.len() - 1
+                }
+            }
+            // Saved now, so a refusal (uncommitted changes) still leaves
+            // the picker a task to show them on.
+        }
         None if action != "review" => tasks.iter().rposition(here).ok_or("no task for that tab")?,
         None => return Err("no open task for that tab".into()),
     };
+    if archiving && tasks[i]["ended_at"].is_null() {
+        save_tasks(&tasks)?;
+    }
     let ended = !tasks[i]["ended_at"].is_null();
     let field = |k: &str| tasks[i][k].as_str().unwrap_or("").to_string();
     let (label, worktree, repo, branch) =
@@ -261,6 +352,17 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 "-c", &worktree, "--label", "review", "--", "sh", "-c", script,
             ])?;
             Ok(format!("reviewing {label}"))
+        }
+        // A primary checkout is never removed: close the tab and end the task.
+        "archive" | "force-archive" if !worktree.is_empty() && worktree.trim_end_matches('/') == repo.trim_end_matches('/') => {
+            if !ended {
+                let _ = rex(host, &["window", "close", "-s", session, window]);
+                tasks[i]["ended_at"] = now().into();
+            }
+            kill_if_empty(host, session);
+            tasks[i]["ended_reason"] = "archived".into();
+            save_tasks(&tasks)?;
+            Ok(format!("archived {label}; kept the primary checkout {worktree}"))
         }
         "archive" | "force-archive" => {
             let force = action == "force-archive";
@@ -309,7 +411,10 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             let mut failed = false;
             if exists {
                 let remove = format!(
-                    "wt -C {} remove --foreground {}{} 2>&1",
+                    // Worktrunk deletes the files in the background (its log
+                    // is under .git/wt/logs), so a big worktree doesn't hold
+                    // up the picker; it still refuses an unsafe removal here.
+                    "wt -C {} remove {}{} 2>&1",
                     sh_quote(&repo),
                     if force { "--force " } else { "" },
                     sh_quote(&branch)
@@ -320,16 +425,19 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 if !out.status.success() {
                     failed = true;
                     note = format!("; wt remove failed: {last}");
-                } else if !last.is_empty() {
-                    note = format!("; {last}");
+                } else {
+                    // Worktrunk's own lines, not the indented files it lists.
+                    let summary: Vec<&str> = text
+                        .lines()
+                        .filter(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))
+                        .map(|l| l.trim().trim_end_matches(':'))
+                        .collect();
+                    if !summary.is_empty() {
+                        note = format!("; {}", summary.join(" · "));
+                    }
                 }
             }
-            // A session spawn created for the project goes when its last tab does.
-            if let Ok(list) = rex_json(host, &["window", "ls", "-s", session, "--json"])
-                && list["windows"].as_array().is_some_and(|w| w.is_empty())
-            {
-                let _ = rex(host, &["kill", session]);
-            }
+            kill_if_empty(host, session);
             if !ended {
                 tasks[i]["ended_at"] = now().into();
             }
@@ -355,6 +463,35 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn checkout_script_finds_the_checkout_repo_and_branch() {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("switchyard-adopt-{}-{unique}", std::process::id()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            assert!(Command::new("git").arg("-C").arg(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+                .args(args).output().unwrap().status.success(), "git {args:?}");
+        };
+        git(&repo, &["init", "--quiet", "-b", "main"]);
+        git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
+        let wt = root.join("wt");
+        git(&repo, &["worktree", "add", "--quiet", "-b", "feature/x", wt.to_str().unwrap(), "main"]);
+        std::fs::create_dir_all(wt.join("sub")).unwrap();
+        let run = |dir: &std::path::Path| {
+            let out = Command::new("bash").args(["-c", &checkout_script(dir.to_str().unwrap())]).output().unwrap();
+            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+        };
+        let (r, w) = (repo.to_str().unwrap(), wt.to_str().unwrap());
+        // From a subfolder of a linked worktree.
+        assert_eq!(run(&wt.join("sub")), (Some(0), format!("{w}\t{r}\tfeature/x\n")));
+        // The primary checkout is its own repo, which the archive keeps.
+        assert_eq!(run(&repo), (Some(0), format!("{r}\t{r}\tmain\n")));
+        assert_eq!(run(&root).0, Some(3));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn archive_check_reports_status_and_merge_state() {

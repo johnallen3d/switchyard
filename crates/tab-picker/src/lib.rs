@@ -34,8 +34,10 @@
 //!
 //! ctrl-o cycles a profile filter (all, personal, work): the registry's
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
-//! archive of the highlighted task (open, or ended with its worktree left);
-//! with uncommitted changes the config's "ask" types another ctrl-x, which
+//! archive of the highlighted task (open, or ended with its worktree left)
+//! or of any agent tab, even one with no open task (an agent at its prompt
+//! included); elsewhere it says in the footer why it can't. With
+//! uncommitted changes the config's "ask" types another ctrl-x, which
 //! moves on to "are you sure". Any other key disarms.
 //!
 //! ctrl-t pins or unpins the highlighted open task (`pinned` in the
@@ -389,6 +391,9 @@ struct App {
     note: Option<(String, bool)>,
     /// A standalone picker's data, as the float's pastes would carry it.
     feed: Option<standalone::Feed>,
+    /// A standalone archive running on its own thread, so the picker stays
+    /// live meanwhile; its outcome becomes the note.
+    archiving: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     usage: usage::Usage,
     /// The last pane capture (see preview.rs), shown while its row is
     /// highlighted.
@@ -435,6 +440,7 @@ impl App {
             standalone: false,
             note: None,
             feed: None,
+            archiving: None,
             usage: usage::Usage::default(),
             preview: None,
             asked: None,
@@ -630,10 +636,20 @@ impl App {
         }
     }
 
-    /// Whether ctrl-x can arm an archive for the highlighted row: an open
+    /// Whether ctrl-x can arm an archive for the highlighted row: any agent
+    /// tab, whether or not it has an open task (the archive adopts one
+    /// without, or reopens an ended one whose tab is still open), an open
     /// task, or an ended one that left its worktree behind.
     fn armable(&self) -> bool {
-        self.selected_task().is_some_and(|t| t.ended.is_none() || t.left)
+        self.selected_agent_tab().is_some() || self.selected_task().is_some_and(|t| t.ended.is_none() || t.left)
+    }
+
+    /// The highlighted row's tab, when it is an agent with no open task.
+    fn selected_agent_tab(&self) -> Option<usize> {
+        match self.selected_item()? {
+            item @ Item::Tab(t) if self.tabs[t].task.is_none() && self.is_agent(item) => Some(t),
+            _ => None,
+        }
     }
 
     /// Whether `armed` still applies to the highlighted row.
@@ -1341,6 +1357,14 @@ impl App {
         // to "are you sure". Enter and Escape never get here.
         if matches!(k.code, KeyCode::Char('x') if ctrl) {
             let dirty = self.selected_task().is_some_and(|t| t.dirty > 0);
+            if !self.armable() {
+                let why = if self.selected_task().is_some() {
+                    "its worktree is already gone: nothing to archive"
+                } else {
+                    "no agent here: ctrl-x archives agent tabs"
+                };
+                self.note = Some((why.into(), true));
+            }
             self.armed = match self.armed {
                 _ if !self.armable() => Armed::No,
                 Armed::Archive | Armed::Force if dirty => Armed::Force,
@@ -2076,6 +2100,7 @@ impl App {
                     State::Done => ("✓", p.pine),
                     State::Error => ("✗", p.love),
                     State::Idle => ("·", p.muted),
+                    State::Ready => ("·", p.muted),
                 };
                 let here = self.is_current(*t);
                 let here_label = "current";
@@ -2337,6 +2362,17 @@ impl App {
             f.render_widget(Line::from(spans), area);
             return;
         }
+        if let (true, Some(t)) = (self.armed.archives(), self.selected_agent_tab()) {
+            let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("⏎", key),
+                Span::styled(format!(" archive {}", self.tabs[t].name), Style::new().fg(p.love)),
+                Span::styled(": closes tab, removes its worktree · other keys cancel", Style::new().fg(p.muted)),
+            ]);
+            f.render_widget(line, area);
+            return;
+        }
         if self.view == View::Usage {
             let keys = [("↑↓", "scroll", p.subtle), ("⌃H/L", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
             let (spans, _) = draw::hints(p, &keys, area.width as usize);
@@ -2350,6 +2386,7 @@ impl App {
             Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
             Some(t) if t.safe() => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive (merged)")],
             Some(_) => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive")],
+            None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
             None => vec![("⏎", "go")],
         };
         // ⌃B opens the task's only work item, or a chooser over several.
@@ -2430,6 +2467,23 @@ impl App {
         if want != self.asked {
             feed.preview(want.clone());
             self.asked = want;
+        }
+    }
+
+    /// A finished archive's outcome, as the note; then fetch again.
+    fn take_archived(&mut self) {
+        let Some(rx) = &self.archiving else { return };
+        match rx.try_recv() {
+            Ok(r) => {
+                self.archiving = None;
+                self.note = Some(match r {
+                    Ok(msg) => (msg, false),
+                    Err(e) => (e, true),
+                });
+                self.refetch();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => self.archiving = None,
         }
     }
 
@@ -2568,11 +2622,17 @@ impl App {
             }
             "archive" | "force-archive" => {
                 self.armed = Armed::No;
-                self.busy(term, format!("Archiving {label} on {}…", pick.host));
-                match standalone::archive(&pick.action, &pick) {
-                    Ok(msg) => (msg, false),
-                    Err(e) => (e, true),
+                if self.archiving.is_some() {
+                    self.note = Some(("one archive at a time: wait for this one to finish".into(), true));
+                    return true;
                 }
+                let note = (format!("Archiving {label} on {}…", pick.host), false);
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(standalone::archive(&pick.action, &pick));
+                });
+                self.archiving = Some(rx);
+                note
             }
             "resume" => {
                 self.busy(term, format!("Resuming {label}…"));
@@ -3033,6 +3093,33 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_x_arms_on_any_agent_tab_and_says_why_elsewhere() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        app.follow = false;
+        // An agent with no task (started by hand, or its task ended by
+        // mistake) and a plain shell.
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tagent\tdone\tclaude\t~/r\nT\tshell\t\tzsh\t~\nT\tready\tidle\tpi\t~/r\n");
+        app.paste("rex-data:tasks\n[]");
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let at = |app: &App, t: usize| app.rows.iter().position(|&i| i == Item::Tab(t)).unwrap();
+        app.selected = Some(at(&app, 0));
+        app.key(ctrl('x'));
+        assert_eq!(app.pick(), "archive:-/s/agent");
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("archive claude") && text.contains("removes its worktree"), "{text}");
+        app.selected = Some(at(&app, 1));
+        app.key(ctrl('x'));
+        assert_eq!(app.pick(), "go:-/s/shell");
+        assert!(app.note.as_ref().is_some_and(|(m, failed)| *failed && m.contains("no agent")));
+        // An agent waiting at its prompt is one too.
+        app.selected = Some(at(&app, 2));
+        app.key(ctrl('x'));
+        assert_eq!(app.pick(), "archive:-/s/ready");
+    }
+
+    #[test]
     fn archive_search_finds_tasks_by_work_item_and_merged_work_is_safe() {
         let mut app = App::new((String::new(), String::new()), View::Archive);
         app.follow = false;
@@ -3255,6 +3342,7 @@ fn ending(t: &Task) -> &'static str {
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.take_fetched();
+        app.take_archived();
         app.ask_preview();
         let before = app.now;
         app.now = now();
@@ -3264,7 +3352,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         }
         term.draw(|f| app.draw(f))?;
         app.report()?;
-        let animate = matches!(app.load, Load::Waiting)
+        let animate = app.archiving.is_some()
+            || matches!(app.load, Load::Waiting)
             || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
             || app.tabs.iter().any(|t| t.state == State::Working);
         let wait = if animate { Duration::from_millis(90) } else { Duration::from_millis(250) };
@@ -3337,6 +3426,12 @@ fn picker(mut app: App) -> io::Result<()> {
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let result = run(&mut term, &mut app);
+    // Never leave an archive half done: wait for one still running.
+    if let Some(rx) = app.archiving.take() {
+        app.note = Some(("Finishing the archive…".into(), false));
+        let _ = term.draw(|f| app.draw(f));
+        let _ = rx.recv();
+    }
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste);
     ratatui::restore();
     // A message typed but never sent.

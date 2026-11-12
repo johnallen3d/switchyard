@@ -230,8 +230,11 @@ pub(crate) const MERGED_SH: &str = r#"
 /// can't be read. None overall when the host can't be reached. One script
 /// per host on stdin: `bash -s` over SSH by Rex label (as `probe` reaches
 /// hosts; their login shell is Fish), or locally for the config host.
-fn host_worktrees(host: &str, pairs: &[(String, String)]) -> Option<Vec<Option<Worktree>>> {
-    // One line per pair:
+fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<Option<Worktree>>> {
+    // Pairs are REPO, BRANCH and the task's recorded worktree, which still
+    // counts while detached from BRANCH, as a rebase leaves it until it
+    // finishes: a check in that moment would otherwise end the task as
+    // "worktree removed". One line per pair:
     // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>FILE...,
     // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
     // sets it; LINKS are the branch's `switchyard-link` git config values,
@@ -250,7 +253,7 @@ fn host_worktrees(host: &str, pairs: &[(String, String)]) -> Option<Vec<Option<W
     script.push_str(FIZZY_BOARD_SH);
     script.push_str(
         r#"repos=() lists=() origins=() bases=() configs=() boards=()
-while IFS=$'\t' read -r repo branch; do
+while IFS=$'\t' read -r repo branch want; do
   list= n=
   for i in "${!repos[@]}"; do
     if [ "${repos[$i]}" = "$repo" ]; then list=${lists[$i]} n=$i; break; fi
@@ -274,6 +277,7 @@ while IFS=$'\t' read -r repo branch; do
       "worktree "*) wt=${line#worktree } sha= ;;
       "HEAD "*) sha=${line#HEAD } ;;
       "branch refs/heads/$branch") path=$wt wt_head=$sha; break ;;
+      detached) if [ -n "$want" ] && [ "$wt" -ef "$want" ]; then path=$wt wt_head=$sha; fi ;;
     esac
   done <<<"$list"
   if [ "$path" = "-" ]; then printf -- '-\t%s\n' "${boards[$n]}"; continue; fi
@@ -309,8 +313,8 @@ while IFS=$'\t' read -r repo branch; do
 done <<'RSP_PAIRS'
 "#,
     );
-    for (repo, branch) in pairs {
-        script.push_str(&format!("{repo}\t{branch}\n"));
+    for (repo, branch, worktree) in pairs {
+        script.push_str(&format!("{repo}\t{branch}\t{worktree}\n"));
     }
     script.push_str("RSP_PAIRS\n");
     let out = host_bash(host, &script).filter(|o| o.status.success())?;
@@ -415,10 +419,10 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let checks: Vec<_> = hosts
         .into_iter()
         .map(|host| {
-            let pairs: Vec<(String, String)> = tasks
+            let pairs: Vec<(String, String, String)> = tasks
                 .iter()
                 .filter(|t| checked(t) && field(t, "host") == host)
-                .map(|t| (field(t, "repo"), field(t, "branch")))
+                .map(|t| (field(t, "repo"), field(t, "branch"), field(t, "worktree")))
                 .collect();
             // The tab listing (Rex) and the worktree check (SSH) don't depend
             // on each other, so a host costs the slower of the two.
@@ -689,7 +693,7 @@ mod tests {
         git(&repo, &["init", "--quiet", "-b", "main"]);
         git(&repo, &["remote", "add", "origin", "git@github.com:o/r.git"]);
         git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
-        for b in ["fresh", "done", "open", "pulled"] {
+        for b in ["fresh", "done", "open", "pulled", "rebasing"] {
             git(&repo, &["worktree", "add", "--quiet", "-b", b, root.join(b).to_str().unwrap(), "main"]);
         }
         git(&root.join("done"), &["commit", "--quiet", "--allow-empty", "-m", "done"]);
@@ -703,11 +707,17 @@ mod tests {
         git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         git(&repo, &["reset", "--quiet", "--hard", "HEAD~1"]);
         git(&root.join("pulled"), &["merge", "--quiet", "--ff-only", "origin/main"]);
+        // Mid-rebase, a worktree is detached from its branch.
+        git(&root.join("rebasing"), &["checkout", "--quiet", "--detach"]);
         std::fs::write(root.join("open/new.txt"), "x").unwrap();
         std::fs::write(repo.join(".fizzy.yaml"), "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n").unwrap();
         let r = repo.to_str().unwrap().to_string();
-        let pairs: Vec<(String, String)> =
-            ["fresh", "done", "open", "gone", "pulled"].iter().map(|b| (r.clone(), b.to_string())).collect();
+        let mut pairs: Vec<(String, String, String)> =
+            ["fresh", "done", "open", "gone", "pulled"].iter().map(|b| (r.clone(), b.to_string(), String::new())).collect();
+        // Detached: found at the task's recorded worktree, and not without it.
+        let rebasing = root.join("rebasing").to_str().unwrap().to_string();
+        pairs.push((r.clone(), "rebasing".into(), rebasing.clone()));
+        pairs.push((r.clone(), "rebasing".into(), String::new()));
         let got = host_worktrees(&local_label(), &pairs).unwrap();
         let w: Vec<Worktree> = got.into_iter().map(Option::unwrap).collect();
         assert_eq!(w[0].merged, "new");
@@ -720,9 +730,11 @@ mod tests {
         assert!(w[3].path.is_empty());
         assert_eq!(w[4].merged, "new");
         assert!(w[4].fixes.is_empty(), "{:?}", w[4].fixes);
+        assert!(std::path::Path::new(&w[5].path) == std::fs::canonicalize(&rebasing).unwrap() || w[5].path == rebasing, "{}", w[5].path);
+        assert!(w[6].path.is_empty());
         // The repo's `.fizzy.yaml` board, with or without a worktree.
         assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
-        assert!(w[..3].iter().chain(&w[4..]).all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
+        assert!(w[..3].iter().chain(&w[4..6]).all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

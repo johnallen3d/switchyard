@@ -9,7 +9,10 @@ use switchyard_ui::draw::str_width;
 /// A tab's most urgent agent status; Idle means it reports none.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum State {
+    /// No agent.
     Idle,
+    /// An agent at its prompt.
+    Ready,
     Done,
     Working,
     Error,
@@ -23,6 +26,7 @@ impl State {
             "working" => State::Working,
             "error" => State::Error,
             "blocked" => State::Blocked,
+            "idle" => State::Ready,
             _ => State::Idle,
         }
     }
@@ -30,6 +34,7 @@ impl State {
     pub fn name(self) -> &'static str {
         match self {
             State::Idle => "",
+            State::Ready => "idle",
             State::Done => "done",
             State::Working => "working",
             State::Error => "error",
