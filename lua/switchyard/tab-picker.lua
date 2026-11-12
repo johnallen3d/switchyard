@@ -17,6 +17,10 @@
 --   worktree over SSH and ends the gone ones (`tasks`); a registry failure
 --   is `tasks-error`, and the float shows tabs only.
 --
+-- While the float is open, it also fetches the transcript of the agent the
+-- title names, for the float's preview (`switchyard transcript`; see the
+-- fill script's preview_step).
+--
 -- The picker records its pick in the terminal title as
 -- rex-tab-picker:ACTION:TARGET/SESSION/WINDOW, which the tab_picker mode
 -- reads. The mode binds only Enter and Escape, so Rex's key-mode popup stays
@@ -135,21 +139,77 @@ local function fan_out()
   end
 end
 
+-- The preview (see ../../crates/tab-picker/src/preview.rs): the transcript
+-- of the agent in the tab the float's title names, from `switchyard
+-- transcript TARGET SESSION WINDOW`, once the highlight has rested a tick,
+-- then every PREVIEW_REFRESH seconds while it stays (PREVIEW_BACKOFF after
+-- a failure, such as a tab with no agent), one at a time. Each that
+-- differs from the last is pasted as `preview`: TARGET/SESSION/WINDOW, a
+-- newline, then the JSON.
+local PREVIEW_REFRESH, PREVIEW_BACKOFF = 2, 10
+local preview = { want = nil, seen = nil, job = nil, key = nil, at = nil, failed = false, sent = nil }
+
+local function title_pane()
+  local t = float_server().block.call(T, "title", float)
+  local title = (t and t.title) or ""
+  -- The link chooser and the snooze prompt stay over the same row.
+  if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze") then return preview.want end
+  local action, target, session, window = title:match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)")
+  if action == nil or action == "resume" then return nil end
+  window = window:gsub("%s+$", "")
+  return { key = target .. "/" .. session .. "/" .. window, target = target, session = session, window = window }
+end
+
+local function preview_step(now)
+  if preview.job ~= nil and not preview.job:running() then
+    local r = preview.job:wait()
+    local ok, v = pcall(rex.json.decode, r and r.ok and r.stdout or "")
+    local body = r and r.ok and r.stdout
+      or rex.json.encode({ error = ((r and r.stderr or "can't run switchyard transcript"):gsub("%s+$", "")) })
+    preview.failed = not ok or type(v) ~= "table" or v.error ~= nil
+    preview.job, preview.at = nil, now
+    local paste = preview.key .. "\n" .. body
+    if paste ~= preview.sent then
+      deliver("preview", paste)
+      preview.sent = paste
+    end
+  end
+  local want = title_pane()
+  preview.want = want
+  local key = want and want.key
+  local settled = key ~= nil and key == preview.seen
+  preview.seen = key
+  if preview.job ~= nil or not settled then return end
+  local wait = preview.failed and PREVIEW_BACKOFF or PREVIEW_REFRESH
+  if key == preview.key and preview.at ~= nil and now - preview.at < wait then return end
+  preview.key, preview.at, preview.failed = key, now, false
+  preview.job = rex.exec.start({ "switchyard", "transcript", want.target, want.session, want.window })
+  if preview.job == nil then preview.failed = true end
+end
+
+local TICK, USAGE_REFRESH = 0.2, 60
+
 main(function()
   -- Accounting is independent of tab/task delivery, including the server
   -- fast path. Never delay opening the picker for a log scan or remote host.
   local usage_job = rex.exec.start({ "switchyard", "usage", "--json" })
+  local usage_at
   if not from_server() then fan_out() end
   while true do
-    local r = usage_job and usage_job:wait()
-    if r and r.ok then deliver("usage", r.stdout)
-    else deliver("usage-error", "Usage collector failed; install matching Switchyard on the config host") end
     -- Stop with the float rather than leaving a detached polling loop.
-    for _ = 1, 60 do
-      rex.sleep(1)
-      if float_server().block.call("com.superlogical.terminal", "input_mode", float) == nil then return end
+    if float_server().block.call(T, "input_mode", float) == nil then return end
+    local now = os.time()
+    if usage_job == nil and usage_at ~= nil and now - usage_at >= USAGE_REFRESH then
+      usage_job, usage_at = rex.exec.start({ "switchyard", "usage", "--json" }), nil
     end
-    usage_job = rex.exec.start({ "switchyard", "usage", "--json" })
+    if usage_at == nil and (usage_job == nil or not usage_job:running()) then
+      local r = usage_job and usage_job:wait()
+      if r and r.ok then deliver("usage", r.stdout)
+      else deliver("usage-error", "Usage collector failed; install matching Switchyard on the config host") end
+      usage_job, usage_at = nil, now
+    end
+    preview_step(now)
+    rex.sleep(TICK)
   end
 end)
 ]==]

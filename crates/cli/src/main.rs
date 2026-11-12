@@ -5,8 +5,9 @@
 //! new-session picker, switchyard-spawn), `link` and `unlink` (link.rs),
 //! `usage` and `server` (switchyard-server).
 //!
-//! `float` and `task` (task.rs) are plumbing for the Rex config's Lua, core,
-//! and other hosts, so they stay out of the top-level help.
+//! `float`, `task` (task.rs) and `transcript` are plumbing for the Rex
+//! config's Lua, core, and other hosts, so they stay out of the top-level
+//! help.
 
 mod link;
 mod task;
@@ -43,7 +44,9 @@ const FLOAT_USAGE: &str = "usage: switchyard float tabs [--current SESSION/WINDO
 The pickers in the Rex config's floats. tabs opens at once and takes its
 data from bracketed pastes of rex-data:KIND, a newline and the body: KIND
 rows (or error and a message), live and tasks (switchyard task list JSON),
-tasks-error, usage (accounting JSON), or usage-error. new gets the config
+tasks-error, usage (accounting JSON), usage-error, or preview
+(TARGET/SESSION/WINDOW, a newline, then `switchyard transcript` JSON for
+that tab). new gets the config
 host's label and zoxide folders, one per line. Both report the highlighted
 row in the terminal title for the config's modes to act on.";
 
@@ -146,6 +149,17 @@ fn main() -> ExitCode {
         ["float", "new", rest @ ..] => float_new(rest),
         ["float", ..] => usage_error(FLOAT_USAGE),
         ["task", rest @ ..] => task::main(rest),
+        // The highlighted agent's transcript for the picker's preview: by
+        // tab on the config host, or on the agent's host by what it found.
+        ["transcript", "--local", profile, harness, dir, agent_session, pid] => {
+            let pid = pid.parse().unwrap_or(0);
+            println!("{}", switchyard_core::transcript::local(profile, harness, dir, agent_session, pid));
+            ExitCode::SUCCESS
+        }
+        ["transcript", target, session, window] => {
+            println!("{}", switchyard_core::transcript::fetch(target, session, window));
+            ExitCode::SUCCESS
+        }
         _ => usage_error(USAGE),
     }
 }

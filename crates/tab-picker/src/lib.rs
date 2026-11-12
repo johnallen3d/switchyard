@@ -12,6 +12,8 @@
 //! - `tasks`: `switchyard task list`, the same after the worktree check.
 //! - `tasks-error`: the registry couldn't be read. The tabs stay, and the
 //!   header says "tabs only".
+//! - `preview`: a capture of the highlighted agent's pane (see preview.rs),
+//!   which the config takes from the title's pick.
 //!
 //! The highlighted row and an armed archive survive each delivery. Tasks
 //! link to tabs by (session_id, window_id). Views, cycled with Tab:
@@ -21,7 +23,9 @@
 //!   with live agent status or an open task) go under status headings in
 //!   urgency order, then its other tabs. Pinned tasks lead the list,
 //!   Snoozed ones trail it, and open tasks whose session isn't listed come
-//!   just before Snoozed, under No tab.
+//!   just before Snoozed, under No tab. With room, a preview under the list
+//!   shows the highlighted agent's pane, live, below its whole status
+//!   message.
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): ended tasks grouped by project (those with a
 //!   worktree left behind first), under headings for how they ended
@@ -67,6 +71,7 @@
 //! action (see standalone.rs).
 
 mod model;
+mod preview;
 mod snooze;
 mod standalone;
 mod usage;
@@ -86,7 +91,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
@@ -354,6 +359,16 @@ struct App {
     /// A standalone picker's data, as the float's pastes would carry it.
     feed: Option<standalone::Feed>,
     usage: usage::Usage,
+    /// The last pane capture (see preview.rs), shown while its row is
+    /// highlighted.
+    preview: Option<preview::Preview>,
+    /// The pane a standalone picker last asked its feed to capture.
+    asked: Option<preview::Pane>,
+    /// The preview fills the picker (ctrl-e), for reading.
+    expanded: bool,
+    /// How far the preview is scrolled back from its bottom, in lines, and
+    /// the pane that is for.
+    scroll: (usize, Option<preview::Pane>),
 }
 
 impl App {
@@ -389,6 +404,10 @@ impl App {
             note: None,
             feed: None,
             usage: usage::Usage::default(),
+            preview: None,
+            asked: None,
+            scroll: (0, None),
+            expanded: false,
         }
     }
 
@@ -424,6 +443,7 @@ impl App {
             "tasks-error" => self.tasks_failed(),
             "usage" => self.usage.paste(body),
             "usage-error" => self.usage.error = Some(body.trim().to_string()),
+            "preview" => self.preview = preview::parse(body).or(self.preview.take()),
             _ => {}
         }
     }
@@ -584,6 +604,21 @@ impl App {
     fn selected_link(&self) -> Option<Link> {
         let mut links = chooser_links(&self.selected_task()?.links);
         if links.len() == 1 { links.pop() } else { None }
+    }
+
+    /// The tab whose agent to preview: the highlighted agent's, in All.
+    fn preview_want(&self) -> Option<preview::Pane> {
+        if self.view != View::All {
+            return None;
+        }
+        let item = self.selected_item()?;
+        let Item::Tab(t) = item else { return None };
+        if !self.is_agent(item) {
+            return None;
+        }
+        let tab = &self.tabs[t];
+        let s = &self.sessions[tab.session];
+        Some(preview::Pane { target: s.target.clone(), session: s.id.clone(), window: tab.window_id.clone() })
     }
 
     fn is_current(&self, t: usize) -> bool {
@@ -1174,6 +1209,7 @@ impl App {
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let page = (self.list_area.height as isize - 2).max(1);
         // ctrl-x arms an archive; on a worktree with uncommitted changes, the
         // next ctrl-x (typed by the config when Enter answers `ask`) moves on
@@ -1226,6 +1262,7 @@ impl App {
             KeyCode::Char('r') if ctrl => self.arm(Armed::Review),
             KeyCode::Char('t') if ctrl => self.arm(Armed::Pin),
             KeyCode::Char('s') if ctrl => self.open_snooze(),
+            KeyCode::Char('e') if ctrl && self.view == View::All => self.expanded = !self.expanded,
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             KeyCode::Char('u') if ctrl => {
@@ -1257,6 +1294,14 @@ impl App {
                 self.moved();
                 self.refilter();
             }
+            // Shift scrolls the preview back through the transcript, as the
+            // arrows do with it expanded.
+            KeyCode::Up if shift || self.expanded => self.scroll_preview(3),
+            KeyCode::Down if shift || self.expanded => self.scroll_preview(-3),
+            KeyCode::PageUp if shift || self.expanded => self.scroll_preview(page),
+            KeyCode::PageDown if shift || self.expanded => self.scroll_preview(-page),
+            KeyCode::Home if self.expanded => self.scroll_preview(isize::MAX),
+            KeyCode::End if self.expanded => self.scroll.0 = 0,
             KeyCode::Up if alt => self.jump_group(false),
             KeyCode::Down if alt => self.jump_group(true),
             KeyCode::Up => self.step(-1),
@@ -1268,6 +1313,12 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// Scroll the preview back (positive) or forward; draw_preview keeps it
+    /// within the capture.
+    fn scroll_preview(&mut self, delta: isize) {
+        self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
     }
 
     fn arm(&mut self, armed: Armed) {
@@ -1302,12 +1353,91 @@ impl App {
             self.list_area = body;
             let profile = match self.profile { Profile::All => None, p => Some(p.name()) };
             self.usage.draw(f, body, &self.p, self.now, &self.query, profile);
+        } else if let Some((list, pane)) = self.preview_split(body) {
+            if self.expanded {
+                // Page keys page through the preview.
+                self.list_area = pane;
+            } else {
+                self.draw_list(f, list);
+            }
+            self.draw_preview(f, pane);
         } else {
             self.draw_list(f, body);
         }
         self.draw_chooser(f, body);
         self.draw_snooze(f, body);
         self.draw_footer(f, footer);
+    }
+
+    /// All's list and the preview under it, when there is room for both:
+    /// a third of the height (8 to 14 lines) for the preview, the rest
+    /// for the list; expanded (ctrl-e), the preview alone. The
+    /// preview stays while John moves, whatever the row, so the list
+    /// doesn't change height under him.
+    fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
+        if self.view != View::All {
+            return None;
+        }
+        if self.expanded {
+            return Some((Rect { height: 0, ..body }, body));
+        }
+        if body.height < 20 {
+            return None;
+        }
+        let pane = (body.height / 3).clamp(8, 14);
+        let [list, _, preview] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(pane)]).areas(body);
+        Some((list, preview))
+    }
+
+    /// The highlighted agent's transcript (see preview.rs) under a rule
+    /// naming it, scrolled to its end until John scrolls back.
+    fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
+        let p = self.p;
+        let p = &p;
+        let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let want = self.preview_want();
+        let flat = want.as_ref().and(self.selected_item()).map(|i| self.flat(i));
+        let mut spans = vec![Span::styled("── ", Style::new().fg(p.overlay))];
+        match &flat {
+            Some(t) => {
+                if !t.project.is_empty() && t.project != t.name {
+                    spans.push(Span::styled(format!("{} ", t.project), Style::new().fg(p.subtle)));
+                }
+                spans.push(Span::styled(format!("{} ", t.name), Style::new().fg(p.text).add_modifier(Modifier::BOLD)));
+            }
+            None => spans.push(Span::styled("Preview ", Style::new().fg(p.muted))),
+        }
+        let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        spans.push(Span::styled("─".repeat((head.width as usize).saturating_sub(used)), Style::new().fg(p.overlay)));
+        f.render_widget(Line::from(spans), head);
+        let muted = |text: &str| vec![Line::styled(text.to_string(), Style::new().fg(p.muted))];
+        let Some(pane) = want else {
+            return draw::centered(f, body, muted("Highlight an agent to see what it has been saying"));
+        };
+        let screen = body;
+        // A new agent starts at the end of its transcript.
+        if self.scroll.1.as_ref() != Some(&pane) {
+            self.scroll = (0, Some(pane.clone()));
+        }
+        // Leave a column for the scrollbar.
+        let text = Rect { width: screen.width.saturating_sub(2), ..screen };
+        let Some(pv) = self.preview.as_mut().filter(|pv| pv.pane == pane) else {
+            return draw::centered(f, screen, muted("Loading the transcript…"));
+        };
+        match pv.lines(text.width, p) {
+            Err(e) => draw::centered(f, screen, muted(e)),
+            Ok(lines) => {
+                let h = text.height as usize;
+                let top = lines.len().saturating_sub(h);
+                self.scroll.0 = self.scroll.0.min(top);
+                let skip = top - self.scroll.0;
+                f.render_widget(Paragraph::new(lines[skip..lines.len().min(skip + h)].to_vec()), text);
+                if lines.len() > h {
+                    draw::scrollbar(f, p, screen, skip, lines.len());
+                }
+            }
+        }
     }
 
     /// The ctrl-s prompt, when open: a small box over the list with the
@@ -2058,7 +2188,16 @@ impl App {
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
             View::Usage => {}
-            View::All => keys.push(("⌥↑↓", "group")),
+            View::All => {
+                keys.push(("⌥↑↓", "group"));
+                if self.expanded {
+                    keys.push(("⌃E", "list"));
+                    keys.push(("↑↓", "scroll"));
+                } else if self.preview_want().is_some() {
+                    keys.push(("⌃E", "expand"));
+                    keys.push(("⇧↑↓", "scroll"));
+                }
+            }
             View::Archive => {
                 keys.push(("⌥↑↓", "group"));
                 keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" }));
@@ -2097,6 +2236,16 @@ impl App {
         }
         if let Some(feed) = &self.feed {
             feed.poke();
+        }
+    }
+
+    /// Tell a standalone picker's feed which pane to capture, when it changes.
+    fn ask_preview(&mut self) {
+        let Some(feed) = &self.feed else { return };
+        let want = self.preview_want();
+        if want != self.asked {
+            feed.preview(want.clone());
+            self.asked = want;
         }
     }
 
@@ -2841,6 +2990,7 @@ fn ending(t: &Task) -> &'static str {
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.take_fetched();
+        app.ask_preview();
         let before = app.now;
         app.now = now();
         // A snooze ran out: back to its group.

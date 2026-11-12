@@ -30,7 +30,7 @@ pub fn new_session_id() -> String {
 /// The harness's session directory for `worktree` under `profile`, on this
 /// host: Claude's `$CLAUDE_CONFIG_DIR/projects/<path, non-alphanumerics as
 /// ->`, Pi's `$PI_CODING_AGENT_DIR/sessions/--<path, / as ->--`.
-fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathBuf {
+pub(crate) fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathBuf {
     let work = if profile == "work" { work_env().unwrap_or_default() } else { Vec::new() };
     let var = |k: &str| {
         work.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).or_else(|| std::env::var(k).ok())

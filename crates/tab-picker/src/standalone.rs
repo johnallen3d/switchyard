@@ -6,7 +6,8 @@
 //! else directly, every few seconds: the rows from one `rex do -e` on this
 //! host that runs host_rows.lua on every server (as the fill script does),
 //! and the tasks from the registry through switchyard-core (live status
-//! first, then the worktree check). It acts on Enter, ctrl-r, ctrl-l (open
+//! first, then the worktree check), and the highlighted agent's transcript
+//! for the preview (see preview.rs). It acts on Enter, ctrl-r, ctrl-l (open
 //! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
 //! "ask" confirm the way the config's
 //! tab_picker mode does, through core's actions and `rex do
@@ -24,6 +25,8 @@ use switchyard_core::rex::{local_label, log, select};
 use switchyard_core::tasks::{live_tasks, reconcile_tasks};
 use switchyard_core::{actions, server};
 use switchyard_ui::protocol::{DATA, unhex};
+
+use crate::preview;
 
 /// One server's rows: the script the float's tab-picker.lua reads.
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
@@ -85,6 +88,8 @@ const RETRY: Duration = Duration::from_secs(5);
 pub struct Feed {
     pub rx: Receiver<String>,
     poke: Sender<()>,
+    /// The tab whose transcript to fetch for the preview (see preview.rs).
+    preview: Sender<Option<preview::Pane>>,
 }
 
 impl Feed {
@@ -110,12 +115,20 @@ impl Feed {
                 thread::sleep(switchyard_core::usage::REFRESH);
             }
         });
+        let (preview, wants) = mpsc::channel();
+        let preview_tx = tx.clone();
+        thread::spawn(move || preview::follow(wants, preview_tx));
         thread::spawn(move || fetch_when_needed(tx, poked, on_server));
-        Feed { rx, poke }
+        Feed { rx, poke, preview }
     }
 
     pub fn poke(&self) {
         let _ = self.poke.send(());
+    }
+
+    /// Fetch this tab's transcript for the preview from now on (None: none).
+    pub fn preview(&self, want: Option<preview::Pane>) {
+        let _ = self.preview.send(want);
     }
 }
 
