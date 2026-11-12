@@ -21,14 +21,13 @@
 //! link to tabs by (session_id, window_id). Views, moved along with ctrl-h
 //! and ctrl-l:
 //!
-//! - All (default): tabs grouped by session, sessions with an agent that
-//!   wants John (waiting, failed, done) first. In a session, its agents (tabs
-//!   with live agent status or an open task) go under status headings in
-//!   urgency order, then its other tabs. Pinned tasks lead the list,
-//!   Snoozed ones trail it, and open tasks whose session isn't listed come
-//!   just before Snoozed, under No tab. With room, a preview under the list
-//!   shows the highlighted agent's pane, live, below its whole status
-//!   message.
+//! - All (default): one flat list across every session, each row naming
+//!   its project. Agents (tabs with live agent status or an open task, and
+//!   open tasks with no listed tab) go under status headings in urgency
+//!   order (Waiting, Failed, Done, Working, Idle, No status), then the other
+//!   tabs under Tabs. Pinned tasks lead the list and Snoozed ones trail it.
+//!   With room, a preview under the list shows the highlighted agent's pane,
+//!   live, below its whole status message.
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): ended tasks grouped by project (those with a
 //!   worktree left behind first), under headings for how they ended
@@ -106,6 +105,10 @@ const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
 const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
 const ICON_PROJECT: &str = "\u{f024b}"; // nf-md-folder
+
+/// All's sections, in order: Pinned, agents by status (the empty string is
+/// no known status), the tabs with no agent, then Snoozed.
+const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed"];
 
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
@@ -208,15 +211,14 @@ impl Armed {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
-    Session(usize),
     /// An Archive project heading, by the index of its first task.
     Project(usize),
-    /// A heading over the whole list: `pinned`, `snoozed`, or `notab` (open
-    /// tasks whose session isn't listed).
+    /// A heading over a section of All: `pinned`, `snoozed`, an agent
+    /// status (the empty string means no known status), or `tabs` for the
+    /// tabs with no agent.
     Status(&'static str),
-    /// A status heading within a session: an agent status (the empty
-    /// string means no known status), or `tabs` for its other tabs; within
-    /// an Archive project, how its tasks ended (see `ending`).
+    /// A heading within an Archive project: how its tasks ended (see
+    /// `ending`).
     Sub(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
@@ -229,18 +231,17 @@ enum Draw {
     Header,
     /// A row with a project column.
     Flat,
-    /// An agent under its session.
+    /// An ended task under its Archive project.
     Nested,
-    /// A tab under its session.
-    Tab,
 }
 
-/// Highlighted character positions: the name, and the folder (grouped
-/// rows) or project column (flat rows).
+/// Highlighted character positions: the name, the project column, and a
+/// tab's folder.
 #[derive(Default, Clone)]
 struct Hits {
     name: Vec<usize>,
     second: Vec<usize>,
+    dir: Vec<usize>,
 }
 
 /// Session and status rows are headers, not picks.
@@ -536,7 +537,7 @@ impl App {
     /// The (session_id, window_id) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
-            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
@@ -557,7 +558,7 @@ impl App {
     /// The task a row stands for: a tab's open task, or the row's own.
     fn task_of(&self, item: Item) -> Option<&Task> {
         match item {
-            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task.map(|k| &self.tasks[k]),
             Item::Task(k) => Some(&self.tasks[k]),
         }
@@ -570,7 +571,7 @@ impl App {
     /// The index of the task a row stands for.
     fn task_index(&self, item: Item) -> Option<usize> {
         match item {
-            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
             Item::Tab(t) => self.tabs[t].task,
             Item::Task(k) => Some(k),
         }
@@ -673,6 +674,11 @@ impl App {
         }
     }
 
+    /// Whether a row is a tab with no agent.
+    fn is_plain_tab(&self, item: Item) -> bool {
+        matches!(item, Item::Tab(_)) && !self.is_agent(item)
+    }
+
     /// Open tasks with no listed tab.
     fn orphans(&self) -> impl Iterator<Item = Item> + '_ {
         (0..self.tasks.len()).filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none()).map(Item::Task)
@@ -759,7 +765,7 @@ impl App {
                 }
             }
             // Headers aren't flat rows.
-            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => Flat {
+            Item::Project(_) | Item::Status(_) | Item::Sub(_) => Flat {
                 project: "",
                 name: "",
                 msg: "",
@@ -817,125 +823,66 @@ impl App {
         self.offset = 0;
     }
 
-    /// Score a row against the search, recording its highlights; None
-    /// when it doesn't match. `flat` is for rows drawn with a project
-    /// column, whose second highlight is the project rather than the folder.
-    fn score_row(&mut self, item: Item, pattern: &Pattern, flat: bool) -> Option<u32> {
+    /// Score an All row against the search, recording its highlights;
+    /// None when it doesn't match. Matches name, folder, project, session,
+    /// host and work items.
+    fn score_row(&mut self, item: Item, pattern: &Pattern) -> Option<u32> {
         let (name, project, host) = {
             let f = self.flat(item);
             (f.name.to_string(), f.project.to_string(), f.host.to_string())
         };
-        let (dir, label) = match item {
-            Item::Tab(t) => (self.tabs[t].dir.clone(), self.sessions[self.tabs[t].session].label.clone()),
-            _ => (String::new(), String::new()),
+        let dir = match item {
+            Item::Tab(t) => self.tabs[t].dir.clone(),
+            _ => String::new(),
         };
+        let label = self.session_of(item).map(|s| self.sessions[s].label.clone()).unwrap_or_default();
         let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
         let (score, f) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &project, &label, &host, &links])?;
-        let second = if flat { f[2].clone() } else { f[1].clone() };
-        self.hits.insert(item, Hits { name: f[0].clone(), second });
+        self.hits.insert(item, Hits { name: f[0].clone(), second: f[2].clone(), dir: f[1].clone() });
         Some(score)
     }
 
-    /// All: Pinned, then each session (most urgent first) with its agents
-    /// under status headings and its other tabs after them, then open tasks
-    /// whose session isn't listed, then Snoozed. A session with no agents
-    /// shows its tabs without headings. Matches name, folder, project,
-    /// session, host and work items. Returns the best match.
+    /// The All section a row goes in (see `SECTIONS`): an agent's group,
+    /// or `tabs` for a tab with no agent.
+    fn section(&self, item: Item) -> &'static str {
+        if self.is_agent(item) { self.agent_group(item) } else { "tabs" }
+    }
+
+    /// All: one flat list across every session, in sections under
+    /// headings (see `SECTIONS`). Agents go by urgency and age within
+    /// theirs (see `agent_key`); tabs with no agent keep Rex's order. Each
+    /// row carries its project, so no session headings are needed. Returns
+    /// the best match.
     fn filter_merged(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
-        let take = |best: &mut Option<(u32, Item)>, score: u32, item: Item| {
-            if best.is_none_or(|(b, _)| score > b) {
-                *best = Some((score, item));
-            }
-        };
-        let (mut pinned, mut snoozed, mut notab) = (Vec::new(), Vec::new(), Vec::new());
-        let mut by_session: Vec<Vec<Item>> = vec![Vec::new(); self.sessions.len()];
+        let mut sections: Vec<Vec<Item>> = vec![Vec::new(); SECTIONS.len()];
         let items: Vec<Item> = (0..self.tabs.len()).map(Item::Tab).chain(self.orphans()).collect();
         for item in items {
             if !self.profile_passes(self.flat(item).work) {
                 continue;
             }
-            match (self.agent_group(item), self.session_of(item)) {
-                ("pinned", _) => pinned.push(item),
-                ("snoozed", _) => snoozed.push(item),
-                (_, Some(s)) => by_session[s].push(item),
-                (_, None) => notab.push(item),
-            }
-        }
-        // A group over the whole list: its rows by urgency, with a heading.
-        let global = |app: &mut Self, best: &mut Option<(u32, Item)>, heading: &'static str, mut rows: Vec<Item>| {
-            rows.sort_by_cached_key(|&i| app.agent_key(i));
-            let mut shown = Vec::new();
-            for item in rows {
-                if filtering {
-                    let Some(score) = app.score_row(item, pattern, true) else { continue };
-                    take(best, score, item);
-                }
-                shown.push(item);
-            }
-            if !shown.is_empty() {
-                app.rows.push(Item::Status(heading));
-                app.rows.extend(shown);
-            }
-        };
-        global(self, &mut best, "pinned", pinned);
-        // Each session's rows, ranked by the most urgent agent that wants
-        // John (waiting, failed, done); the rest keep Rex's order.
-        let mut groups: Vec<(u8, usize, Vec<Item>)> = Vec::new();
-        for (s, shown) in by_session.into_iter().enumerate() {
-            let mut matched = Vec::new();
-            for &item in &shown {
-                if !filtering {
-                    matched.push(item);
-                    continue;
-                }
-                if let Some(score) = self.score_row(item, pattern, false) {
-                    take(&mut best, score, item);
-                    matched.push(item);
-                }
-            }
-            // A search that matches a session's name or host shows its rows.
             if filtering {
-                let (label, host) = (self.sessions[s].label.clone(), self.sessions[s].host.clone());
-                if let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&label, &host]) {
-                    self.hits.insert(Item::Session(s), Hits { name: f[0].clone(), second: Vec::new() });
-                    if matched.is_empty() {
-                        matched = shown.clone();
-                    }
-                    if let Some(&first) = matched.first() {
-                        take(&mut best, score, first);
-                    }
+                let Some(score) = self.score_row(item, pattern) else {
+                    continue;
+                };
+                if best.is_none_or(|(b, _)| score > b) {
+                    best = Some((score, item));
                 }
             }
-            if matched.is_empty() {
+            let section = self.section(item);
+            let at = SECTIONS.iter().position(|&s| s == section).unwrap_or(SECTIONS.len() - 1);
+            sections[at].push(item);
+        }
+        for (&heading, mut rows) in SECTIONS.iter().zip(sections) {
+            if rows.is_empty() {
                 continue;
             }
-            let (mut agents, plain): (Vec<Item>, Vec<Item>) = matched.into_iter().partition(|&i| self.is_agent(i));
-            agents.sort_by_cached_key(|&i| self.agent_key(i));
-            let rank = agents.iter().map(|&i| urgency(self.flat(i).state)).filter(|&u| u >= urgency("done")).max();
-            let mut rows = Vec::new();
-            let mut group = None;
-            for item in agents {
-                let state = self.agent_group(item);
-                if group != Some(state) {
-                    rows.push(Item::Sub(state));
-                    group = Some(state);
-                }
-                rows.push(item);
+            if heading != "tabs" {
+                rows.sort_by_cached_key(|&i| self.agent_key(i));
             }
-            if group.is_some() && !plain.is_empty() {
-                rows.push(Item::Sub("tabs"));
-            }
-            rows.extend(plain);
-            groups.push((rank.unwrap_or(0), s, rows));
-        }
-        groups.sort_by_key(|&(rank, s, _)| (std::cmp::Reverse(rank), s));
-        for (_, s, rows) in groups {
-            self.rows.push(Item::Session(s));
+            self.rows.push(Item::Status(heading));
             self.rows.extend(rows);
         }
-        global(self, &mut best, "notab", notab);
-        global(self, &mut best, "snoozed", snoozed);
         best.map(|(_, i)| i)
     }
 
@@ -963,7 +910,7 @@ impl App {
                 else {
                     continue;
                 };
-                self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone() });
+                self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone(), dir: Vec::new() });
                 if best.is_none_or(|(b, _)| score > b) {
                     best = Some((score, item));
                 }
@@ -986,7 +933,7 @@ impl App {
         for (project, ks) in groups {
             let head = Item::Project(ks[0]);
             if filtering && let Some((_, f)) = score_fields(&mut self.matcher, pattern, &[&project]) {
-                self.hits.insert(head, Hits { name: f[0].clone(), second: Vec::new() });
+                self.hits.insert(head, Hits { name: f[0].clone(), ..Hits::default() });
             }
             self.rows.push(head);
             let mut group = None;
@@ -1067,7 +1014,7 @@ impl App {
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
         let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
-            Item::Session(_) | Item::Project(_) | Item::Status(_) | Item::Sub(_) => String::new(),
+            Item::Project(_) | Item::Status(_) | Item::Sub(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
@@ -1732,14 +1679,13 @@ impl App {
         let overflow = self.rows.len() > h && h > 0;
         // Leave a column for the scrollbar only when there is one.
         let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
-        // How each row is drawn: under a session, agents as flat rows on
-        // the tree (no project column) and other tabs as tab rows; in the
-        // groups over the whole list and the archive, flat rows.
+        // How each row is drawn: ended tasks under their Archive project on
+        // its tree (no project column); every other row flat.
         let mut style = Vec::with_capacity(self.rows.len());
         let mut nested = false;
         for &row in &self.rows {
             style.push(match row {
-                Item::Session(_) | Item::Project(_) | Item::Sub(_) => {
+                Item::Project(_) | Item::Sub(_) => {
                     nested = true;
                     Draw::Header
                 }
@@ -1747,24 +1693,40 @@ impl App {
                     nested = false;
                     Draw::Header
                 }
-                _ if !nested => Draw::Flat,
-                // Agents, and ended tasks under their Archive project.
-                Item::Task(_) => Draw::Nested,
-                _ if self.is_agent(row) => Draw::Nested,
-                _ => Draw::Tab,
+                _ if nested => Draw::Nested,
+                _ => Draw::Flat,
             });
         }
         // Flat rows line up their project and name columns: size them for
-        // the widest values, within what the busiest right side leaves.
+        // the widest values, within what the busiest agent's right side
+        // leaves (a plain tab's folder takes what its row has left).
         let flat = || {
-            self.rows.iter().zip(&style).filter(|(_, d)| matches!(d, Draw::Flat | Draw::Nested)).map(|(&i, d)| (self.flat(i), *d))
+            self.rows.iter().zip(&style).filter(|(_, d)| matches!(d, Draw::Flat | Draw::Nested)).map(|(&i, d)| (i, *d))
         };
-        let right_w = flat().map(|(t, _)| self.right_spans(&t, self.p.base, "", list.width).1).max().unwrap_or(0);
+        let right_w = flat()
+            .filter(|&(i, _)| !self.is_plain_tab(i))
+            .map(|(i, _)| self.right_spans(&self.flat(i), self.p.base, "", list.width).1)
+            .max()
+            .unwrap_or(0);
         let room = (list.width as usize).saturating_sub(3 + right_w + 1);
-        let proj_w =
-            flat().filter(|(_, d)| *d == Draw::Flat).map(|(t, _)| str_width(t.project)).max().unwrap_or(0).min(room / 4);
-        let name_w =
-            flat().map(|(t, _)| str_width(t.name)).max().unwrap_or(0).min(room.saturating_sub(proj_w + 2) * 2 / 3);
+        let proj_w = flat()
+            .filter(|(_, d)| *d == Draw::Flat)
+            .map(|(i, _)| str_width(self.flat(i).project))
+            .max()
+            .unwrap_or(0)
+            .min(room / 4);
+        // A plain tab's long name (a title a program set, say) stops at a
+        // third of the row, so it can't crowd out the folder and the rows
+        // around it.
+        let name_cap = (list.width as usize / 3).max(24);
+        let name_w = flat()
+            .map(|(i, _)| {
+                let w = str_width(self.flat(i).name);
+                if self.is_plain_tab(i) { w.min(name_cap) } else { w }
+            })
+            .max()
+            .unwrap_or(0)
+            .min(room.saturating_sub(proj_w + 2) * 2 / 3);
         let cols = (proj_w, name_w);
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
@@ -1773,12 +1735,12 @@ impl App {
             match (row, style[i]) {
                 (Item::Status(state), _) => self.draw_status_header(f, r, state),
                 (Item::Sub(state), _) => self.draw_sub_header(f, r, state),
-                (_, Draw::Flat) => self.draw_flat_row(f, r, *row, selected, tick, cols, None),
+                (Item::Project(_), _) => self.draw_project_row(f, r, row, selected),
                 (_, Draw::Nested) => {
                     let guide = if last { "╰─ " } else { "├─ " };
                     self.draw_flat_row(f, r, *row, selected, tick, cols, Some(guide))
                 }
-                _ => self.draw_grouped_row(f, r, row, selected, last, tick),
+                _ => self.draw_flat_row(f, r, *row, selected, tick, cols, None),
             }
         }
         if overflow {
@@ -1796,7 +1758,7 @@ impl App {
             "idle" => ("·", "Idle", p.muted),
             "pinned" => (ICON_PIN, "Pinned", p.iris),
             "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
-            "notab" => (ICON_SESSION, "No tab", p.muted),
+            "tabs" => ("·", "Tabs", p.subtle),
             _ => ("?", "No status", p.muted),
         };
         let heading = format!(" {glyph} {label} ");
@@ -1819,7 +1781,6 @@ impl App {
             "done" => ("✓", "Done", p.pine),
             "working" => ("●", "Working", p.foam),
             "idle" => ("·", "Idle", p.muted),
-            "tabs" => ("·", "Tabs", p.subtle),
             "left" => ("▢", "Left behind", p.gold),
             "merged" => ("▢", "Merged", p.iris),
             "archived" => ("▢", "Archived", p.iris),
@@ -1925,7 +1886,8 @@ impl App {
         (bg, edge)
     }
 
-    fn draw_grouped_row(&self, f: &mut Frame, r: Rect, item: &Item, selected: bool, last: bool, tick: usize) {
+    /// An Archive project heading.
+    fn draw_project_row(&self, f: &mut Frame, r: Rect, item: &Item, selected: bool) {
         let p = &self.p;
         let width = r.width as usize;
         let (bg, edge) = self.row_style(selected);
@@ -1933,131 +1895,34 @@ impl App {
         f.buffer_mut().set_style(r, Style::new().bg(bg));
         let hits = self.hits.get(item).cloned().unwrap_or_default();
         let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        match item {
-            Item::Session(s) => {
-                let s = &self.sessions[*s];
-                let count = |st: State| s.tabs.iter().filter(|&&t| self.tabs[t].state == st).count();
-                let mut right: Vec<Span> = Vec::new();
-                let mut chip = |text: String, fg: Color| {
-                    right.extend(pill(vec![Span::styled(text, Style::new().fg(fg))], chip_bg, bg));
-                    right.push(Span::styled(" ", Style::new().bg(bg)));
-                };
-                let (blocked, errors) = (count(State::Blocked), count(State::Error));
-                if blocked > 0 {
-                    chip(format!("● {blocked} waiting"), p.gold);
-                }
-                if errors > 0 {
-                    chip(format!("✗ {errors} failed"), p.love);
-                }
-                let done = count(State::Done);
-                if done > 0 {
-                    chip(format!("✓ {done} done"), p.pine);
-                }
-                let n = s.tabs.len();
-                chip(format!("{n} tab{}", if n == 1 { "" } else { "s" }), p.subtle);
-                let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
-                let avail = width.saturating_sub(4 + right_w + 2);
-                let label = Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD);
-                let mut spans = vec![
-                    edge,
-                    Span::styled(ICON_SESSION, Style::new().fg(if selected { p.iris } else { p.subtle }).bg(bg)),
-                    Span::styled("  ", Style::new().bg(bg)),
-                ];
-                spans.extend(highlight(&s.label, &hits.name, avail, false, label, hl));
-                f.render_widget(Line::from(spans), r);
-                f.render_widget(Line::from(right).right_aligned(), r);
-            }
-            Item::Project(k) => {
-                let project = &self.tasks[*k].project;
-                // This project's rows, up to the next heading over a group.
-                let rows = self.rows.iter().skip_while(|&&i| i != *item).skip(1);
-                let tasks: Vec<&Task> = rows
-                    .take_while(|i| !matches!(i, Item::Project(_)))
-                    .filter_map(|&i| self.task_of(i))
-                    .collect();
-                let mut right: Vec<Span> = Vec::new();
-                let mut chip = |text: String, fg: Color| {
-                    right.extend(pill(vec![Span::styled(text, Style::new().fg(fg))], chip_bg, bg));
-                    right.push(Span::styled(" ", Style::new().bg(bg)));
-                };
-                let left = tasks.iter().filter(|t| t.left).count();
-                if left > 0 {
-                    chip(format!("▢ {left} left"), p.gold);
-                }
-                let n = tasks.len();
-                chip(format!("{n} task{}", if n == 1 { "" } else { "s" }), p.subtle);
-                let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
-                let avail = width.saturating_sub(4 + right_w + 2);
-                let label = Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD);
-                let mut spans = vec![
-                    edge,
-                    Span::styled(ICON_PROJECT, Style::new().fg(if selected { p.iris } else { p.subtle }).bg(bg)),
-                    Span::styled("  ", Style::new().bg(bg)),
-                ];
-                spans.extend(highlight(project, &hits.name, avail, false, label, hl));
-                f.render_widget(Line::from(spans), r);
-                f.render_widget(Line::from(right).right_aligned(), r);
-            }
-            // Headings and tasks with no tab are drawn elsewhere.
-            Item::Task(_) | Item::Status(_) | Item::Sub(_) => {}
-            Item::Tab(t) => {
-                let tab = &self.tabs[*t];
-                let task = tab.task.map(|k| &self.tasks[k]);
-                let (glyph, color) = match tab.state {
-                    State::Working => (SPINNER[tick % SPINNER.len()], p.foam),
-                    State::Blocked => ("●", p.gold),
-                    State::Done => ("✓", p.pine),
-                    State::Error => ("✗", p.love),
-                    State::Idle => ("·", p.muted),
-                    State::Ready => ("·", p.muted),
-                };
-                let here = self.is_current(*t);
-                let here_label = "current";
-                let guide = if last { "╰─ " } else { "├─ " };
-                let lead = 1 + 1 + 3 + 2; // edge, indent, guide, glyph + space
-                // A task tab: its uncommitted files, and its folder tinted by profile.
-                let dirty = task.filter(|t| t.dirty > 0).map(|t| format!("✎{}  ", t.dirty)).unwrap_or_default();
-                let dirty_w = str_width(&dirty);
-                let dir_room = (width.saturating_sub(lead + dirty_w) * 2 / 5).min(48);
-                let dir_w = str_width(&tab.dir).min(dir_room);
-                let here_w = if here { 2 + here_label.len() } else { 0 };
-                // A long name (a title a program set, say) stops at a third
-                // of the row, so it can't crowd out the folder and the rows
-                // around it.
-                let name_cap = (width.saturating_sub(lead) / 3).max(24);
-                let name_room = width.saturating_sub(lead + dir_w + dirty_w + 3 + here_w).min(name_cap);
-                let name_style = if selected {
-                    Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new().fg(p.text).bg(bg)
-                };
-                let mut spans = vec![
-                    edge,
-                    Span::styled(" ", Style::new().bg(bg)),
-                    Span::styled(guide, Style::new().fg(p.hl_med).bg(bg)),
-                    Span::styled(glyph, Style::new().fg(color).bg(bg)),
-                    Span::styled(" ", Style::new().bg(bg)),
-                ];
-                spans.extend(highlight(&tab.name, &hits.name, name_room, false, name_style, hl));
-                if here {
-                    spans.push(Span::styled(
-                        format!("  {here_label}"),
-                        Style::new().fg(p.iris).bg(bg).add_modifier(Modifier::ITALIC),
-                    ));
-                }
-                f.render_widget(Line::from(spans), r);
-                let dir_fg = match task {
-                    Some(t) if t.work() => p.gold,
-                    Some(_) => p.foam,
-                    None if selected => p.subtle,
-                    None => p.muted,
-                };
-                let mut right = vec![Span::styled(dirty, Style::new().fg(p.gold).bg(bg))];
-                right.extend(highlight(&tab.dir, &hits.second, dir_w, true, Style::new().fg(dir_fg).bg(bg), hl));
-                right.push(Span::styled(" ", Style::new().bg(bg)));
-                f.render_widget(Line::from(right).right_aligned(), r);
-            }
+        let Item::Project(k) = item else { return };
+        let project = &self.tasks[*k].project;
+        // This project's rows, up to the next heading over a group.
+        let rows = self.rows.iter().skip_while(|&&i| i != *item).skip(1);
+        let tasks: Vec<&Task> =
+            rows.take_while(|i| !matches!(i, Item::Project(_))).filter_map(|&i| self.task_of(i)).collect();
+        let mut right: Vec<Span> = Vec::new();
+        let mut chip = |text: String, fg: Color| {
+            right.extend(pill(vec![Span::styled(text, Style::new().fg(fg))], chip_bg, bg));
+            right.push(Span::styled(" ", Style::new().bg(bg)));
+        };
+        let left = tasks.iter().filter(|t| t.left).count();
+        if left > 0 {
+            chip(format!("▢ {left} left"), p.gold);
         }
+        let n = tasks.len();
+        chip(format!("{n} task{}", if n == 1 { "" } else { "s" }), p.subtle);
+        let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
+        let avail = width.saturating_sub(4 + right_w + 2);
+        let label = Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD);
+        let mut spans = vec![
+            edge,
+            Span::styled(ICON_PROJECT, Style::new().fg(if selected { p.iris } else { p.subtle }).bg(bg)),
+            Span::styled("  ", Style::new().bg(bg)),
+        ];
+        spans.extend(highlight(project, &hits.name, avail, false, label, hl));
+        f.render_widget(Line::from(spans), r);
+        f.render_widget(Line::from(right).right_aligned(), r);
     }
 
     /// A flat row's work items, grouped by kind within `budget` columns
@@ -2113,8 +1978,27 @@ impl App {
         (right, w)
     }
 
-    /// A flat row; with a guide, on a session's tree, without the project
-    /// column (the session heading says it).
+    /// A tab with no agent's right side: whether it is the current tab,
+    /// and its folder within `room` columns.
+    fn tab_right(&self, t: usize, hits: &[usize], bg: Color, selected: bool, room: usize) -> Vec<Span<'static>> {
+        let p = &self.p;
+        let tab = &self.tabs[t];
+        let mut right = Vec::new();
+        if self.is_current(t) {
+            right.push(Span::styled("current  ", Style::new().fg(p.iris).bg(bg).add_modifier(Modifier::ITALIC)));
+        }
+        let used: usize = right.iter().map(|s| str_width(&s.content)).sum();
+        let dir_w = str_width(&tab.dir).min(room.saturating_sub(used + 1)).min(48);
+        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let dir_style = Style::new().fg(if selected { p.subtle } else { p.muted }).bg(bg);
+        right.extend(highlight(&tab.dir, hits, dir_w, true, dir_style, hl));
+        right.push(Span::styled(" ", Style::new().bg(bg)));
+        right
+    }
+
+    /// A flat row; with a guide, on an Archive project's tree, without the
+    /// project column (the heading says it). A tab with no agent shows its
+    /// folder on the right rather than a host and status.
     #[allow(clippy::too_many_arguments)]
     fn draw_flat_row(
         &self,
@@ -2145,9 +2029,12 @@ impl App {
             (None, "idle") => ("·", p.muted, "idle"),
             (None, _) => ("?", p.muted, "no status"),
         };
+        let plain = self.is_plain_tab(item);
+        let (glyph, color) = if plain { ("·", p.muted) } else { (glyph, color) };
         let verb = if t.wake > 0 { "snoozed" } else { verb };
-        // Right side first, so the columns and message get what is left.
-        let (right, right_w) = self.right_spans(&t, bg, verb, r.width);
+        // Right side first, so the columns and message get what is left; a
+        // plain tab's folder gets what its columns leave.
+        let (right, right_w) = if plain { (Vec::new(), 0) } else { self.right_spans(&t, bg, verb, r.width) };
         let mut left = vec![edge];
         if let Some(guide) = guide {
             left.push(Span::styled(" ", Style::new().bg(bg)));
@@ -2175,6 +2062,15 @@ impl App {
             column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
         }
         column(t.name, &hits.name, name_w, name_style);
+        if let Item::Tab(tab) = item
+            && plain
+        {
+            let used = 3 + proj_w + 2 + str_width(t.name).min(name_w) + 2;
+            let right = self.tab_right(tab, &hits.dir, bg, selected, (r.width as usize).saturating_sub(used));
+            f.render_widget(Line::from(left), r);
+            f.render_widget(Line::from(right).right_aligned(), r);
+            return;
+        }
         let msg_room = room.saturating_sub(if guide.is_none() { proj_w + 2 } else { 0 } + name_w + 2);
         if !t.msg.is_empty() && msg_room > 4 {
             let msg_style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle }).bg(bg);
@@ -2601,16 +2497,15 @@ mod tests {
     }
 
     #[test]
-    fn agents_group_by_status_in_their_session_by_urgency_and_age() {
+    fn agents_group_by_status_by_urgency_and_age() {
         let app = inbox();
         assert_eq!(app.rows, vec![
-            Item::Session(0),
-            Item::Sub("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
-            Item::Sub("error"), Item::Tab(2),
-            Item::Sub("done"), Item::Tab(3),
-            Item::Sub("working"), Item::Tab(0),
-            Item::Sub("idle"), Item::Tab(4),
-            Item::Sub(""), Item::Task(3), Item::Task(4),
+            Item::Status("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
+            Item::Status("error"), Item::Tab(2),
+            Item::Status("done"), Item::Tab(3),
+            Item::Status("working"), Item::Tab(0),
+            Item::Status("idle"), Item::Tab(4),
+            Item::Status(""), Item::Task(3), Item::Task(4),
         ]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
     }
@@ -2630,7 +2525,7 @@ mod tests {
             });
             app.rows
         };
-        let expected = vec![Item::Status("notab"), Item::Task(1), Item::Task(0)];
+        let expected = vec![Item::Status("working"), Item::Task(1), Item::Task(0)];
         assert_eq!(order(10, 20), expected);
         assert_eq!(order(20, 10), expected);
     }
@@ -2640,12 +2535,12 @@ mod tests {
         let mut app = inbox();
         app.query = "older".into();
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Session(0), Item::Sub("blocked"), Item::Task(1)]);
+        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(1)]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
         app.query.clear();
         app.profile = Profile::Work;
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Session(0), Item::Sub("blocked"), Item::Task(2)]);
+        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(2)]);
         app.query = "no-match".into();
         app.refilter();
         assert!(app.rows.is_empty());
@@ -2665,7 +2560,7 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Task(4)));
         app.edge(false);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
-        app.selected = Some(5);
+        app.selected = Some(4);
         assert!(app.pick().is_empty());
         assert!(app.selected_key().is_none());
         assert!(app.selected_task().is_none());
@@ -2681,7 +2576,7 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
         assert!(app.armed == Armed::Archive);
         let at = app.selected.unwrap();
-        assert_eq!(app.rows[at - 1], Item::Sub("working"));
+        assert_eq!(app.rows[at - 1], Item::Status("working"));
     }
 
     fn inbox_with_lifecycle() -> App {
@@ -2713,7 +2608,7 @@ mod tests {
         let mut app = inbox_with_lifecycle();
         assert_eq!(app.rows, vec![
             Item::Status("pinned"), Item::Tab(0),
-            Item::Session(0), Item::Sub("done"), Item::Tab(2),
+            Item::Status("done"), Item::Tab(2),
             Item::Status("snoozed"), Item::Tab(3), Item::Tab(1),
         ]);
         // A snoozed blocked task isn't counted as waiting.
@@ -2738,7 +2633,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_wanting_john_lead_and_keep_their_other_tabs_last() {
+    fn every_session_shares_the_status_sections_and_plain_tabs_come_last() {
         let mut app = App::new((String::new(), String::new()), View::All);
         app.follow = false;
         app.deliver(|app| {
@@ -2758,18 +2653,27 @@ mod tests {
             app.load = Load::Ready;
             app.tasks_load = Tasks::Ready;
         });
+        // Agents from every session share the status sections, the open
+        // task with no listed session among them; the tabs with no agent
+        // follow in Rex's order.
         assert_eq!(app.rows, vec![
-            Item::Session(1), Item::Sub("blocked"), Item::Tab(3), Item::Sub("tabs"), Item::Tab(2),
-            Item::Session(0), Item::Sub("working"), Item::Tab(1), Item::Sub("tabs"), Item::Tab(0),
-            Item::Session(2), Item::Tab(4),
-            Item::Status("notab"), Item::Task(0),
+            Item::Status("blocked"), Item::Tab(3),
+            Item::Status("done"), Item::Task(0),
+            Item::Status("working"), Item::Tab(1),
+            Item::Status("tabs"), Item::Tab(0), Item::Tab(2), Item::Tab(4),
         ]);
-        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        for label in ["Waiting", "Working", "Tabs", "No tab", "approval", "stray"] {
-            assert!(text.contains(label), "{label}: {text}");
+        let line = |y: u16| -> String {
+            let buf = terminal.backend().buffer();
+            (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        };
+        for label in ["Waiting", "Done", "Working", "Tabs", "approval", "stray"] {
+            assert!((0..10).any(|y| line(y).contains(label)), "{label}");
         }
+        // Each row names its session: no session headings or tree guides.
+        assert!(line(1).contains("busy") && line(5).contains("quiet") && line(9).contains("plain"), "{}", line(9));
+        assert!((0..10).all(|y| !line(y).contains('├') && !line(y).contains('╰')));
     }
 
     #[test]
