@@ -3122,7 +3122,7 @@ mod tests {
         assert!(app.rows.is_empty());
         assert_eq!(app.pick(), "");
         assert!(!app.can_pin() && !app.can_snooze() && !app.armable());
-        app.paste("rex-data:usage\n{\"fetched\":1,\"samples\":[],\"quotas\":[],\"warnings\":[\"remote host unavailable\"]}");
+        app.paste("rex-data:usage\n{\"fetched\":1,\"totals\":[],\"quotas\":[],\"warnings\":[\"remote host unavailable\"]}");
         app.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
         for (width, height) in [(120, 35), (32, 10), (12, 5)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -3311,17 +3311,18 @@ pub fn standalone(view: View) -> io::Result<()> {
     picker(app)
 }
 
-/// Sanitized usage accounting as JSON: across configured hosts, or with
-/// `local` this host only (the remote collector protocol).
+/// Sanitized usage accounting as JSON: per-model totals across configured
+/// hosts (what the Usage view renders), or with `local` this host's raw
+/// samples (the remote collector protocol, deduplicated by the caller).
 pub fn usage_json(local: bool) -> io::Result<()> {
     let mut collector = switchyard_core::usage::Collector::default();
-    let snapshot = if local {
+    let json = if local {
         let settings = switchyard_core::config::read().map(|c| c.usage).unwrap_or_default();
-        collector.local(&settings, &switchyard_core::rex::local_label(), now())
+        serde_json::to_string(&collector.local(&settings, &switchyard_core::rex::local_label(), now()))
     } else {
-        collector.collect()
+        serde_json::to_string(&collector.collect().summary())
     };
-    println!("{}", serde_json::to_string(&snapshot).map_err(io::Error::other)?);
+    println!("{}", json.map_err(io::Error::other)?);
     Ok(())
 }
 

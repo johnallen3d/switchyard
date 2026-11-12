@@ -136,6 +136,17 @@ pub struct Snapshot {
     pub warnings: Vec<String>,
 }
 
+/// What the Usage view renders: per-model totals instead of raw samples. The
+/// float receives this as one paste, so it must stay small; raw samples (the
+/// `--local` collector protocol) are needed only to deduplicate across hosts.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Summary {
+    pub fetched: u64,
+    pub totals: Vec<Total>,
+    pub quotas: Vec<Quota>,
+    pub warnings: Vec<String>,
+}
+
 fn string(v: &Value, key: &str) -> String {
     v[key].as_str().unwrap_or_default().to_string()
 }
@@ -662,9 +673,15 @@ impl Snapshot {
         }
         totals.into_values().collect()
     }
+
+    /// Aggregate after deduplication; samples from every host must be present.
+    pub fn summary(mut self) -> Summary {
+        self.dedup();
+        Summary { fetched: self.fetched, totals: self.totals(), quotas: self.quotas, warnings: self.warnings }
+    }
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Total {
     pub profile: String,
     pub account: String,
@@ -749,6 +766,28 @@ mod tests {
         assert_eq!(totals[0].hosts, ["linux", "mac"]);
         assert_eq!(totals[0].unpriced, 1);
         assert!(!serde_json::to_string(&snap).unwrap().contains("PRIVATE PROMPT"));
+    }
+
+    #[test]
+    fn summary_aggregates_samples_into_one_total_per_model() {
+        let src = source("claude");
+        let mut parser = LogParser::new(&src, "mac", "file".into());
+        for i in 0..500 {
+            parser.push(&json!({"type":"assistant", "sessionId":"session", "timestamp":"2026-11-10T19:00:00Z",
+                "message":{"id":format!("request-{i}"), "role":"assistant", "model":"opus", "usage":{
+                    "input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}));
+        }
+        let mut snap = Snapshot { samples: parser.samples, ..Snapshot::default() };
+        // A copied log on another host repeats every request.
+        let copies: Vec<_> = snap.samples.iter().cloned().map(|mut s| { s.hosts = vec!["linux".into()]; s }).collect();
+        snap.samples.extend(copies);
+        let raw = serde_json::to_string(&snap).unwrap().len();
+        let summary = snap.summary();
+        assert_eq!(summary.totals.len(), 1);
+        assert_eq!(summary.totals[0].requests, 500);
+        assert_eq!(summary.totals[0].tokens.total(), 1000);
+        assert_eq!(summary.totals[0].hosts, ["linux", "mac"]);
+        assert!(serde_json::to_string(&summary).unwrap().len() * 100 < raw);
     }
 
     #[test]

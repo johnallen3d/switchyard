@@ -5,15 +5,14 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use switchyard_core::usage::{Quota, STALE, Snapshot, Total};
+use switchyard_core::usage::{Quota, STALE, Snapshot, Summary, Total};
 use switchyard_ui::{Palette, draw};
 
 #[derive(Default)]
 pub struct Usage {
-    pub snapshot: Option<Snapshot>,
+    pub snapshot: Option<Summary>,
     pub error: Option<String>,
     pub offset: usize,
-    totals: Vec<Total>,
 }
 
 fn amount(n: u64) -> String {
@@ -629,11 +628,13 @@ fn union(into: &mut Vec<String>, add: &[String]) {
 }
 
 impl Usage {
+    /// Collectors send a summary; a raw snapshot from an older binary is
+    /// still aggregated here rather than rejected.
     pub fn paste(&mut self, body: &str) {
-        match serde_json::from_str::<Snapshot>(body) {
-            Ok(mut snapshot) => {
-                snapshot.dedup();
-                self.totals = snapshot.totals();
+        let summary = serde_json::from_str::<Summary>(body)
+            .or_else(|_| serde_json::from_str::<Snapshot>(body).map(Snapshot::summary));
+        match summary {
+            Ok(snapshot) => {
                 self.snapshot = Some(snapshot);
                 self.error = None;
             }
@@ -684,7 +685,7 @@ impl Usage {
                 )
             })
             .collect();
-        let totals: Vec<_> = self
+        let totals: Vec<_> = snap
             .totals
             .iter()
             .filter(|t| {
@@ -868,9 +869,9 @@ mod tests {
     #[test]
     fn stale_and_missing_cost_are_not_zero() {
         let usage = Usage {
-            snapshot: Some(Snapshot {
+            snapshot: Some(Summary {
                 fetched: 1,
-                ..Snapshot::default()
+                ..Summary::default()
             }),
             ..Usage::default()
         };
@@ -906,7 +907,7 @@ mod tests {
     #[test]
     fn invalid_delivery_keeps_previous_data() {
         let mut usage = Usage::default();
-        usage.paste(r#"{"fetched":123,"samples":[],"quotas":[],"warnings":[]}"#);
+        usage.paste(r#"{"fetched":123,"totals":[],"quotas":[],"warnings":[]}"#);
         usage.paste("broken");
         assert_eq!(usage.snapshot.unwrap().fetched, 123);
         assert!(usage.error.is_some());
@@ -935,10 +936,10 @@ mod tests {
     fn responsive_cards_keep_values_and_warning_styles() {
         let p = Palette::load();
         let usage = Usage {
-            snapshot: Some(Snapshot {
+            snapshot: Some(Summary {
                 fetched: 1000,
                 quotas: vec![quota("claude-code", Some(100.0)), quota("codex", None)],
-                ..Snapshot::default()
+                ..Summary::default()
             }),
             ..Usage::default()
         };
@@ -966,14 +967,14 @@ mod tests {
     #[test]
     fn scrolling_reaches_wrapped_warnings_and_clamps_after_filtering() {
         let mut usage = Usage {
-            snapshot: Some(Snapshot {
+            snapshot: Some(Summary {
                 fetched: 1000,
                 quotas: vec![quota("codex", None)],
                 warnings: vec![
                     "A long collector warning with unicode 主机 and an-unbroken-model-name-that-must-wrap-at-the-edge"
                         .into(),
                 ],
-                ..Snapshot::default()
+                ..Summary::default()
             }),
             offset: usize::MAX,
             ..Usage::default()

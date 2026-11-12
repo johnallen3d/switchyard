@@ -109,8 +109,7 @@ impl Feed {
         thread::spawn(move || {
             let mut collector = switchyard_core::usage::Collector::default();
             loop {
-                let snapshot = collector.collect();
-                let body = serde_json::to_string(&snapshot).unwrap_or_default();
+                let body = serde_json::to_string(&collector.collect().summary()).unwrap_or_default();
                 if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() { return; }
                 thread::sleep(switchyard_core::usage::REFRESH);
             }
