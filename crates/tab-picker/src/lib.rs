@@ -66,6 +66,16 @@
 //! (UNTIL in Unix seconds, 0 to wake), or `snooze-invalid` until the text
 //! reads as a time.
 //!
+//! ctrl-y, in All, opens a reply box on the highlighted agent, under its
+//! preview: the new-session picker's prompt box (see the ui crate's
+//! prompt_box), where alt- or shift-Enter adds a line, Escape closes it,
+//! and shift with the arrows (or the page keys) scrolls the preview. An
+//! agent waiting on a prompt is refused. The message is kept in a prompt
+//! file, and the pick is `message:PROMPT_REF:TARGET/SESSION/WINDOW`
+//! (PROMPT_REF hex-encoded), or `message-empty` with nothing to send. The
+//! config sends it on Enter (`switchyard task act message`; see core's
+//! actions) and types Enter back for the box to close.
+//!
 //! Run bare from a shell (`switchyard`), it works without the float: it
 //! fetches the data and acts on its picks itself, staying open after each
 //! action (see standalone.rs).
@@ -87,7 +97,11 @@ use model::{
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -97,6 +111,7 @@ use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
+use switchyard_ui::prompt_box::{self, PromptBox};
 use switchyard_ui::protocol::{self, Title, hex};
 
 const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
@@ -307,6 +322,20 @@ impl Snooze {
     }
 }
 
+/// The ctrl-y reply box: a message for the highlighted agent, typed in the
+/// prompt box the new-session picker uses and kept in a prompt file, so the
+/// float's title carries only its reference.
+struct Reply {
+    /// The agent's tab, as (session_id, window_id), which stays highlighted.
+    key: Key,
+    label: String,
+    prompt: PromptBox,
+}
+
+/// Text rows the reply box grows between; longer messages scroll.
+const REPLY_MIN_ROWS: u16 = 2;
+const REPLY_MAX_ROWS: u16 = 6;
+
 /// How wide a row's work-item badges may be in a list `width` wide.
 fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
@@ -339,6 +368,8 @@ struct App {
     chooser: Option<Chooser>,
     /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
+    /// The open ctrl-y reply box; Enter sends, Escape closes it.
+    reply: Option<Reply>,
     /// Pins and snoozes made here, by (host, window_id): (pinned,
     /// snoozed_until, when), kept over deliveries until they agree.
     pending: HashMap<Key, (bool, u64, Instant)>,
@@ -392,6 +423,7 @@ impl App {
             armed: Armed::No,
             chooser: None,
             snooze: None,
+            reply: None,
             pending: HashMap::new(),
             list_area: Rect::default(),
             title: Title::new("rex-tab-picker"),
@@ -415,7 +447,13 @@ impl App {
 
     /// A bracketed paste: tabs, tasks, or a failure to get either.
     fn paste(&mut self, text: &str) {
-        let Some((kind, body)) = protocol::data(text) else { return };
+        let Some((kind, body)) = protocol::data(text) else {
+            // Anything else John pasted goes into the reply box, if open.
+            if let Some(r) = &mut self.reply {
+                r.prompt.paste(text);
+            }
+            return;
+        };
         match kind {
             "rows" => {
                 let (sessions, tabs) = parse_rows(body);
@@ -474,6 +512,15 @@ impl App {
         // The snooze prompt goes with its task.
         if self.snooze.as_ref().is_some_and(|z| self.selected_key().as_ref() != Some(&z.key)) {
             self.snooze = None;
+        }
+        // The reply box stays on its agent, closing only when it's gone.
+        if let Some(key) = self.reply.as_ref().map(|r| r.key.clone())
+            && self.selected_key().as_ref() != Some(&key)
+        {
+            self.select_key(Some(key.clone()));
+            if self.selected_key().as_ref() != Some(&key) {
+                self.close_reply();
+            }
         }
     }
 
@@ -1011,6 +1058,7 @@ impl App {
         self.armed = Armed::No;
         self.chooser = None;
         self.snooze = None;
+        self.close_reply();
         self.view = view;
         self.usage.offset = 0;
         self.refilter();
@@ -1029,6 +1077,13 @@ impl App {
         // chooser.
         if let (Armed::Link, Some(l)) = (self.armed, self.selected_link()) {
             return format!("link:{}", hex(&l.url));
+        }
+        if let Some(r) = &self.reply {
+            let row = self.row_pick();
+            return match (r.prompt.saved_ref(), row.split_once(':')) {
+                (Some(saved), Some((_, target))) if !saved.is_empty() => format!("message:{}:{target}", hex(saved)),
+                _ => "message-empty".into(),
+            };
         }
         if let Some(z) = &self.snooze {
             let row = self.row_pick();
@@ -1193,7 +1248,69 @@ impl App {
         true
     }
 
+    /// Open the reply box on the highlighted agent in All. An agent waiting
+    /// on a prompt is refused: the message would answer it.
+    fn open_reply(&mut self) {
+        let Some(item) = self.selected_item() else { return };
+        if self.preview_want().is_none() {
+            self.note = Some(("highlight an agent to message it".into(), true));
+            return;
+        }
+        let Some(key) = self.selected_key() else { return };
+        let label = self.selected_label();
+        if self.flat(item).state == "blocked" {
+            self.note = Some((format!("{label} is waiting on a prompt; answer it in its tab"), true));
+            return;
+        }
+        self.moved();
+        self.reply = Some(Reply { key, label, prompt: PromptBox::new() });
+    }
+
+    /// Close the reply box, throwing its message away.
+    fn close_reply(&mut self) {
+        if let Some(r) = self.reply.take() {
+            r.prompt.discard();
+        }
+    }
+
+    /// The reply box's Enter once the message is sent (in the float, the
+    /// config types Enter back after `switchyard task act message`, which
+    /// also removes the prompt file).
+    fn finish_reply(&mut self) {
+        if let Some(r) = self.reply.take() {
+            self.note = Some((format!("sent to {}", r.label), false));
+        }
+    }
+
+    /// Keys while the reply box is open: edit it (alt- or shift-Enter for a
+    /// newline), scroll the preview with the page keys or shift and the
+    /// arrows, Enter (see finish_reply), or Escape to close it. ctrl-c
+    /// clears the message, then closes the box.
+    fn reply_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let page = (self.list_area.height as isize - 2).max(1);
+        let Some(r) = &mut self.reply else { return true };
+        match k.code {
+            KeyCode::Esc => self.close_reply(),
+            KeyCode::Enter if newline => r.prompt.field.insert_newline(),
+            KeyCode::Enter => self.finish_reply(),
+            KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
+            KeyCode::Char('c') if ctrl => self.close_reply(),
+            KeyCode::PageUp => self.scroll_preview(page),
+            KeyCode::PageDown => self.scroll_preview(-page),
+            KeyCode::Up if shift => self.scroll_preview(3),
+            KeyCode::Down if shift => self.scroll_preview(-3),
+            _ => r.prompt.key(k),
+        }
+        true
+    }
+
     fn report(&mut self) -> io::Result<()> {
+        if let Some(r) = &mut self.reply {
+            r.prompt.save();
+        }
         let pick = self.pick();
         self.title.report(pick)
     }
@@ -1206,6 +1323,14 @@ impl App {
         }
         if self.snooze.is_some() {
             return self.snooze_key(k);
+        }
+        // In the float, a note (such as a sent message) lasts until a key;
+        // standalone, run clears it.
+        if !self.standalone {
+            self.note = None;
+        }
+        if self.reply.is_some() {
+            return self.reply_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
@@ -1262,6 +1387,7 @@ impl App {
             KeyCode::Char('r') if ctrl => self.arm(Armed::Review),
             KeyCode::Char('t') if ctrl => self.arm(Armed::Pin),
             KeyCode::Char('s') if ctrl => self.open_snooze(),
+            KeyCode::Char('y') if ctrl && self.view == View::All => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::All => self.expanded = !self.expanded,
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
@@ -1349,6 +1475,18 @@ impl App {
         .areas(inner);
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
+        // The reply box takes the bottom of All, under the preview.
+        let mut reply_card = None;
+        let body = match &self.reply {
+            Some(r) if self.view == View::All => {
+                let rows = r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS);
+                let h = (rows + prompt_box::CHROME_ROWS).min(body.height.saturating_sub(3));
+                let [rest, card] = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
+                reply_card = Some((card, h.saturating_sub(prompt_box::CHROME_ROWS)));
+                rest
+            }
+            _ => body,
+        };
         if self.view == View::Usage {
             self.list_area = body;
             let profile = match self.profile { Profile::All => None, p => Some(p.name()) };
@@ -1366,6 +1504,9 @@ impl App {
         }
         self.draw_chooser(f, body);
         self.draw_snooze(f, body);
+        if let Some((card, rows)) = reply_card {
+            self.draw_reply(f, card, rows);
+        }
         self.draw_footer(f, footer);
     }
 
@@ -1373,7 +1514,8 @@ impl App {
     /// a third of the height (8 to 14 lines) for the preview, the rest
     /// for the list; expanded (ctrl-e), the preview alone. The
     /// preview stays while John moves, whatever the row, so the list
-    /// doesn't change height under him.
+    /// doesn't change height under him. With the reply box open, the
+    /// preview gets half of what is left, as what John is replying to.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
         if self.view != View::All {
             return None;
@@ -1381,10 +1523,11 @@ impl App {
         if self.expanded {
             return Some((Rect { height: 0, ..body }, body));
         }
-        if body.height < 20 {
+        let replying = self.reply.is_some();
+        if body.height < if replying { 12 } else { 20 } {
             return None;
         }
-        let pane = (body.height / 3).clamp(8, 14);
+        let pane = if replying { (body.height / 2).clamp(6, 14) } else { (body.height / 3).clamp(8, 14) };
         let [list, _, preview] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(pane)]).areas(body);
         Some((list, preview))
@@ -1438,6 +1581,33 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The ctrl-y reply box, when open: the prompt box with a chip row
+    /// naming the agent it goes to.
+    fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
+        let p = self.p;
+        let Some(r) = &mut self.reply else { return };
+        r.prompt.set_placeholder(&format!("Message {}", r.label));
+        let Some((chips, skip)) = r.prompt.draw(f, &p, card, rows, true, None) else { return };
+        let fill = p.overlay;
+        let left = vec![
+            Span::styled("to ", Style::new().fg(p.muted).bg(fill)),
+            Span::styled(r.label.clone(), Style::new().fg(p.text).bg(fill).add_modifier(Modifier::BOLD)),
+        ];
+        let mut right = Vec::new();
+        if skip > 0 {
+            right.push(Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted).bg(fill)));
+        }
+        if !r.prompt.saved_ok {
+            right.push(Span::styled("not saved ", Style::new().fg(p.love).bg(fill)));
+        }
+        let left_w: usize = left.iter().map(|s| str_width(&s.content)).sum();
+        let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
+        if left_w + right_w < chips.width as usize {
+            f.render_widget(Line::from(right).right_aligned(), chips);
+        }
+        f.render_widget(Line::from(left), chips);
     }
 
     /// The ctrl-s prompt, when open: a small box over the list with the
@@ -2086,6 +2256,18 @@ impl App {
             f.render_widget(Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]), area);
             return;
         }
+        if let Some(r) = &self.reply {
+            let ready = !r.prompt.text().is_empty() && r.prompt.saved_ok;
+            let keys = [
+                ("⏎", "send", if ready { p.pine } else { p.muted }),
+                ("⌥⏎", "newline", p.subtle),
+                ("⇧↑↓", "scroll", p.subtle),
+                ("esc", "cancel", p.subtle),
+            ];
+            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            f.render_widget(Line::from(spans), area);
+            return;
+        }
         if let Some(z) = &self.snooze {
             let enter = match z.until {
                 Ok(0) => "wake",
@@ -2182,6 +2364,9 @@ impl App {
         if self.can_snooze() {
             keys.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
         }
+        if self.preview_want().is_some() {
+            keys.push(("⌃Y", "message"));
+        }
         if self.query.is_empty() {
             keys.push(("h/l", "views"));
         }
@@ -2270,6 +2455,29 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let review = matches!(k.code, KeyCode::Char('r') if ctrl);
         let open = matches!(k.code, KeyCode::Char('l') if ctrl);
+        // The reply box's Enter sends the message; other keys edit it. A
+        // failed send keeps the box, so the message isn't lost.
+        if let Some(r) = &self.reply {
+            let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+            if k.code != KeyCode::Enter || newline {
+                return false;
+            }
+            let text = r.prompt.text();
+            if text.is_empty() {
+                return true;
+            }
+            let Some(pick) = standalone::parse_pick(&self.row_pick()) else { return true };
+            let label = r.label.clone();
+            self.busy(term, format!("sending to {label}…"));
+            self.note = Some(match standalone::message(&pick, &text) {
+                Ok(msg) => {
+                    self.close_reply();
+                    (msg, false)
+                }
+                Err(e) => (format!("{label}: {e}"), true),
+            });
+            return true;
+        }
         // The snooze prompt's Enter saves the snooze; other keys edit it.
         if let Some(z) = &self.snooze {
             // Unreadable text: Enter does nothing.
@@ -2680,6 +2888,46 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_y_messages_the_highlighted_agent() {
+        let mut app = inbox_with_lifecycle();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        let target = app.row_pick().split_once(':').unwrap().1.to_string();
+        app.key(ctrl('y'));
+        assert!(app.reply.is_some());
+        assert_eq!(app.pick(), "message-empty");
+        for c in "run the tests".chars() {
+            app.key(plain(KeyCode::Char(c)));
+        }
+        // alt-Enter and pastes add lines; data pastes still deliver.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        app.paste("then\r\nreport");
+        app.paste("rex-data:usage-error\nx");
+        let r = app.reply.as_ref().unwrap();
+        assert_eq!(r.prompt.text(), "run the tests\nthen\nreport");
+        assert_eq!(app.pick(), format!("message:{}:{target}", hex(&r.prompt.file_ref)));
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("to /woke") && text.contains("report") && text.contains("newline"), "{text}");
+        // Enter, typed back by the config once the message is sent, closes
+        // the box with a note.
+        app.key(plain(KeyCode::Enter));
+        assert!(app.reply.is_none());
+        assert_eq!(app.note, Some(("sent to /woke".into(), false)));
+        // Escape cancels, keeping the highlight; an agent waiting on a
+        // prompt is refused.
+        app.key(ctrl('y'));
+        app.key(plain(KeyCode::Esc));
+        assert!(app.reply.is_none() && app.selected_item() == Some(Item::Tab(2)));
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(1));
+        app.key(ctrl('y'));
+        assert!(app.reply.is_none());
+        assert!(app.note.as_ref().is_some_and(|(n, failed)| *failed && n.contains("waiting on a prompt")));
+    }
+
+    #[test]
     fn failed_hosts_keep_the_other_rows_and_show_in_the_header() {
         let mut app = App::new((String::new(), String::new()), View::All);
         let chips = |app: &App| app.header_chips().iter().map(|s| s.content.to_string()).collect::<String>();
@@ -3009,7 +3257,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         match event::read()? {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if app.standalone {
-                    if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() {
+                    if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() && app.reply.is_none() {
                         return Ok(());
                     }
                     if app.standalone_key(k, term) {
@@ -3021,7 +3269,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                     return Ok(());
                 }
             }
-            Event::Paste(text) if !app.standalone => app.paste(&text),
+            // Standalone, only John's own pastes arrive, for the reply box.
+            Event::Paste(text) if !app.standalone || app.reply.is_some() => app.paste(&text),
             _ => {}
         }
     }
@@ -3061,9 +3310,19 @@ pub fn usage_json(local: bool) -> io::Result<()> {
 
 fn picker(mut app: App) -> io::Result<()> {
     let mut term = ratatui::init();
-    // No mouse capture, so the terminal's own selection and copy work.
+    // No mouse capture, so the terminal's own selection and copy work. Kitty
+    // key reporting makes the reply box's shift-Enter arrive as one
+    // crossterm can decode, as in the new-session picker.
+    let _ = execute!(
+        io::stdout(),
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let result = run(&mut term, &mut app);
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste);
     ratatui::restore();
+    // A message typed but never sent.
+    app.close_reply();
     // Leave the shell's title as it was before the picks.
     if app.standalone {
         protocol::clear_title();

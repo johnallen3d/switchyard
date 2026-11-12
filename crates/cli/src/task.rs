@@ -17,6 +17,7 @@ pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task list [--live]
        switchyard task act review|archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
        switchyard task act snooze HOST SESSION_ID WINDOW_ID UNTIL
+       switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
        switchyard task session-of PROFILE HARNESS WORKTREE
 
 open finds or creates the session for DIR on HOST and prints its ID.
@@ -33,8 +34,10 @@ checking worktrees or ending tasks. act reviews or archives the task in a
 tab (force-archive also throws away uncommitted changes), resumes an
 ended task's agent session in a new tab and prints it as launch does,
 prints the URL of the task's main work item (link), pins or unpins an
-open task in the inbox (pin), or snoozes it until UNTIL, Unix seconds,
-with 0 waking it (snooze). session-of prints the newest agent session
+open task in the inbox (pin), snoozes it until UNTIL, Unix seconds,
+with 0 waking it (snooze), or sends the agent in the tab the text of the
+prompt file PROMPT_REF as if typed there (message; refused while the
+agent waits on a prompt). session-of prints the newest agent session
 for a worktree on this host.";
 
 fn usage_error() -> ExitCode {
@@ -83,6 +86,8 @@ pub fn main(args: &[&str]) -> ExitCode {
                     Ok(until) => actions::snooze(host, window, until),
                     Err(_) => Err(format!("snooze: UNTIL must be Unix seconds, not {until}")),
                 },
+                ("message", [prompt_ref]) => actions::message_ref(host, session, window, prompt_ref),
+                ("message", []) => Err("message takes a PROMPT_REF".into()),
                 (_, []) => actions::act(action, host, session, window),
                 _ => Err(format!("{action} takes no UNTIL")),
             };

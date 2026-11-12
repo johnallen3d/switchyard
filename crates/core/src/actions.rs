@@ -28,6 +28,9 @@
 //! - snooze (`task act snooze HOST SESSION WINDOW UNTIL`): hide an
 //!   open task in the inbox's Snoozed group until UNTIL, Unix seconds
 //!   (`snoozed_until`); 0 wakes it now.
+//! - message (`task act message HOST SESSION WINDOW PROMPT_REF`): send
+//!   the prompt file's text to the agent in the tab (see `message`), then
+//!   remove the file.
 //! - resume: for an ended task (archived, or its tab or worktree gone), open
 //!   a new tab on the task's host that recreates the worktree on its branch
 //!   and resumes the agent session, replace the ended entry with the new
@@ -36,8 +39,11 @@
 //! Archiving doesn't delete an unmerged branch: only uncommitted work can be
 //! lost, and a resume finds its commits again.
 
+use std::time::Duration;
+
 use crate::hosts::catalog;
 use crate::launch::launch;
+use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
 use crate::tasks::{MERGED_SH, load_tasks, save_tasks};
@@ -139,6 +145,52 @@ pub fn snooze(host: &str, window: &str, until: u64) -> Result<String, String> {
     save_tasks(&tasks)?;
     crate::server::refresh();
     Ok(if until > 0 { format!("snoozed {label}") } else { format!("woke {label}") })
+}
+
+/// How long to let the agent take a paste before pressing Enter.
+const PASTE_SETTLE: Duration = Duration::from_millis(150);
+
+/// Send `text` to the agent in `window` on `host`, as if John typed it in
+/// the tab: one paste (so newlines stay in the message), then Enter. An
+/// idle agent starts a turn on it; a working one takes it into the current
+/// turn at its next chance (Claude after the running tool call, Pi as a
+/// steering message). An agent waiting on a prompt (`blocked`) is refused,
+/// since the keys would answer the prompt instead.
+pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("nothing to send".into());
+    }
+    let pane = crate::transcript::agent_pane(host, session, window)?;
+    let block = pane["block"].as_str().filter(|b| !b.is_empty()).ok_or("no agent in that tab")?;
+    let label = load_tasks()
+        .ok()
+        .and_then(|tasks| {
+            tasks.iter().find(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window)).map(label_of)
+        })
+        .unwrap_or_else(|| "the agent".into());
+    if pane["state"].as_str() == Some("blocked") {
+        return Err(format!("{label} is waiting on a prompt; answer it in its tab"));
+    }
+    let event = serde_json::json!({
+        "session_id": session,
+        "block_id": block,
+        "event": { "type": "paste", "payload": { "text": text } },
+    })
+    .to_string();
+    rex(host, &["api", "call", "block.event", &event])?;
+    std::thread::sleep(PASTE_SETTLE);
+    rex(host, &["send-key", "-s", session, "-b", block, "enter"])?;
+    Ok(format!("sent to {label}"))
+}
+
+/// `message` with the text of a prompt file (`LABEL:ID`, see `prompts`),
+/// which is removed once sent.
+pub fn message_ref(host: &str, session: &str, window: &str, prompt_ref: &str) -> Result<String, String> {
+    let text = fetch_prompt(prompt_ref)?;
+    let sent = message(host, session, window, &text)?;
+    discard_prompt(prompt_ref);
+    Ok(sent)
 }
 
 fn open_task<'a>(tasks: &'a mut [serde_json::Value], host: &str, window: &str) -> Result<&'a mut serde_json::Value, String> {

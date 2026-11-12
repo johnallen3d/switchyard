@@ -293,6 +293,11 @@ pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
     logged("snooze", actions::snooze(&p.host, &p.window, until))
 }
 
+/// Send `text` to the agent in the pick's tab, as if typed there.
+pub fn message(p: &Pick, text: &str) -> Result<String, String> {
+    logged("message", actions::message(&p.host, &p.session, &p.window, text))
+}
+
 /// Resume an ended task in a new tab and show it.
 pub fn resume(p: &Pick) -> Result<(), String> {
     let out = logged("resume", actions::act("resume", &p.host, &p.session, &p.window))?;

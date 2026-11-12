@@ -28,20 +28,20 @@ use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::{DefaultTerminal, Frame};
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::TextArea;
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
 use switchyard_core::prompts::{parse_prompt_ref, prompt_dir, prune_prompts};
-use switchyard_core::rex::{local_label, log, now, select};
+use switchyard_core::rex::{local_label, log, select};
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
+use switchyard_ui::prompt_box::{self, PromptBox, place_cursor, text_field, text_key};
 use switchyard_ui::protocol::{Title, clear_title, hex};
-use unicode_width::UnicodeWidthChar;
 
 const ICON_REPO: &str = "\u{f0ea0}"; // nf-md-source_repository
 const ICON_GROUP: &str = "\u{f024b}"; // nf-md-folder_multiple
@@ -77,7 +77,7 @@ const PROMPT_MIN_ROWS: u16 = 3;
 const PROMPT_MAX_ROWS: u16 = 6;
 /// The prompt box around its text: soft top and bottom edges, a gap and the
 /// chip row.
-const PROMPT_CHROME_ROWS: u16 = 4;
+const PROMPT_CHROME_ROWS: u16 = prompt_box::CHROME_ROWS;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Item {
@@ -165,12 +165,8 @@ struct App {
     /// `text_key`).
     name: TextArea<'static>,
     item: TextArea<'static>,
-    prompt: TextArea<'static>,
-    /// This picker's prompt file reference, `LABEL:ID`.
-    prompt_ref: String,
-    /// The prompt as last saved, and whether saving it worked.
-    saved_prompt: String,
-    prompt_saved: bool,
+    /// The prompt, kept in its prompt file (see `PromptBox`).
+    prompt: PromptBox,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -235,10 +231,7 @@ impl App {
             query: String::new(),
             name: text_field(),
             item: text_field(),
-            prompt: text_field(),
-            prompt_ref: format!("{}:{}-{}", local_label(), std::process::id(), now()),
-            saved_prompt: String::new(),
-            prompt_saved: true,
+            prompt: PromptBox::new(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -441,7 +434,7 @@ impl App {
 
     /// The prompt as sent: surrounding blank space dropped.
     fn prompt_text(&self) -> String {
-        self.prompt.lines().join("\n").trim().to_string()
+        self.prompt.text()
     }
 
     /// Whether closing would throw away typed text (only agent work keeps a
@@ -468,13 +461,7 @@ impl App {
                     hex(&name),
                     HARNESSES[self.harness]
                 );
-                let prompt_ref = if self.prompt_text().is_empty() {
-                    ""
-                } else if self.prompt_saved {
-                    self.prompt_ref.as_str()
-                } else {
-                    return String::new();
-                };
+                let Some(prompt_ref) = self.prompt.saved_ref() else { return String::new() };
                 let item = self.item_text();
                 if !item.is_empty() {
                     pick = format!("{pick}/{}/{}", hex(prompt_ref), hex(&item));
@@ -486,34 +473,9 @@ impl App {
         }
     }
 
-    /// Keep the prompt file in step with the field; an empty prompt has none.
+    /// Keep the prompt file in step with the field.
     fn save_prompt(&mut self) {
-        let text = self.prompt_text();
-        if text == self.saved_prompt {
-            return;
-        }
-        let Ok((_, id)) = parse_prompt_ref(&self.prompt_ref) else {
-            self.prompt_saved = false;
-            return;
-        };
-        let dir = prompt_dir();
-        let path = dir.join(id);
-        self.prompt_saved = if text.is_empty() {
-            match std::fs::remove_file(&path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => false,
-                _ => true,
-            }
-        } else {
-            // Atomically, so a launch never reads half a prompt.
-            let tmp = dir.join(format!("{id}.tmp"));
-            std::fs::create_dir_all(&dir)
-                .and_then(|_| std::fs::write(&tmp, &text))
-                .and_then(|_| std::fs::rename(&tmp, &path))
-                .is_ok()
-        };
-        if self.prompt_saved {
-            self.saved_prompt = text;
-        }
+        self.prompt.save();
     }
 
     /// Switching away from Rex drops the float's mode, and without it Enter
@@ -550,10 +512,7 @@ impl App {
             Focus::Item => {
                 self.item.insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
             }
-            Focus::Prompt => {
-                let text = text.replace('\t', "    ");
-                self.prompt.insert_str(text.chars().filter(|&c| c == '\n' || !c.is_control()).collect::<String>());
-            }
+            Focus::Prompt => self.prompt.paste(&text),
         }
     }
 
@@ -673,8 +632,8 @@ impl App {
                 // Rex's mode takes plain Enter to act, so a newline is alt- or
                 // shift-Enter (or arrives in a paste).
                 Focus::Prompt => match k.code {
-                    KeyCode::Up if self.prompt.screen_cursor().row == 0 => self.focus = Focus::Item,
-                    _ => text_key(&mut self.prompt, k),
+                    KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => self.focus = Focus::Item,
+                    _ => self.prompt.key(k),
                 },
             },
         }
@@ -690,7 +649,7 @@ impl App {
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
         let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
-        let prompt_rows = if agent { self.prompt_rows(prompt_width(inner.width)).min(spare.max(1)) } else { 0 };
+        let prompt_rows = if agent { self.prompt.rows(inner.width, PROMPT_MIN_ROWS, PROMPT_MAX_ROWS).min(spare.max(1)) } else { 0 };
         let form_rows = if agent { 3 + prompt_rows + PROMPT_CHROME_ROWS } else { 2 };
         let [search, rule1, _, body, _, rule2, _, form, _, footer] = Layout::vertical([
             Constraint::Length(1),
@@ -884,11 +843,6 @@ impl App {
         }
     }
 
-    /// Text rows the prompt box needs for its prompt at `width` columns.
-    fn prompt_rows(&self, width: usize) -> u16 {
-        (wrap(&self.prompt.lines().join("\n"), width).len() as u16).clamp(PROMPT_MIN_ROWS, PROMPT_MAX_ROWS)
-    }
-
     fn draw_form(&mut self, f: &mut Frame, area: Rect, prompt_rows: u16) {
         let [name_row, item_row, _, card]: [Rect; 4] = Layout::vertical([
             Constraint::Length(1),
@@ -1017,53 +971,12 @@ impl App {
     /// over the chips row.
     fn draw_prompt(&mut self, f: &mut Frame, card: Rect, rows: u16) {
         let p = self.p;
-        if card.height < PROMPT_CHROME_ROWS + 1 {
-            return;
-        }
-        let rows = rows.min(card.height - PROMPT_CHROME_ROWS);
         let focused = self.focus == Focus::Prompt;
         let fill = if focused { p.overlay } else { p.surface };
-        let w = card.width as usize;
-        if w < 4 {
+        self.prompt.set_placeholder("What should the agent do? (optional)");
+        let Some((chips_area, skip)) = self.prompt.draw(f, &p, card, rows, focused, self.corners.as_ref()) else {
             return;
-        }
-        let buf = f.buffer_mut();
-        buf.set_style(Rect { y: card.y + 1, height: card.height - 2, ..card }, Style::new().bg(fill));
-        let edge = |l: &str, mid: &str, r: &str| {
-            Line::from(vec![
-                Span::styled(l.to_string(), Style::new().fg(fill).bg(p.base)),
-                Span::styled(mid.repeat(w - 2), Style::new().fg(fill).bg(p.base)),
-                Span::styled(r.to_string(), Style::new().fg(fill).bg(p.base)),
-            ])
         };
-        // Square corners unless the terminal can show rounded ones; quadrant
-        // blocks would leave a step.
-        f.render_widget(edge("▄", "▄", "▄"), Rect { height: 1, ..card });
-        let bottom = card.y + card.height - 1;
-        f.render_widget(edge("▀", "▀", "▀"), Rect { y: bottom, height: 1, ..card });
-        if let Some(corners) = &self.corners {
-            let right = card.x + card.width - 1;
-            for (x, y, corner) in [
-                (card.x, card.y, chrome::Corner::TopLeft),
-                (right, card.y, chrome::Corner::TopRight),
-                (card.x, bottom, chrome::Corner::BottomLeft),
-                (right, bottom, chrome::Corner::BottomRight),
-            ] {
-                corners.put(f.buffer_mut(), x, y, corner, fill, p.base);
-            }
-        }
-
-        let text = Rect { x: card.x + 2, y: card.y + 1, width: card.width.saturating_sub(4), height: rows };
-        self.prompt.set_style(Style::new().fg(p.text).bg(fill));
-        self.prompt.set_placeholder_text("What should the agent do? (optional)");
-        self.prompt.set_placeholder_style(Style::new().fg(p.muted).bg(fill));
-        f.render_widget(&self.prompt, text);
-        if focused {
-            place_cursor(f, &self.prompt, text);
-        }
-        let skip = self.prompt.scroll_offset().0;
-
-        let chips_area = Rect { x: card.x + 1, y: card.y + 2 + rows, width: card.width.saturating_sub(2), height: 1 };
         let (left, mut right) = self.chips(fill);
         if skip > 0 {
             right.insert(0, Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted)));
@@ -1149,7 +1062,7 @@ impl App {
                     hints.push(("⇥", next, p.subtle));
                     let spawn_label = if ready {
                         "spawn"
-                    } else if !self.prompt_saved {
+                    } else if !self.prompt.saved_ok {
                         "spawn (prompt not saved)"
                     } else if self.target_path().is_none() {
                         "spawn (pick a folder)"
@@ -1183,86 +1096,6 @@ fn item_char(c: char) -> bool {
     !c.is_whitespace() && !c.is_control()
 }
 
-/// An empty name or prompt field: word-wrapped, with no line highlight or
-/// drawn cursor (the terminal's own cursor is placed instead).
-fn text_field() -> TextArea<'static> {
-    let mut t = TextArea::default();
-    t.set_wrap_mode(WrapMode::WordOrGlyph);
-    t.set_cursor_line_style(Style::default());
-    t.set_cursor_style(Style::default());
-    t
-}
-
-/// Edit a field with ratatui-textarea's emacs/readline keys (ctrl-a/e/b/f,
-/// alt-b/f, ctrl-k, ctrl-w, ctrl-y to yank, …), except that ctrl-u deletes
-/// to the line start as in a shell, so undo moves to ctrl-z or ctrl-_.
-fn text_key(field: &mut TextArea<'static>, k: KeyEvent) {
-    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-    match k.code {
-        KeyCode::Char('u') if ctrl => {
-            field.delete_line_by_head();
-        }
-        // ctrl-_ arrives as ctrl-7 from terminals without key reporting.
-        KeyCode::Char('z' | '_' | '/' | '7') if ctrl => {
-            field.undo();
-        }
-        // The textarea has no alt-e; make it end of word, just past its
-        // last character as in a shell (WordEnd stops on that character).
-        KeyCode::Char('e') if k.modifiers.contains(KeyModifiers::ALT) => {
-            field.move_cursor(CursorMove::WordEnd);
-            field.move_cursor(CursorMove::Forward);
-        }
-        _ => {
-            field.input(k);
-        }
-    }
-}
-
-/// Put the terminal cursor where `field`, drawn in `area`, has its cursor.
-fn place_cursor(f: &mut Frame, field: &TextArea, area: Rect) {
-    let c = field.screen_cursor();
-    let (top, left) = field.scroll_offset();
-    let (row, col) = (c.row.saturating_sub(top as usize) as u16, c.col.saturating_sub(left as usize) as u16);
-    if row < area.height && col < area.width {
-        f.set_cursor_position((area.x + col, area.y + row));
-    }
-}
-
-/// Columns of prompt text in a prompt box `card_width` wide: two of padding
-/// on each side, plus one so the cursor fits after a full row.
-fn prompt_width(card_width: u16) -> usize {
-    (card_width as usize).saturating_sub(5).max(1)
-}
-
-/// `text` word-wrapped into display rows of at most `width` columns,
-/// newlines starting new rows; a word longer than a row is split. Spaces
-/// stay at the end of the row they follow, so the rows join back into the
-/// text. A full last row gets an empty one after it, where the cursor goes.
-fn wrap(text: &str, width: usize) -> Vec<String> {
-    let mut rows = Vec::new();
-    for line in text.split('\n') {
-        let mut row = String::new();
-        for c in line.chars() {
-            if str_width(&row) + c.width().unwrap_or(0) > width && !row.is_empty() && c != ' ' {
-                // Break after the row's last space, unless that leaves nothing.
-                match row.rfind(' ').map(|i| i + 1).filter(|&i| i < row.len()) {
-                    Some(i) if !row[..i].trim().is_empty() => {
-                        let rest = row.split_off(i);
-                        rows.push(std::mem::replace(&mut row, rest));
-                    }
-                    _ => rows.push(std::mem::take(&mut row)),
-                }
-            }
-            row.push(c);
-        }
-        rows.push(row);
-    }
-    if rows.last().is_some_and(|r| str_width(r) >= width) {
-        rows.push(String::new());
-    }
-    rows
-}
-
 /// Run the picker. `home` and `home_folders` are the config host's label and
 /// zoxide folders when the float passes them in; standalone, the picker
 /// lists this host's own.
@@ -1294,9 +1127,7 @@ pub fn run_picker(kind: Kind, home: String, home_folders: String, standalone: bo
     if result.is_ok() {
         // Closed from the keyboard, not by a launch (which closes the float
         // and may still need the prompt file): drop the prompt and the mode.
-        if let Ok((_, id)) = parse_prompt_ref(&app.prompt_ref) {
-            let _ = std::fs::remove_file(prompt_dir().join(id));
-        }
+        app.prompt.discard();
         if app.standalone {
             // Leave the shell's title as it was before the picks.
             clear_title();
@@ -1350,13 +1181,13 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         app.note = Some((problem.into(), true));
         return Ok(false);
     }
-    let prompt_ref = if app.prompt_text().is_empty() {
-        None
-    } else if app.prompt_saved {
-        Some(app.prompt_ref.clone())
-    } else {
-        app.note = Some(("the prompt couldn't be saved".into(), true));
-        return Ok(false);
+    let prompt_ref = match app.prompt.saved_ref() {
+        Some("") => None,
+        Some(r) => Some(r.to_string()),
+        None => {
+            app.note = Some(("the prompt couldn't be saved".into(), true));
+            return Ok(false);
+        }
     };
     let item = app.item_text();
     let host = app.agent_host().to_string();
@@ -1435,10 +1266,10 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 /// (ctrl-z undoes that). An editor that fails, such as nvim's `:cq`, keeps
 /// the prompt as it was.
 fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    let Ok((_, id)) = parse_prompt_ref(&app.prompt_ref) else { return Ok(()) };
+    let Ok((_, id)) = parse_prompt_ref(&app.prompt.file_ref) else { return Ok(()) };
     let dir = prompt_dir();
     let path = dir.join(format!("{id}.edit.md"));
-    let before = app.prompt.lines().join("\n");
+    let before = app.prompt.field.lines().join("\n");
     if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n"))) {
         log(&format!("could not write the prompt for the editor: {e}"));
         return Ok(());
@@ -1536,10 +1367,10 @@ mod tests {
         app.host = app.hosts.iter().position(|h| h == "folder-host").unwrap();
         app.query = "remote".into();
         app.refilter();
-        app.prompt.insert_str("do the work");
-        app.prompt_ref = "picker-host:test-prompt".into();
-        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}/{}", hex("folder-host"), hex("/repos/remote"), hex("folder-work"), HARNESSES[0], hex(&app.prompt_ref)));
-        app.prompt_saved = false;
+        app.prompt.field.insert_str("do the work");
+        app.prompt.file_ref = "picker-host:test-prompt".into();
+        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}/{}", hex("folder-host"), hex("/repos/remote"), hex("folder-work"), HARNESSES[0], hex(&app.prompt.file_ref)));
+        app.prompt.saved_ok = false;
         assert!(app.pick().is_empty());
     }
 
@@ -1556,9 +1387,9 @@ mod tests {
         app.item.insert_str("#42");
         assert_eq!(app.pick(), format!("{base}//{}", hex("#42")));
         assert!(app.has_draft());
-        app.prompt.insert_str("do the work");
-        app.prompt_ref = "picker-host:test-prompt".into();
-        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt_ref), hex("#42")));
+        app.prompt.field.insert_str("do the work");
+        app.prompt.file_ref = "picker-host:test-prompt".into();
+        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42")));
         app.focus = Focus::Name;
         app.next_focus(true);
         assert!(app.focus == Focus::Item);

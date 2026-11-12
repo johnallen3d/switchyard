@@ -39,7 +39,13 @@
 -- seconds, 0 to wake), or rex-tab-picker:snooze-invalid while the typed
 -- time can't be read. Enter snoozes (`switchyard task act snooze ... UNTIL`)
 -- and types Enter back so the float shows it; Escape types Escape back to
--- close the prompt.
+-- close the prompt. ctrl+y opens the float's reply box on an agent; while
+-- it is open the title is
+-- rex-tab-picker:message:PROMPT_REF:TARGET/SESSION/WINDOW (PROMPT_REF
+-- hex-encoded: the prompt file holding the message on the float's host),
+-- or rex-tab-picker:message-empty while there is nothing to send. Enter
+-- sends it (`switchyard task act message ... PROMPT_REF`) and types Enter
+-- back so the float closes the box; Escape types Escape back to close it.
 -- TARGET is "-" for this host or the hex-encoded host label. See
 -- ../../crates/tab-picker/src/main.rs and
 -- ../../crates/core/src/actions.rs.
@@ -152,8 +158,10 @@ local preview = { want = nil, seen = nil, job = nil, key = nil, at = nil, failed
 local function title_pane()
   local t = float_server().block.call(T, "title", float)
   local title = (t and t.title) or ""
-  -- The link chooser and the snooze prompt stay over the same row.
-  if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze") then return preview.want end
+  -- The link chooser, the snooze prompt and the reply box stay over the
+  -- same row.
+  if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze")
+    or title:match("^rex%-tab%-picker:message") then return preview.want end
   local action, target, session, window = title:match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)")
   if action == nil or action == "resume" then return nil end
   window = window:gsub("%s+$", "")
@@ -274,6 +282,12 @@ local function read_pick(ctx, key)
     return { action = "snooze", wake_at = wake_at, host = shere and host_label() or util.unhex(starget), here = shere,
       session_id = ssession, window_id = swindow, float = block_id }
   end
+  local prompt_ref, mtarget, msession, mwindow = title:match("^rex%-tab%-picker:message:(%x+):([^/]+)/([^/]+)/([^/]+)")
+  if prompt_ref ~= nil then
+    local mhere = mtarget == "-"
+    return { action = "message", prompt_ref = util.unhex(prompt_ref), host = mhere and host_label() or util.unhex(mtarget),
+      here = mhere, session_id = msession, window_id = (mwindow:gsub("%s+$", "")), float = block_id }
+  end
   local action, target, session_id, window_id = title
     :match("^rex%-tab%-picker:([%a%-]+):([^/]+)/([^/]+)/([^/]+)/?%d*$")
   if action == nil then return nil end
@@ -339,6 +353,12 @@ rex.action{
       act("snooze", pick, pick.wake_at)
       return type_into(ctx, pick.float, "\r")
     end
+    -- The reply box: send it, then type Enter back so the float closes it.
+    -- A refusal (an agent waiting on a prompt) keeps the box open.
+    if pick.action == "message" then
+      act("message", pick, pick.prompt_ref)
+      return type_into(ctx, pick.float, "\r")
+    end
     -- An armed pin: save it, then type Enter back so the float shows it.
     if pick.action == "pin" then
       act("pin", pick)
@@ -356,15 +376,17 @@ rex.action{
   end,
 }
 
--- Escape closes the float, or with a work item armed, the link chooser or
--- the snooze prompt open, types Escape back so the float cancels just that.
+-- Escape closes the float, or with a work item armed, the link chooser,
+-- the snooze prompt or the reply box open, types Escape back so the float
+-- cancels just that.
 rex.action{
   name  = "tab_picker_cancel",
   title = "Close",
   run   = function(ctx, args)
     local _, block_id = util.find_float(ctx, label)
     local title = block_id ~= nil and float_title(ctx, block_id) or ""
-    if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze") then
+    if title:match("^rex%-tab%-picker:link:") or title:match("^rex%-tab%-picker:snooze")
+      or title:match("^rex%-tab%-picker:message") then
       return type_into(ctx, block_id, "\27")
     end
     close_picker(ctx)

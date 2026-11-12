@@ -40,9 +40,9 @@ const BYTES: usize = 96 * 1024;
 
 /// A tab's agent pane, run as `rex [-S HOST] do -e SCRIPT --json --args
 /// '{"session":ID,"window":ID}'`: the tiled pane with the most urgent
-/// program status, as host_rows.lua picks a tab's, with its program, that
-/// program's process ID and the foreground process's directory; `{}` when
-/// no pane reports one.
+/// program status, as host_rows.lua picks a tab's, with its block, status,
+/// program, that program's process ID and the foreground process's
+/// directory; `{}` when no pane reports one.
 const PANE_SCRIPT: &str = r#"
 local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
@@ -68,12 +68,18 @@ for _, w in ipairs((view and view.windows) or {}) do
     local proc = rex.block.call(T, "process", { session_id = sid, block_id = best.block }) or {}
     local fg = proc.foreground or proc.child or {}
     local r = best.record
-    return { app = r.effective_app or r.app or "", pid = (r.owner and r.owner.pid) or fg.pid or 0,
-      cwd = fg.cwd or "" }
+    return { block = best.block, state = r.state or "", app = r.effective_app or r.app or "",
+      pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "" }
   end
 end
 error("tab not found", 0)
 "#;
+
+/// The agent pane of a tab on `host` (see PANE_SCRIPT).
+pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, String> {
+    let args = json!({ "session": session, "window": window }).to_string();
+    rex_json(host, &["do", "-e", PANE_SCRIPT, "--json", "--args", &args])
+}
 
 /// The transcript of the agent in a tab, as JSON (see the module docs).
 /// `target` names the tab's host as the picker's title does: `-` for this
@@ -95,9 +101,7 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
         })
     });
     let f = |k: &str| task.as_ref().and_then(|t| t[k].as_str()).unwrap_or("").to_string();
-    let args = json!({ "session": session, "window": window }).to_string();
-    let pane = rex_json(host, &["do", "-e", PANE_SCRIPT, "--json", "--args", &args]);
-    let pane = match (pane, &task) {
+    let pane = match (agent_pane(host, session, window), &task) {
         (Ok(p), _) => p,
         (Err(_), Some(_)) => json!({}),
         (Err(e), None) => return Err(e),

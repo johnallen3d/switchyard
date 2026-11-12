@@ -761,7 +761,6 @@ dependencies = [
  "ratatui-textarea",
  "switchyard-core",
  "switchyard-ui",
- "unicode-width",
 ]
 
 [[package]]
@@ -783,6 +782,7 @@ dependencies = [
  "libc",
  "nucleo-matcher",
  "ratatui",
+ "ratatui-textarea",
  "switchyard-core",
  "unicode-width",
 ]
