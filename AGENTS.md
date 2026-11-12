@@ -12,9 +12,30 @@
   or copy credentials to make commands work.
 - Keep changes scoped. Do not commit, push, deploy, close cards, or remove
   worktrees without authorization.
-- Build the affected binaries and give the user the exact checkout path and
-  commands to try the change before committing or pushing. Hand off changed
-  paths, implementation attribution, checks actually run, and deployment gaps.
+- Build the affected binaries for code changes and give the user the exact
+  checkout path and commands to try the change before committing or pushing.
+  Hand off changed paths, implementation attribution, checks actually run, and
+  any local validation gaps.
+
+## Completion is not deployment
+
+**Switchyard does not own deployment. Do not keep completed Switchyard cards
+open waiting for deployment or installation.** Host rollout belongs to
+system-config and is a separate lifecycle, not this repository's definition of
+completion.
+
+- Complete repository work with the requested changes and task-relevant local
+  validation. Documentation-only work needs no binary build or activation.
+- Do not add deployment, host installation, live-float checks, or a real spawn
+  as completion gates unless John explicitly requested them as acceptance
+  criteria. Report unperformed runtime checks as handoff gaps, not automatic
+  reasons to keep a completed card open.
+- Close completed, in-scope cards when John explicitly authorizes closure or
+  actually invokes `/wrap`; do not wait for a later host rollout. Completion
+  alone still does not authorize closure.
+- Never start deployment as part of ordinary completion or `/wrap`. If John
+  separately requests it, follow system-config's deployment workflow and report
+  its outcome separately from Switchyard repository completion.
 
 ## Boundaries and validation
 
@@ -30,7 +51,7 @@
   as installation or a standalone run as verification of the live float.
 - Pre-push activation is not implemented. Do not bypass system-config's
   deployment coordinator or replace Home Manager-managed symlinks by hand.
-- For authorized deployment, follow system-config's instructions, coordinator
+- For separately authorized deployment, follow system-config's instructions, coordinator
   status checks, locks, and provenance gates. Review the lock diff for unrelated
   input changes. Shared changes require installation verification on Mac,
   Omarchy, Miller, and Drummer unless fewer hosts were requested. Report failed
