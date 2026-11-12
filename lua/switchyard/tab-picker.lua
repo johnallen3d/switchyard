@@ -6,72 +6,86 @@
 -- already, cmd+k does nothing. The picker acts on its picks itself and
 -- stays open, so the tab stays until it is quit (Escape or ctrl-c), which
 -- closes it; the next cmd+k opens a new one.
+--
+-- An action can only view (or add windows to) sessions its connection is
+-- attached to, and rex.session.attach is for scripts, so the finding and
+-- opening run as a `rex do` script (FIND_OR_OPEN), which attaches to each
+-- session. It prints the tab as JSON: session_id, window_id, and whether
+-- that is its session's active window.
 local util = require("switchyard.float")
 
-local SESSION = "agents"
-local LABEL = "switchyard"
-local WINDOW = "switchyard"
+local FIND_OR_OPEN = "local COMMAND = " .. string.format("%q", rex.json.encode(util.float_command("switchyard"))) .. [==[
+
+local SESSION, LABEL, WINDOW = "agents", "switchyard", "switchyard"
+COMMAND = rex.json.decode(COMMAND)
 
 local function pane_spec()
   return rex.layout.block{
     flavor  = "com.superlogical.terminal.shell",
     label   = LABEL,
-    options = { command = util.float_command("switchyard") },
+    options = { command = COMMAND },
   }
 end
 
--- The picker's tab: its session_id and window_id, or nil. Also the agents
--- session's ID, to open the tab in when there is none.
-local function find_tab()
-  local list, err = rex.call("session.list")
-  if list == nil then error(err, 0) end
-  local agents
-  for _, session in ipairs(list.sessions or {}) do
-    rex.session.attach{ session_id = session.session_id }
-    local view = rex.session.view{ session_id = session.session_id }
-    if view ~= nil then
-      if agents == nil and view.label == SESSION then agents = session.session_id end
-      for _, window in ipairs(view.windows or {}) do
-        for _, layer in ipairs(window.layers or {}) do
-          if layer.kind == "tiled" then
-            for _, block in ipairs(layer.blocks or {}) do
-              if block.label == LABEL then
-                return { session_id = session.session_id, window_id = window.window_id,
-                  active = view.active_window_id == window.window_id }
-              end
-            end
+local list, list_err = rex.call("session.list")
+if list == nil then error(list_err, 0) end
+local agents
+for _, session in ipairs(list.sessions or {}) do
+  local _, attach_err = rex.session.attach{ session_id = session.session_id }
+  if attach_err ~= nil then error(attach_err, 0) end
+  local view, view_err = rex.session.view{ session_id = session.session_id }
+  if view == nil then error(view_err, 0) end
+  if agents == nil and view.label == SESSION then agents = session.session_id end
+  for _, window in ipairs(view.windows or {}) do
+    for _, layer in ipairs(window.layers or {}) do
+      if layer.kind == "tiled" then
+        for _, block in ipairs(layer.blocks or {}) do
+          if block.label == LABEL then
+            return rex.json.encode({ session_id = session.session_id, window_id = window.window_id,
+              active = view.active_window_id == window.window_id })
           end
         end
       end
     end
   end
-  return nil, agents
 end
 
-local function open_tab(agents)
-  if agents == nil then
-    local created, err = rex.call("session.create", {
-      label = SESSION,
-      initial_windows = { { window_label = WINDOW, layout = pane_spec() } },
-    })
-    if created == nil then error(err, 0) end
-    local first = (created.initial_windows or {})[1] or {}
-    return { session_id = created.session_id, window_id = first.window_id }
-  end
-  local window, err = rex.call("session.new_window", {
-    session_id = agents, window_label = WINDOW, focus = true, layout = pane_spec(),
+if agents == nil then
+  local created, err = rex.call("session.create", {
+    label = SESSION,
+    initial_windows = { { window_label = WINDOW, layout = pane_spec() } },
   })
-  if window == nil then error(err, 0) end
-  return { session_id = agents, window_id = window.window_id }
+  if created == nil then error(err, 0) end
+  local first = (created.initial_windows or {})[1] or {}
+  return rex.json.encode({ session_id = created.session_id, window_id = first.window_id, active = true })
+end
+local window, err = rex.session.new_window{
+  session_id = agents, window_label = WINDOW, focus = true, layout = pane_spec(),
+}
+if window == nil then error(err, 0) end
+return rex.json.encode({ session_id = agents, window_id = window.window_id, active = false })
+]==]
+
+-- The picker's tab, found or just opened (see FIND_OR_OPEN).
+local function find_or_open()
+  local r, err = rex.exec({ "rex", "do", "-e", FIND_OR_OPEN }, { env = util.cli_env() })
+  if r == nil then error(err, 0) end
+  if not r.ok then error("can't find or open the switchyard tab: " .. (r.stderr:gsub("%s+$", "")), 0) end
+  -- `rex do` prints the returned string as JSON.
+  local ok, out = pcall(rex.json.decode, r.stdout)
+  if ok and type(out) == "string" then ok, out = pcall(rex.json.decode, out) end
+  if not ok or type(out) ~= "table" or out.session_id == nil then
+    error("can't read the switchyard tab from: " .. r.stdout, 0)
+  end
+  return out
 end
 
 rex.action{
   name  = "tab_picker",
   title = "Go to Tab…",
   run   = function(ctx, args)
-    local tab, agents = find_tab()
-    if tab ~= nil and tab.session_id == ctx.session_id and tab.active then return end
-    tab = tab or open_tab(agents)
+    local tab = find_or_open()
+    if tab.session_id == ctx.session_id and tab.active then return end
     rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
   end,
 }
