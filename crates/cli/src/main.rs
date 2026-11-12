@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use switchyard_spawn::Kind;
 use switchyard_tabs::View;
 
-const USAGE: &str = "usage: switchyard [--view all|archive|usage]
+const USAGE: &str = "usage: switchyard [--view all|usage|archive]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -28,7 +28,7 @@ Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-r (review), ctrl-l (open the task's work item), ctrl-t (pin) and
 ctrl-s (snooze), staying open until Escape or ctrl-c. h and l (with
-nothing typed) move along the top bar: All, Archive, Usage. new opens the
+nothing typed) move along the top bar: All, Usage, Archive. new opens the
 new-session picker: agent work by default, or a plain session with
 --session. link and unlink record the work items the current branch is
 for (see switchyard link --help). usage opens the picker's Usage view;
@@ -37,7 +37,7 @@ host only. Configure usage.sessions, usage.quotas and usage.rates in the
 Home Manager settings for account labels and prices. server runs the data
 server (see switchyard server --help).";
 
-const FLOAT_USAGE: &str = "usage: switchyard float tabs [--current SESSION/WINDOW] [--view all|archive|usage] [--wait]
+const FLOAT_USAGE: &str = "usage: switchyard float tabs [--current SESSION/WINDOW] [--view all|usage|archive] [--wait]
        switchyard float new [--kind agent|session] --home LABEL FOLDERS
 
 The pickers in the Rex config's floats. tabs opens at once and takes its

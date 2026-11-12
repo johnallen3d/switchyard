@@ -22,11 +22,11 @@
 //!   urgency order, then its other tabs. Pinned tasks lead the list,
 //!   Snoozed ones trail it, and open tasks whose session isn't listed come
 //!   just before Snoozed, under No tab.
+//! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): ended tasks grouped by project (those with a
 //!   worktree left behind first), under headings for how they ended
 //!   (Left behind, Merged, Archived, Closed), newest first; ctrl-f hides the
 //!   archived ones, leaving those whose tab or worktree went without one.
-//! - Usage: read-only accounting (see usage.rs).
 //!
 //! ctrl-o cycles a profile filter (all, personal, work): the registry's
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
@@ -125,12 +125,12 @@ enum Tasks {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     All,
-    Archive,
     Usage,
+    Archive,
 }
 
 impl View {
-    /// `all`, `archive` or `usage`.
+    /// `all`, `usage` or `archive`.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "all" => Some(View::All),
@@ -142,13 +142,13 @@ impl View {
 
     fn next(self, back: bool) -> Self {
         match (self, back) {
-            (View::All, false) | (View::Usage, true) => View::Archive,
-            (View::Archive, false) | (View::All, true) => View::Usage,
-            (View::Usage, false) | (View::Archive, true) => View::All,
+            (View::All, false) | (View::Archive, true) => View::Usage,
+            (View::Usage, false) | (View::All, true) => View::Archive,
+            (View::Archive, false) | (View::Usage, true) => View::All,
         }
     }
 
-    const ALL: [View; 3] = [View::All, View::Archive, View::Usage];
+    const ALL: [View; 3] = [View::All, View::Usage, View::Archive];
 
     /// Its label in the top bar.
     fn label(self) -> &'static str {
@@ -2699,7 +2699,7 @@ mod tests {
     fn usage_is_integrated_read_only_and_handles_narrow_frames() {
         let mut app = inbox();
         let mut view = View::All;
-        for expected in [View::Archive, View::Usage, View::All] {
+        for expected in [View::Usage, View::Archive, View::All] {
             view = view.next(false);
             assert!(view == expected);
             assert!(view.next(true).next(false) == view);
