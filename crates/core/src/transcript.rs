@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 
 use crate::rex::{host_bash, local_label, rex_json, sh_quote};
 use crate::sessions::session_dir;
-use crate::tasks::load_tasks;
+use crate::tasks::{in_window, load_tasks};
 
 /// How much of the end of a log to read.
 const TAIL: u64 = 2 * 1024 * 1024;
@@ -96,9 +96,7 @@ fn unhex(s: &str) -> String {
 
 fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String> {
     let task = load_tasks().ok().and_then(|tasks| {
-        tasks.into_iter().find(|t| {
-            t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window)
-        })
+        tasks.into_iter().find(|t| t["ended_at"].is_null() && in_window(t, window))
     });
     let f = |k: &str| task.as_ref().and_then(|t| t[k].as_str()).unwrap_or("").to_string();
     let pane = match (agent_pane(host, session, window), &task) {

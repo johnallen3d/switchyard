@@ -290,7 +290,7 @@ pub fn pin(p: &Pick) -> Result<String, String> {
 
 /// Snooze the pick's task until `until` (Unix seconds), or wake it for 0.
 pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
-    logged("snooze", actions::snooze(&p.host, &p.window, until))
+    logged("snooze", actions::snooze(&p.window, until))
 }
 
 /// Send `text` to the agent in the pick's tab, as if typed there.

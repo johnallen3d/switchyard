@@ -61,6 +61,14 @@ pub fn save_tasks(tasks: &[serde_json::Value]) -> Result<(), String> {
     std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Whether `task` was spawned in `window`. Matched on the window alone:
+/// Rex window IDs are unique across servers, but a host's label
+/// (`hostname -s`) can change under a task when macOS takes its name from
+/// the network, which would leave the task unreachable by host.
+pub fn in_window(task: &serde_json::Value, window: &str) -> bool {
+    task["window_id"].as_str() == Some(window)
+}
+
 pub fn record_task(task: serde_json::Value) -> Result<(), String> {
     let mut tasks = load_tasks()?;
     tasks.push(task);

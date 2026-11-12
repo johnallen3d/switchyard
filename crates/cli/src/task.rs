@@ -83,7 +83,7 @@ pub fn main(args: &[&str]) -> ExitCode {
         ["act", action, host, session, window, rest @ ..] if rest.len() <= 1 => {
             let result = match (*action, rest) {
                 ("snooze", [until]) => match until.parse() {
-                    Ok(until) => actions::snooze(host, window, until),
+                    Ok(until) => actions::snooze(window, until),
                     Err(_) => Err(format!("snooze: UNTIL must be Unix seconds, not {until}")),
                 },
                 ("message", [prompt_ref]) => actions::message_ref(host, session, window, prompt_ref),

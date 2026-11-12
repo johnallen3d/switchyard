@@ -46,7 +46,7 @@ use crate::launch::launch;
 use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
-use crate::tasks::{MERGED_SH, load_tasks, save_tasks};
+use crate::tasks::{MERGED_SH, in_window, load_tasks, save_tasks};
 
 /// The tab's agent pane: the first pane of its tiled layer, which is where
 /// `--run` started the agent.
@@ -68,7 +68,7 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
     let task = tasks
         .iter()
         .rev()
-        .find(|t| !t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window))
+        .find(|t| !t["ended_at"].is_null() && in_window(t, window))
         .ok_or("no ended task for that tab")?
         .clone();
     let field = |k: &str| task[k].as_str().unwrap_or("").to_string();
@@ -93,15 +93,11 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
     // The new task takes the ended one's place in the archive, keeping its
     // work items.
     let mut tasks = load_tasks()?;
-    tasks.retain(|t| {
-        !(!t["ended_at"].is_null()
-            && t["host"].as_str() == Some(host.as_str())
-            && t["window_id"].as_str() == Some(window))
-    });
+    tasks.retain(|t| t["ended_at"].is_null() || !in_window(t, window));
     if let Some(new) = tasks
         .iter_mut()
         .rev()
-        .find(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host.as_str()) && t["window_id"].as_str() == Some(window_id.as_str()))
+        .find(|t| t["ended_at"].is_null() && in_window(t, &window_id))
         && task["links"].as_array().is_some_and(|l| !l.is_empty())
     {
         new["links"] = task["links"].clone();
@@ -123,11 +119,11 @@ fn archive_check(worktree: &str, branch: &str) -> String {
     )
 }
 
-/// Pin or unpin the open task in `window` on `host`, as `pinned`; the
-/// outcome says which.
-fn pin(host: &str, window: &str) -> Result<String, String> {
+/// Pin or unpin the open task in `window`, as `pinned`; the outcome says
+/// which.
+fn pin(window: &str) -> Result<String, String> {
     let mut tasks = load_tasks()?;
-    let task = open_task(&mut tasks, host, window)?;
+    let task = open_task(&mut tasks, window)?;
     let pinned = !task["pinned"].as_bool().unwrap_or(false);
     set_or_remove(task, "pinned", pinned.then(|| true.into()));
     let label = label_of(task);
@@ -135,11 +131,11 @@ fn pin(host: &str, window: &str) -> Result<String, String> {
     Ok(format!("{} {label}", if pinned { "pinned" } else { "unpinned" }))
 }
 
-/// Snooze the open task in `window` on `host` until `until` (Unix seconds),
-/// or wake it for 0.
-pub fn snooze(host: &str, window: &str, until: u64) -> Result<String, String> {
+/// Snooze the open task in `window` until `until` (Unix seconds), or wake
+/// it for 0.
+pub fn snooze(window: &str, until: u64) -> Result<String, String> {
     let mut tasks = load_tasks()?;
-    let task = open_task(&mut tasks, host, window)?;
+    let task = open_task(&mut tasks, window)?;
     set_or_remove(task, "snoozed_until", (until > 0).then(|| until.into()));
     let label = label_of(task);
     save_tasks(&tasks)?;
@@ -166,7 +162,7 @@ pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<St
     let label = load_tasks()
         .ok()
         .and_then(|tasks| {
-            tasks.iter().find(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window)).map(label_of)
+            tasks.iter().find(|t| t["ended_at"].is_null() && in_window(t, window)).map(label_of)
         })
         .unwrap_or_else(|| "the agent".into());
     if pane["state"].as_str() == Some("blocked") {
@@ -193,10 +189,10 @@ pub fn message_ref(host: &str, session: &str, window: &str, prompt_ref: &str) ->
     Ok(sent)
 }
 
-fn open_task<'a>(tasks: &'a mut [serde_json::Value], host: &str, window: &str) -> Result<&'a mut serde_json::Value, String> {
+fn open_task<'a>(tasks: &'a mut [serde_json::Value], window: &str) -> Result<&'a mut serde_json::Value, String> {
     tasks
         .iter_mut()
-        .find(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window))
+        .find(|t| t["ended_at"].is_null() && in_window(t, window))
         .ok_or_else(|| "no open task for that tab".to_string())
 }
 
@@ -218,7 +214,7 @@ fn set_or_remove(task: &mut serde_json::Value, key: &str, value: Option<serde_js
 
 pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
     let result = match action {
-        "pin" => pin(host, window),
+        "pin" => pin(window),
         _ => run_action(action, host, session, window),
     };
     // Even a failed archive may have changed the registry or closed the
@@ -235,7 +231,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
         return resume(host, window);
     }
     let mut tasks = load_tasks()?;
-    let here = |t: &serde_json::Value| t["host"].as_str() == Some(host) && t["window_id"].as_str() == Some(window);
+    let here = |t: &serde_json::Value| in_window(t, window);
     // An open task, or for an archive, the latest ended one (closing its tab
     // left the worktree).
     let i = match tasks.iter().position(|t| t["ended_at"].is_null() && here(t)) {
