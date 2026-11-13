@@ -6,8 +6,9 @@
 //! inbox can show recent finishes, then pruned.
 
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::links::{
@@ -40,8 +41,11 @@ pub fn tasks_path() -> PathBuf {
 }
 
 pub fn load_tasks() -> Result<Vec<serde_json::Value>, String> {
-    let path = tasks_path();
-    match std::fs::read(&path) {
+    load_at(&tasks_path())
+}
+
+fn load_at(path: &Path) -> Result<Vec<serde_json::Value>, String> {
+    match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("{}: {e}", path.display())),
@@ -49,8 +53,7 @@ pub fn load_tasks() -> Result<Vec<serde_json::Value>, String> {
 }
 
 /// Replace the registry atomically, so a reader never sees half a file.
-pub fn save_tasks(tasks: &[serde_json::Value]) -> Result<(), String> {
-    let path = tasks_path();
+fn save_at(path: &Path, tasks: &[serde_json::Value]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
@@ -58,7 +61,71 @@ pub fn save_tasks(tasks: &[serde_json::Value]) -> Result<(), String> {
     let mut text = serde_json::to_string_pretty(tasks).map_err(|e| e.to_string())?;
     text.push('\n');
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Read-modify-write the registry under its lock. `f` changes the tasks it
+/// is given, and they are saved only if they changed. Every writer goes
+/// through here, so two of them can't interleave: neither overwrites the
+/// other's save with a copy read before it. `f` must not touch the registry
+/// again (the lock is not reentrant); an error from `f` saves nothing.
+pub fn update_tasks<T>(f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>) -> Result<T, String> {
+    update_at(&tasks_path(), f)
+}
+
+fn update_at<T>(path: &Path, f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>) -> Result<T, String> {
+    let _lock = lock_at(path)?;
+    let mut tasks = load_at(path)?;
+    let before = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
+    let out = f(&mut tasks)?;
+    if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
+        save_at(path, &tasks)?;
+    }
+    Ok(out)
+}
+
+/// An exclusive lock on the registry at `path`, held until the file is
+/// dropped. It is an flock on a sibling file, so the CLI and the picker,
+/// which are other processes, wait on it too.
+fn lock_at(path: &Path) -> Result<File, String> {
+    let lock = path.with_extension("json.lock");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock)
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
+    file.lock().map_err(|e| format!("{}: {e}", lock.display()))?;
+    Ok(file)
+}
+
+/// Whether `a` and `b` are the same task: the same host, window and start.
+fn same_task(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    ["host", "window_id", "created_at"].iter().all(|k| a[*k] == b[*k])
+}
+
+/// Save `task` as the registry's record of its task, leaving the other
+/// records as the registry has them now. For a writer that changes only its
+/// own task (an archive), so it doesn't write back a copy of the rest that it
+/// read earlier. The inbox state the registry has (pins, snoozes) is kept.
+pub fn save_record(task: &serde_json::Value) -> Result<(), String> {
+    save_record_at(&tasks_path(), task)
+}
+
+fn save_record_at(path: &Path, task: &serde_json::Value) -> Result<(), String> {
+    update_at(path, |tasks| {
+        let mut one = [task.clone()];
+        carry_inbox_state(&mut one, tasks.as_slice());
+        let [record] = one;
+        match tasks.iter().position(|t| same_task(t, task)) {
+            Some(i) => tasks[i] = record,
+            None => tasks.push(record),
+        }
+        Ok(())
+    })
 }
 
 /// Whether `task` was spawned in `window`. Matched on the window alone:
@@ -70,9 +137,10 @@ pub fn in_window(task: &serde_json::Value, window: &str) -> bool {
 }
 
 pub fn record_task(task: serde_json::Value) -> Result<(), String> {
-    let mut tasks = load_tasks()?;
-    tasks.push(task);
-    save_tasks(&tasks)
+    update_tasks(|tasks| {
+        tasks.push(task);
+        Ok(())
+    })
 }
 
 /// Every window on a host's Rex server with its most urgent agent status, as
@@ -410,7 +478,6 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// `LAUNCH_GRACE_SECS`, since `task run` may still be creating it.
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
-    let before = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
     let field = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
     let checked = |t: &serde_json::Value| t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed");
     let mut hosts: Vec<String> = tasks.iter().filter(|t| checked(t)).map(|t| field(t, "host")).collect();
@@ -582,15 +649,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         .into_iter()
         .map(|(i, repo, pr)| (format!("{}/{}", field(&tasks[i], "host"), field(&tasks[i], "window_id")), repo, pr))
         .collect();
-    tasks.retain(|t| t["ended_at"].as_u64().is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS));
-    // A pin or snooze saved while the hosts were checked wins over the
-    // registry as it was read.
-    if let Ok(fresh) = load_tasks() {
-        carry_inbox_state(&mut tasks, &fresh);
-    }
-    if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
-        save_tasks(&tasks)?;
-    }
+    let mut tasks = commit_checked_at(&tasks_path(), tasks, stamp)?;
     apply_live(&mut tasks, &live);
     for task in tasks.iter_mut() {
         let open = task["ended_at"].is_null();
@@ -618,14 +677,40 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// The inbox state John sets on a task (see actions' pin and snooze).
 const INBOX_KEYS: [&str; 2] = ["pinned", "snoozed_until"];
 
+/// Save what a check changed. `checked` is the registry as the check read it,
+/// with the check's changes, and it is merged onto the registry as it is now,
+/// under the lock. The check takes seconds, so meanwhile an archive may have
+/// ended one of its tasks, and a launch or pin may have been saved. The
+/// registry's end of a task is kept (an archive's reason, not "worktree
+/// removed" from a check that found the worktree gone), and tasks it has
+/// that the check didn't read are kept too. Returns the merged tasks.
+fn commit_checked_at(path: &Path, checked: Vec<serde_json::Value>, stamp: u64) -> Result<Vec<serde_json::Value>, String> {
+    update_at(path, |fresh| {
+        let mut merged = checked;
+        carry_inbox_state(&mut merged, fresh.as_slice());
+        for task in merged.iter_mut() {
+            let Some(newer) = fresh.iter().find(|f| same_task(f, task)) else { continue };
+            if !newer["ended_at"].is_null() {
+                task["ended_at"] = newer["ended_at"].clone();
+                task["ended_reason"] = newer["ended_reason"].clone();
+            }
+        }
+        let launched: Vec<serde_json::Value> =
+            fresh.iter().filter(|f| !merged.iter().any(|t| same_task(t, f))).cloned().collect();
+        merged.extend(launched);
+        // Pruned after the merge, so an old ended task the registry still
+        // has doesn't come back once this check has dropped it.
+        merged.retain(|t| t["ended_at"].as_u64().is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS));
+        *fresh = merged.clone();
+        Ok(merged)
+    })
+}
+
 /// Copy each task's inbox state from `fresh`, a later read of the registry,
 /// matching tasks by host, window and start.
 fn carry_inbox_state(tasks: &mut [serde_json::Value], fresh: &[serde_json::Value]) {
-    let same = |a: &serde_json::Value, b: &serde_json::Value| {
-        ["host", "window_id", "created_at"].iter().all(|k| a[*k] == b[*k])
-    };
     for task in tasks.iter_mut() {
-        let Some(newer) = fresh.iter().find(|f| same(f, task)) else { continue };
+        let Some(newer) = fresh.iter().find(|f| same_task(f, task)) else { continue };
         let Some(obj) = task.as_object_mut() else { continue };
         for key in INBOX_KEYS {
             match newer.get(key) {
@@ -668,6 +753,121 @@ mod tests {
         assert!(!launching(&task, 1000 + LAUNCH_GRACE_SECS));
         // An entry without a creation time gets no grace.
         assert!(!launching(&serde_json::json!({}), 1000));
+    }
+
+    /// A registry file for one test, in a directory of its own.
+    fn registry(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("switchyard-registry-{name}-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("spawn-tasks.json")
+    }
+
+    fn task(window: &str, created: u64) -> serde_json::Value {
+        serde_json::json!({"host":"h", "window_id":window, "created_at":created, "project":"p", "name":window})
+    }
+
+    #[test]
+    fn a_check_that_an_archive_overtook_keeps_the_archive_end() {
+        let path = registry("overtaken");
+        save_at(&path, &[task("a", 1)]).unwrap();
+        // The check reads the registry, and while it checks the worktree the
+        // archive ends the task and saves that.
+        let mut checked = load_at(&path).unwrap();
+        update_at(&path, |tasks| {
+            tasks[0]["ended_at"] = 50.into();
+            tasks[0]["ended_reason"] = "archived".into();
+            Ok(())
+        })
+        .unwrap();
+        // The check, which read the task as open, found the worktree gone.
+        checked[0]["ended_at"] = 60.into();
+        checked[0]["ended_reason"] = "worktree removed".into();
+        commit_checked_at(&path, checked, 60).unwrap();
+        let saved = load_at(&path).unwrap();
+        assert_eq!(saved[0]["ended_reason"], "archived");
+        assert_eq!(saved[0]["ended_at"], 50);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_archive_saved_after_a_check_still_wins() {
+        let path = registry("archive-last");
+        save_at(&path, &[task("a", 1)]).unwrap();
+        let mut archived = load_at(&path).unwrap();
+        archived[0]["ended_at"] = 50.into();
+        archived[0]["ended_reason"] = "archived".into();
+        let mut checked = load_at(&path).unwrap();
+        checked[0]["ended_at"] = 40.into();
+        checked[0]["ended_reason"] = "worktree removed".into();
+        commit_checked_at(&path, checked, 40).unwrap();
+        save_record_at(&path, &archived[0]).unwrap();
+        assert_eq!(load_at(&path).unwrap()[0]["ended_reason"], "archived");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_task_launched_during_a_check_survives_it() {
+        let path = registry("launched-check");
+        save_at(&path, &[task("a", 1)]).unwrap();
+        let checked = load_at(&path).unwrap();
+        update_at(&path, |tasks| {
+            tasks.push(task("b", 2));
+            Ok(())
+        })
+        .unwrap();
+        let merged = commit_checked_at(&path, checked, 100).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert_eq!(load_at(&path).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn an_archive_keeps_what_was_saved_while_it_ran() {
+        let path = registry("archive-meanwhile");
+        save_at(&path, &[task("a", 1)]).unwrap();
+        // The archive's copy of its task, read before it ran.
+        let mut archived = load_at(&path).unwrap()[0].clone();
+        // Meanwhile: a launch, and a pin on the archived task.
+        update_at(&path, |tasks| {
+            tasks.push(task("b", 2));
+            tasks[0]["pinned"] = true.into();
+            Ok(())
+        })
+        .unwrap();
+        archived["ended_at"] = 70.into();
+        archived["ended_reason"] = "archived".into();
+        save_record_at(&path, &archived).unwrap();
+        let saved = load_at(&path).unwrap();
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved[0]["ended_reason"], "archived");
+        assert_eq!(saved[0]["pinned"], true);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn concurrent_writers_lose_no_updates() {
+        let path = registry("writers");
+        save_at(&path, &[]).unwrap();
+        let writers: Vec<_> = (0..4)
+            .map(|w| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for n in 0..10 {
+                        update_at(&path, |tasks| {
+                            tasks.push(task(&format!("{w}-{n}"), n));
+                            Ok(())
+                        })
+                        .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        assert_eq!(load_at(&path).unwrap().len(), 40);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     fn git(dir: &Path, args: &[&str]) {

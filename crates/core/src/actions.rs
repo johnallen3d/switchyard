@@ -49,7 +49,7 @@ use crate::launch::launch;
 use crate::prompts::{discard_prompt, fetch_prompt};
 use crate::rex::{host_bash, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
-use crate::tasks::{MERGED_SH, in_window, load_tasks, save_tasks};
+use crate::tasks::{MERGED_SH, in_window, load_tasks, save_record, update_tasks};
 
 /// The tab's agent pane: the first pane of its tiled layer, which is where
 /// `--run` started the agent.
@@ -158,17 +158,18 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
     let (host, session, window_id) = launch(host, &path, &field("name"), &harness, None, None, Some((&agent_session, &field("profile"))))?;
     // The new task takes the ended one's place in the archive, keeping its
     // work items.
-    let mut tasks = load_tasks()?;
-    tasks.retain(|t| t["ended_at"].is_null() || !in_window(t, window));
-    if let Some(new) = tasks
-        .iter_mut()
-        .rev()
-        .find(|t| t["ended_at"].is_null() && in_window(t, &window_id))
-        && task["links"].as_array().is_some_and(|l| !l.is_empty())
-    {
-        new["links"] = task["links"].clone();
-    }
-    save_tasks(&tasks)?;
+    update_tasks(|tasks| {
+        tasks.retain(|t| t["ended_at"].is_null() || !in_window(t, window));
+        if let Some(new) = tasks
+            .iter_mut()
+            .rev()
+            .find(|t| t["ended_at"].is_null() && in_window(t, &window_id))
+            && task["links"].as_array().is_some_and(|l| !l.is_empty())
+        {
+            new["links"] = task["links"].clone();
+        }
+        Ok(())
+    })?;
     Ok(format!("{host}\t{session}\t{window_id}"))
 }
 
@@ -188,23 +189,22 @@ fn archive_check(worktree: &str, branch: &str) -> String {
 /// Pin or unpin the open task in `window`, as `pinned`; the outcome says
 /// which.
 fn pin(window: &str) -> Result<String, String> {
-    let mut tasks = load_tasks()?;
-    let task = open_task(&mut tasks, window)?;
-    let pinned = !task["pinned"].as_bool().unwrap_or(false);
-    set_or_remove(task, "pinned", pinned.then(|| true.into()));
-    let label = label_of(task);
-    save_tasks(&tasks)?;
-    Ok(format!("{} {label}", if pinned { "pinned" } else { "unpinned" }))
+    update_tasks(|tasks| {
+        let task = open_task(tasks, window)?;
+        let pinned = !task["pinned"].as_bool().unwrap_or(false);
+        set_or_remove(task, "pinned", pinned.then(|| true.into()));
+        Ok(format!("{} {}", if pinned { "pinned" } else { "unpinned" }, label_of(task)))
+    })
 }
 
 /// Snooze the open task in `window` until `until` (Unix seconds), or wake
 /// it for 0.
 pub fn snooze(window: &str, until: u64) -> Result<String, String> {
-    let mut tasks = load_tasks()?;
-    let task = open_task(&mut tasks, window)?;
-    set_or_remove(task, "snoozed_until", (until > 0).then(|| until.into()));
-    let label = label_of(task);
-    save_tasks(&tasks)?;
+    let label = update_tasks(|tasks| {
+        let task = open_task(tasks, window)?;
+        set_or_remove(task, "snoozed_until", (until > 0).then(|| until.into()));
+        Ok(label_of(task))
+    })?;
     crate::server::refresh();
     Ok(if until > 0 { format!("snoozed {label}") } else { format!("woke {label}") })
 }
@@ -324,7 +324,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
         None => tasks.iter().rposition(here).ok_or("no task for that tab")?,
     };
     if archiving && tasks[i]["ended_at"].is_null() {
-        save_tasks(&tasks)?;
+        save_record(&tasks[i])?;
     }
     let ended = !tasks[i]["ended_at"].is_null();
     let field = |k: &str| tasks[i][k].as_str().unwrap_or("").to_string();
@@ -346,7 +346,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             }
             kill_if_empty(host, session);
             tasks[i]["ended_reason"] = "archived".into();
-            save_tasks(&tasks)?;
+            save_record(&tasks[i])?;
             Ok(format!("archived {label}; kept the primary checkout {worktree}"))
         }
         "archive" | "force-archive" => {
@@ -379,7 +379,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             }
             if ended && !exists {
                 tasks[i]["ended_reason"] = "worktree removed".into();
-                save_tasks(&tasks)?;
+                save_record(&tasks[i])?;
                 return Err(format!("{label}: its worktree is already gone"));
             }
             // The newest session, not spawn's choice: a /clear starts
@@ -434,7 +434,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 "archived"
             }
             .into();
-            save_tasks(&tasks)?;
+            save_record(&tasks[i])?;
             if failed {
                 return Err(format!("{label}: tab closed{note}"));
             }
