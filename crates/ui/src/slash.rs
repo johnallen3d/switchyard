@@ -1,15 +1,17 @@
 //! Slash-command completion for the prompt boxes: typing `/` opens a menu of
-//! the agent's commands (see core's `commands`), more letters narrow it by
-//! prefix, and Tab puts the highlighted one in. Claude takes a command
+//! the agent's commands (see core's `commands`), more letters narrow it
+//! fuzzily, and Tab puts the highlighted one in. Claude takes a command
 //! anywhere in a message, so the menu opens on any word starting with `/`;
 //! Pi only at the start, so there it opens only on the message's first word.
 
+use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
-use switchyard_core::commands::{SlashCommand, bare};
+use switchyard_core::commands::SlashCommand;
 
 use crate::Palette;
 use crate::draw::str_width;
@@ -66,19 +68,52 @@ pub fn word_at(lines: &[String], cursor: (usize, usize), anywhere: bool) -> Opti
     })
 }
 
-/// The commands whose name, or name after Pi's `skill:`, starts with
-/// `query`, ignoring case, in their listed order.
-pub fn matches(commands: &[SlashCommand], query: &str) -> Vec<usize> {
-    let q = query.to_lowercase();
-    commands
+/// A command matching the query: its index in the list and the characters
+/// of its name that matched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hit {
+    pub index: usize,
+    pub chars: Vec<usize>,
+}
+
+/// The commands whose name fuzzily matches `query`, ignoring case, best
+/// first and in their listed order among equals; all of them, in order,
+/// for an empty query. Pi's `skill:` prefix needs no typing: `fiz` finds
+/// `skill:fizzy`.
+pub fn matches(commands: &[SlashCommand], query: &str) -> Vec<Hit> {
+    if query.is_empty() {
+        return (0..commands.len())
+            .map(|index| Hit {
+                index,
+                chars: Vec::new(),
+            })
+            .collect();
+    }
+    // Taken literally: the query is one word, and `^`, `!` or `'` are just
+    // characters of a command name here.
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(u32, Hit)> = commands
         .iter()
         .enumerate()
-        .filter(|(_, c)| {
-            let name = c.name.to_lowercase();
-            name.starts_with(&q) || bare(&name).starts_with(&q)
+        .filter_map(|(index, c)| {
+            let hay = Utf32Str::new(&c.name, &mut buf);
+            let mut idx = Vec::new();
+            let score = pattern.indices(hay, &mut matcher, &mut idx)?;
+            idx.sort_unstable();
+            idx.dedup();
+            let chars = idx.into_iter().map(|i| i as usize).collect();
+            Some((score, Hit { index, chars }))
         })
-        .map(|(i, _)| i)
-        .collect()
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.into_iter().map(|(_, h)| h).collect()
 }
 
 /// A prompt box's commands and its menu over them.
@@ -107,7 +142,7 @@ impl Menu {
 
     /// The word at the cursor and its matches while the menu is open,
     /// keeping the highlight while the query stays the same.
-    pub fn open(&mut self, lines: &[String], cursor: (usize, usize)) -> Option<(Word, Vec<usize>)> {
+    pub fn open(&mut self, lines: &[String], cursor: (usize, usize)) -> Option<(Word, Vec<Hit>)> {
         if self.commands.is_empty() {
             return None;
         }
@@ -143,15 +178,7 @@ impl Menu {
 
     /// Draw the menu for `found` (the highlight on `selected`) just above
     /// `card` in `bounds`, or below it when there is no room above.
-    pub fn draw(
-        &self,
-        f: &mut Frame,
-        p: &Palette,
-        word: &Word,
-        found: &[usize],
-        card: Rect,
-        bounds: Rect,
-    ) {
+    pub fn draw(&self, f: &mut Frame, p: &Palette, found: &[Hit], card: Rect, bounds: Rect) {
         let rows = found.len().min(MENU_ROWS) as u16;
         let above = card.y.saturating_sub(bounds.y);
         let below = (bounds.y + bounds.height).saturating_sub(card.y + card.height);
@@ -172,36 +199,36 @@ impl Menu {
         f.render_widget(Clear, area);
         let first = self.selected.saturating_sub(rows as usize - 1);
         let w = area.width as usize;
-        for (n, &i) in found.iter().enumerate().skip(first).take(rows as usize) {
-            let c = &self.commands[i];
+        for (n, hit) in found.iter().enumerate().skip(first).take(rows as usize) {
+            let c = &self.commands[hit.index];
             let bg = if n == self.selected {
                 p.hl_med
             } else {
                 p.surface
             };
-            // The typed part of the name, which may follow `skill:`.
-            let name = format!("/{}", c.name);
-            let typed = word.query.chars().count();
-            let skip = if c
-                .name
-                .to_lowercase()
-                .starts_with(&word.query.to_lowercase())
-            {
-                1
-            } else {
-                1 + "skill:".len()
-            };
-            let (head, rest) = split_chars(&name, skip);
-            let (hit, tail) = split_chars(rest, typed);
+            // The name, with the characters the query matched picked out.
+            let plain = Style::new().fg(p.text).bg(bg);
+            let picked = Style::new().fg(p.foam).bg(bg).add_modifier(Modifier::BOLD);
             let mut spans = vec![
                 Span::styled("  ", Style::new().bg(bg)),
-                Span::styled(head.to_string(), Style::new().fg(p.text).bg(bg)),
-                Span::styled(
-                    hit.to_string(),
-                    Style::new().fg(p.foam).bg(bg).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(tail.to_string(), Style::new().fg(p.text).bg(bg)),
+                Span::styled("/", plain),
             ];
+            let mut run = String::new();
+            let mut run_hit = false;
+            for (k, ch) in c.name.chars().enumerate() {
+                let is_hit = hit.chars.binary_search(&k).is_ok();
+                if is_hit != run_hit && !run.is_empty() {
+                    spans.push(Span::styled(
+                        std::mem::take(&mut run),
+                        if run_hit { picked } else { plain },
+                    ));
+                }
+                run_hit = is_hit;
+                run.push(ch);
+            }
+            if !run.is_empty() {
+                spans.push(Span::styled(run, if run_hit { picked } else { plain }));
+            }
             if !c.hint.is_empty() {
                 spans.push(Span::styled(
                     format!(" {}", c.hint),
@@ -229,12 +256,6 @@ impl Menu {
             f.render_widget(Line::from(spans), row);
         }
     }
-}
-
-/// `s` split after `n` characters.
-fn split_chars(s: &str, n: usize) -> (&str, &str) {
-    let at = s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
-    s.split_at(at)
 }
 
 /// `s` cut to `room` columns, with `…` when cut.
@@ -297,26 +318,40 @@ mod tests {
         assert!(word_at(&lines("x\n/iss"), (1, 4), false).is_none());
     }
 
+    fn indices(found: Vec<Hit>) -> Vec<usize> {
+        found.into_iter().map(|h| h.index).collect()
+    }
+
     #[test]
-    fn matching_is_by_prefix_with_skill_optional() {
+    fn matching_is_fuzzy_with_skill_optional() {
         let cmds = [
             cmd("issue-create"),
             cmd("skill:fizzy"),
             cmd("wrap"),
             cmd("Issue-plan"),
         ];
-        assert_eq!(matches(&cmds, "iss"), [0, 3]);
-        assert_eq!(matches(&cmds, "fiz"), [1]);
-        assert_eq!(matches(&cmds, "skill:f"), [1]);
-        assert_eq!(matches(&cmds, "rap"), Vec::<usize>::new());
-        assert_eq!(matches(&cmds, "").len(), 4);
+        assert_eq!(indices(matches(&cmds, "iss")), [0, 3]);
+        assert_eq!(indices(matches(&cmds, "fiz")), [1]);
+        assert_eq!(indices(matches(&cmds, "skill:f")), [1]);
+        assert_eq!(indices(matches(&cmds, "rap")), [2]);
+        assert_eq!(indices(matches(&cmds, "icr")), [0]);
+        assert_eq!(indices(matches(&cmds, "ipl")), [3]);
+        assert_eq!(indices(matches(&cmds, "zzz")), Vec::<usize>::new());
+        assert_eq!(indices(matches(&cmds, "")), [0, 1, 2, 3]);
+        assert_eq!(matches(&cmds, "icr")[0].chars, [0, 6, 7]);
+    }
+
+    #[test]
+    fn closer_matches_come_first() {
+        let cmds = [cmd("review-pr"), cmd("pr")];
+        assert_eq!(indices(matches(&cmds, "pr")), [1, 0]);
     }
 
     #[test]
     fn escape_closes_the_menu_until_the_query_changes() {
         let mut m = Menu::default();
         m.set(vec![cmd("wrap"), cmd("wait")], true);
-        assert_eq!(m.open(&lines("/w"), (0, 2)).unwrap().1, [0, 1]);
+        assert_eq!(indices(m.open(&lines("/w"), (0, 2)).unwrap().1), [0, 1]);
         m.step(1, 2);
         assert_eq!(m.selected, 1);
         assert_eq!(m.open(&lines("/w"), (0, 2)).map(|_| m.selected), Some(1));

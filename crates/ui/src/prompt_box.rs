@@ -100,7 +100,7 @@ impl PromptBox {
         !self.slash.is_empty()
     }
 
-    fn menu(&mut self) -> Option<(slash::Word, Vec<usize>)> {
+    fn menu(&mut self) -> Option<(slash::Word, Vec<slash::Hit>)> {
         let c = self.field.cursor();
         self.slash.open(self.field.lines(), (c.0, c.1))
     }
@@ -117,7 +117,7 @@ impl PromptBox {
         let Some((word, found)) = self.menu() else { return false };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
-            KeyCode::Tab => self.complete(&word, found[self.slash.selected]),
+            KeyCode::Tab => self.complete(&word, found[self.slash.selected].index),
             KeyCode::Down => self.slash.step(1, found.len()),
             KeyCode::Char('n') if ctrl => self.slash.step(1, found.len()),
             KeyCode::Up | KeyCode::BackTab => self.slash.step(-1, found.len()),
@@ -147,8 +147,8 @@ impl PromptBox {
     /// Draw the open slash-command menu next to the box drawn in `card`,
     /// within `bounds`; call it after everything else.
     pub fn draw_menu(&mut self, f: &mut Frame, p: &Palette, card: Rect, bounds: Rect) {
-        if let Some((word, found)) = self.menu() {
-            self.slash.draw(f, p, &word, &found, card, bounds);
+        if let Some((_, found)) = self.menu() {
+            self.slash.draw(f, p, &found, card, bounds);
         }
     }
 
