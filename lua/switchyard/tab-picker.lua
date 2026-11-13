@@ -2,7 +2,8 @@
 -- ../../crates/tab-picker/src/standalone.rs) in the Mac's "agents" session.
 -- It finds the tab by its pane's label in any session on this host (the
 -- config host, the Mac), and selects it. Without one it opens the tab in
--- the agents session, making the session if there isn't one. On that tab
+-- the agents session, making the session if there isn't one (and moving
+-- it to the top of the session list, as a new session goes last). On that tab
 -- already, cmd+k does nothing. The picker acts on its picks itself and
 -- stays open, so the tab stays until it is quit (Escape or ctrl-c), which
 -- closes it; the next cmd+k opens a new one.
@@ -94,6 +95,11 @@ if agents == nil then
     initial_windows = { { window_label = WINDOW, layout = pane_spec() } },
   })
   if created == nil then error(err, 0) end
+  -- A new session goes last; put it first. Best effort: it still opens.
+  local top = (list.sessions or {})[1]
+  if top ~= nil then
+    rex.call("session.move", { session_id = created.session_id, before_session_id = top.session_id })
+  end
   local first = (created.initial_windows or {})[1] or {}
   return rex.json.encode({ session_id = created.session_id, window_id = first.window_id, active = true })
 end
