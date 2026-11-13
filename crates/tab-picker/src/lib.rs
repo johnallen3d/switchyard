@@ -51,8 +51,7 @@
 //! other key disarms.
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
-//! a new tab), ctrl-r opens a review beside the task's agent, and ctrl-t
-//! pins or unpins the highlighted open task (`pinned` in the registry),
+//! a new tab), and ctrl-t pins or unpins the highlighted open task (`pinned` in the registry),
 //! which puts it in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens
 //! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
@@ -1288,7 +1287,7 @@ impl App {
             }
         }
         match k.code {
-            // standalone_key acts on ctrl-b, ctrl-r and ctrl-t.
+            // standalone_key acts on ctrl-b and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::Inbox => self.expanded = !self.expanded,
@@ -2400,8 +2399,8 @@ impl App {
             Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
             Some(t) if t.ended.is_some() && t.left => vec![("⏎", "resume"), ("⌃X", "remove worktree")],
             Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
-            Some(t) if t.safe() => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive (merged)")],
-            Some(_) => vec![("⏎", "go"), ("⌃R", "review"), ("⌃X", "archive")],
+            Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
+            Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
             None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
             None => vec![("⏎", "go")],
         };
@@ -2521,11 +2520,10 @@ impl App {
         }
     }
 
-    /// The keys that act: Enter, ctrl-r, ctrl-b, ctrl-t, and Enter in the
+    /// The keys that act: Enter, ctrl-b, ctrl-t, and Enter in the
     /// snooze prompt and reply box; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let review = matches!(k.code, KeyCode::Char('r') if ctrl);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
@@ -2603,7 +2601,7 @@ impl App {
             });
             return true;
         }
-        if !review && !open && !matches!(k.code, KeyCode::Enter) {
+        if !open && !matches!(k.code, KeyCode::Enter) {
             return false;
         }
         self.note = None;
@@ -2628,12 +2626,6 @@ impl App {
             Err(e) => (e, true),
         };
         let note = match pick.action.as_str() {
-            // Only open tasks have something to review.
-            _ if review && pick.action != "task" => return true,
-            _ if review => {
-                self.busy(term, format!("Opening review of {label}…"));
-                done(standalone::review(&pick), format!("reviewing {label}"))
-            }
             // As the config types ctrl-x for `ask`: on to "are you sure".
             "ask" => {
                 self.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));

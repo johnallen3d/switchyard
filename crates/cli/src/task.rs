@@ -15,7 +15,7 @@ pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task launch HOST PATH NAME HARNESS [PROMPT_REF [WORK_ITEM]]
        switchyard task run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume [PROMPT]]
        switchyard task list [--live]
-       switchyard task act review|archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
+       switchyard task act archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
        switchyard task act snooze HOST SESSION_ID WINDOW_ID UNTIL
        switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
        switchyard task session-of PROFILE HARNESS WORKTREE
@@ -30,7 +30,7 @@ run sets up the worktree and runs the harness in the current tab,
 starting AGENT_SESSION with PROMPT as its first message or resuming it.
 list checks recorded tasks against their hosts and prints them as JSON
 with live agent status; with --live it only adds the status, without
-checking worktrees or ending tasks. act reviews or archives the task in a
+checking worktrees or ending tasks. act archives the task in a
 tab (force-archive also throws away uncommitted changes), resumes an
 ended task's agent session in a new tab and prints it as launch does,
 prints the URL of the task's main work item (link), pins or unpins an

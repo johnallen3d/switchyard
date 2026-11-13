@@ -6,8 +6,8 @@
 //! host that runs host_rows.lua on every server,
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
-//! for the preview (see preview.rs). It acts on Enter, ctrl-r, ctrl-b (open
-//! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
+//! for the preview (see preview.rs). It acts on Enter, ctrl-b (open the
+//! task's work item), ctrl-t (pin), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
 //! stays open, showing the outcome and the data after
 //! it; closing its tab quits it. The registry is on the Mac; elsewhere it
@@ -270,12 +270,6 @@ pub fn go(p: &Pick) -> Result<(), String> {
 /// Archive (or force-archive) the pick's task; Ok is the outcome to show.
 pub fn archive(action: &str, p: &Pick) -> Result<String, String> {
     logged(action, actions::act(action, &p.host, &p.session, &p.window))
-}
-
-/// Open lazygit beside the task's agent, then show its tab.
-pub fn review(p: &Pick) -> Result<(), String> {
-    logged("review", actions::act("review", &p.host, &p.session, &p.window))?;
-    go(p)
 }
 
 /// Pin or unpin the pick's task; Ok is the outcome to show.

@@ -43,7 +43,7 @@
 //!   ended, and prints the registry as JSON with each open task's live agent
 //!   status, for the tab picker's tabs and archive views (cmd+k).
 //! - `switchyard task act ACTION HOST SESSION WINDOW`: runs on the config
-//!   host. Reviews or archives the task in that tab, resumes an ended one, or
+//!   host. Archives the task in that tab, resumes an ended one, or
 //!   prints its main work item's URL (see core's `actions` and `links`).
 //! - `switchyard task run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION
 //!   MODE [PROMPT]]`: runs in that tab. Clones a missing project, creates or

@@ -27,7 +27,7 @@ const USAGE: &str = "usage: switchyard [--view inbox|usage|archive] [--current S
 
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
-ctrl-r (review), ctrl-b (open the task's work item), ctrl-t (pin) and
+ctrl-b (open the task's work item), ctrl-t (pin) and
 ctrl-s (snooze), staying open until its tab is closed. ctrl-h and ctrl-l
 cycle the views: Inbox, Usage, Archive. --current highlights that
 tab (cmd+k passes the tab it was pressed on). new opens the

@@ -1,11 +1,8 @@
 //! Actions on a spawned task: `switchyard task act ACTION HOST SESSION WINDOW`.
 //!
 //! Runs on the config host, which holds the task registry and reaches every
-//! Rex host; the config's tab_picker mode calls it, then jumps to the task's tab
-//! after a review.
+//! Rex host; the config's tab_picker mode calls it.
 //!
-//! - review: split the task's tab with lazygit in the worktree (or a plain
-//!   diff where lazygit is missing).
 //! - archive: refuse a worktree with uncommitted changes; otherwise record
 //!   the newest agent session, close the tab, remove the worktree with
 //!   Worktrunk, close the project session if that left it empty, and mark
@@ -288,8 +285,8 @@ pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<Stri
     };
     // Even a failed archive may have changed the registry or closed the
     // tab: have switchyard-server check now rather than at its next poll.
-    // Reviewing and opening a work item change nothing.
-    if !matches!(action, "review" | "link") {
+    // Opening a work item changes nothing.
+    if action != "link" {
         crate::server::refresh();
     }
     result
@@ -324,8 +321,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             // Saved now, so a refusal (uncommitted changes) still leaves
             // the picker a task to show them on.
         }
-        None if action != "review" => tasks.iter().rposition(here).ok_or("no task for that tab")?,
-        None => return Err("no open task for that tab".into()),
+        None => tasks.iter().rposition(here).ok_or("no task for that tab")?,
     };
     if archiving && tasks[i]["ended_at"].is_null() {
         save_tasks(&tasks)?;
@@ -342,17 +338,6 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             .and_then(|l| l["url"].as_str())
             .map(String::from)
             .ok_or_else(|| format!("{label} has no linked work item")),
-        "review" => {
-            let block = agent_block(host, session, window)?;
-            let script = "if command -v lazygit >/dev/null 2>&1; then exec lazygit; fi; \
-                base=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo main); \
-                { git log --oneline \"$base..HEAD\"; git status --short; git diff \"$base\"; } | less -R";
-            rex(host, &[
-                "split", "-s", session, "-w", window, "-b", &block, "--split", "right", "--ratio", "50",
-                "-c", &worktree, "--label", "review", "--", "sh", "-c", script,
-            ])?;
-            Ok(format!("reviewing {label}"))
-        }
         // A primary checkout is never removed: close the tab and end the task.
         "archive" | "force-archive" if !worktree.is_empty() && worktree.trim_end_matches('/') == repo.trim_end_matches('/') => {
             if !ended {
