@@ -57,12 +57,13 @@
 //! work item; task rows show their links as badges grouped by kind. With
 //! several it opens a chooser over them (PRs, cards, then issues).
 //!
-//! ctrl-y, in All, opens a reply box on the highlighted agent, under its
-//! preview: the new-session picker's prompt box (see the ui crate's
-//! prompt_box), where alt- or shift-Enter adds a line, Escape closes it,
-//! and shift with the arrows (or the page keys) scrolls the preview. An
-//! agent waiting on a prompt is refused. Enter sends the message (see
-//! core's actions).
+//! All keeps a reply box at its bottom, under the preview, expanded or not:
+//! the new-session picker's prompt box (see the ui crate's prompt_box),
+//! with its rounded corners. Tab moves into it to message the highlighted
+//! agent; alt- or shift-Enter adds a line, Escape (or Tab, while it's
+//! empty) leaves it, and shift with the arrows (or the page keys) scrolls
+//! the preview. An agent waiting on a prompt is refused. Enter sends the
+//! message (see core's actions).
 //!
 //! Each action goes through `pick`, the highlighted row as
 //! `ACTION:TARGET/SESSION/WINDOW`: ACTION is `go` (a tab), `task` (a row
@@ -99,6 +100,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 use switchyard_ui::Palette;
+use switchyard_ui::chrome;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
@@ -313,7 +315,7 @@ impl Snooze {
     }
 }
 
-/// The ctrl-y reply box: a message for the highlighted agent, typed in the
+/// The reply box, while it has focus: a message for the highlighted agent, typed in the
 /// prompt box the new-session picker uses and kept in a prompt file, which
 /// `switchyard task act message` sends.
 struct Reply {
@@ -359,8 +361,13 @@ struct App {
     chooser: Option<Chooser>,
     /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
-    /// The open ctrl-y reply box; Enter sends, Escape closes it.
+    /// The reply box while Tab has moved into it; Enter sends, Escape
+    /// leaves it. Unfocused, it is drawn from `idle`.
     reply: Option<Reply>,
+    /// The reply box as drawn while it doesn't have focus.
+    idle: PromptBox,
+    /// Smooth prompt-box corners, when the terminal does kitty graphics.
+    corners: Option<chrome::Corners>,
     /// Pins and snoozes made here, by (host, window_id): (pinned,
     /// snoozed_until, when), kept over deliveries until they agree.
     pending: HashMap<Key, (bool, u64, Instant)>,
@@ -414,6 +421,8 @@ impl App {
             chooser: None,
             snooze: None,
             reply: None,
+            idle: PromptBox::new(),
+            corners: None,
             pending: HashMap::new(),
             list_area: Rect::default(),
             started: Instant::now(),
@@ -1226,10 +1235,10 @@ impl App {
         }
     }
 
-    /// Keys while the reply box is open: edit it (alt- or shift-Enter for a
-    /// newline), scroll the preview with the page keys or shift and the
-    /// arrows, Enter (see finish_reply), or Escape to close it. ctrl-c
-    /// clears the message, then closes the box.
+    /// Keys while the reply box has focus: edit it (alt- or shift-Enter for
+    /// a newline), scroll the preview with the page keys or shift and the
+    /// arrows, Enter (see finish_reply), or Escape to leave it (Tab too,
+    /// while it's empty). ctrl-c clears the message, then leaves the box.
     fn reply_key(&mut self, k: KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -1238,6 +1247,8 @@ impl App {
         let Some(r) = &mut self.reply else { return true };
         match k.code {
             KeyCode::Esc => self.close_reply(),
+            KeyCode::Tab | KeyCode::BackTab if r.prompt.is_empty() => self.close_reply(),
+            KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Enter if newline => r.prompt.field.insert_newline(),
             KeyCode::Enter => self.finish_reply(),
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
@@ -1320,7 +1331,7 @@ impl App {
             KeyCode::Char('c') if ctrl => return false,
             // standalone_key acts on ctrl-b, ctrl-r and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
-            KeyCode::Char('y') if ctrl && self.view == View::All => self.open_reply(),
+            KeyCode::Tab | KeyCode::BackTab if self.view == View::All => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::All => self.expanded = !self.expanded,
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
@@ -1405,17 +1416,20 @@ impl App {
         .areas(inner);
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
-        // The reply box takes the bottom of All, under the preview.
+        // The reply box keeps the bottom of All, under the preview, with
+        // one text row until Tab moves into it.
         let mut reply_card = None;
-        let body = match &self.reply {
-            Some(r) if self.view == View::All => {
-                let rows = r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS);
-                let h = (rows + prompt_box::CHROME_ROWS).min(body.height.saturating_sub(3));
-                let [rest, card] = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
-                reply_card = Some((card, h.saturating_sub(prompt_box::CHROME_ROWS)));
-                rest
-            }
-            _ => body,
+        let body = if self.view == View::All && body.height >= prompt_box::CHROME_ROWS + 4 {
+            let rows = match &self.reply {
+                Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
+                None => 1,
+            };
+            let h = (rows + prompt_box::CHROME_ROWS).min(body.height.saturating_sub(3));
+            let [rest, card] = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
+            reply_card = Some((card, h.saturating_sub(prompt_box::CHROME_ROWS)));
+            rest
+        } else {
+            body
         };
         if self.view == View::Usage {
             self.list_area = body;
@@ -1444,7 +1458,7 @@ impl App {
     /// a third of the height (8 to 14 lines) for the preview, the rest
     /// for the list; expanded (ctrl-e), the preview alone. The
     /// preview stays while John moves, whatever the row, so the list
-    /// doesn't change height under him. With the reply box open, the
+    /// doesn't change height under him. With focus in the reply box, the
     /// preview gets half of what is left, as what John is replying to.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
         if self.view != View::All {
@@ -1454,7 +1468,7 @@ impl App {
             return Some((Rect { height: 0, ..body }, body));
         }
         let replying = self.reply.is_some();
-        if body.height < if replying { 12 } else { 20 } {
+        if body.height < if replying { 12 } else { 15 } {
             return None;
         }
         let pane = if replying { (body.height / 2).clamp(6, 14) } else { (body.height / 3).clamp(8, 14) };
@@ -1513,23 +1527,47 @@ impl App {
         }
     }
 
-    /// The ctrl-y reply box, when open: the prompt box with a chip row
-    /// naming the agent it goes to.
+    /// The reply box: the prompt box with a chip row naming the agent it
+    /// goes to, filled brighter while it has focus. Unfocused, it says
+    /// what Tab would do.
     fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
         let p = self.p;
-        let Some(r) = &mut self.reply else { return };
-        r.prompt.set_placeholder(&format!("Message {}", r.label));
-        let Some((chips, skip)) = r.prompt.draw(f, &p, card, rows, true, None) else { return };
-        let fill = p.overlay;
-        let left = vec![
-            Span::styled("to ", Style::new().fg(p.muted).bg(fill)),
-            Span::styled(r.label.clone(), Style::new().fg(p.text).bg(fill).add_modifier(Modifier::BOLD)),
-        ];
+        let unfocused = match self.reply {
+            Some(_) => None,
+            None => {
+                let label = self.preview_want().map(|_| self.selected_label());
+                let blocked = self.selected_item().is_some_and(|i| self.flat(i).state == "blocked");
+                Some(match label {
+                    Some(l) if blocked => (format!("{l} is waiting on a prompt; answer it in its tab"), Some(l)),
+                    Some(l) => ("Tab to type a message".to_string(), Some(l)),
+                    None => ("Highlight an agent to message it".to_string(), None),
+                })
+            }
+        };
+        let (prompt, label, focused) = match (&mut self.reply, unfocused) {
+            (Some(r), _) => {
+                r.prompt.set_placeholder(&format!("Message {}", r.label));
+                (&mut r.prompt, Some(r.label.clone()), true)
+            }
+            (None, Some((placeholder, label))) => {
+                self.idle.set_placeholder(&placeholder);
+                (&mut self.idle, label, false)
+            }
+            (None, None) => return,
+        };
+        let Some((chips, skip)) = prompt.draw(f, &p, card, rows, focused, self.corners.as_ref()) else { return };
+        let fill = if focused { p.overlay } else { p.surface };
+        let mut left = Vec::new();
+        if let Some(label) = label {
+            left.push(Span::styled("to ", Style::new().fg(p.muted).bg(fill)));
+            let style = if focused { Style::new().fg(p.text).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) };
+            left.push(Span::styled(label, style.bg(fill)));
+        }
         let mut right = Vec::new();
         if skip > 0 {
             right.push(Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted).bg(fill)));
         }
-        if !r.prompt.saved_ok {
+        if !prompt.saved_ok {
             right.push(Span::styled("not saved ", Style::new().fg(p.love).bg(fill)));
         }
         let left_w: usize = left.iter().map(|s| str_width(&s.content)).sum();
@@ -2241,7 +2279,7 @@ impl App {
             keys.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
         }
         if self.preview_want().is_some() {
-            keys.push(("⌃Y", "message"));
+            keys.push(("⇥", "message"));
         }
         keys.push(("⌃H/L", "views"));
         keys.push(("⌃O", self.profile.next().name()));
@@ -2842,13 +2880,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_y_messages_the_highlighted_agent() {
+    fn tab_messages_the_highlighted_agent() {
         let mut app = inbox_with_lifecycle();
-        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         let target = app.pick().split_once(':').unwrap().1.to_string();
-        app.key(ctrl('y'));
+        app.key(plain(KeyCode::Tab));
         assert!(app.reply.as_ref().is_some_and(|r| r.prompt.text().is_empty()));
         for c in "run the tests".chars() {
             app.key(plain(KeyCode::Char(c)));
@@ -2870,15 +2907,43 @@ mod tests {
         app.key(plain(KeyCode::Enter));
         assert!(app.reply.is_none());
         assert_eq!(app.note, Some(("sent to /woke".into(), false)));
+        // Tab leaves an empty box, but not one with a message.
+        app.key(plain(KeyCode::Tab));
+        app.key(plain(KeyCode::Char('x')));
+        app.key(plain(KeyCode::Tab));
+        assert!(app.reply.is_some());
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        app.key(plain(KeyCode::Tab));
+        assert!(app.reply.is_none());
         // Escape cancels, keeping the highlight; an agent waiting on a
         // prompt is refused.
-        app.key(ctrl('y'));
+        app.key(plain(KeyCode::Tab));
         app.key(plain(KeyCode::Esc));
         assert!(app.reply.is_none() && app.selected_item() == Some(Item::Tab(2)));
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(1));
-        app.key(ctrl('y'));
+        app.key(plain(KeyCode::Tab));
         assert!(app.reply.is_none());
         assert!(app.note.as_ref().is_some_and(|(n, failed)| *failed && n.contains("waiting on a prompt")));
+    }
+
+    #[test]
+    fn the_reply_box_stays_under_the_preview_expanded_or_not() {
+        let mut app = inbox_with_lifecycle();
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        let screen = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+        };
+        let text = screen(&mut app);
+        assert!(text.contains("Tab to type a message") && text.contains("to /woke"), "{text}");
+        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        assert!(app.expanded);
+        let text = screen(&mut app);
+        assert!(text.contains("Tab to type a message"), "{text}");
+        // ctrl-y no longer opens it.
+        app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(app.reply.is_none());
     }
 
     #[test]
@@ -3200,6 +3265,11 @@ pub fn usage_json(local: bool) -> io::Result<()> {
 
 fn picker(mut app: App) -> io::Result<()> {
     let mut term = ratatui::init();
+    // Raw mode is on and nothing has read stdin yet: ask about graphics now,
+    // for the reply box's rounded corners.
+    if let Some(cell) = chrome::detect(Duration::from_millis(300)) {
+        app.corners = chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
+    }
     // No mouse capture, so the terminal's own selection and copy work. Kitty
     // key reporting makes the reply box's shift-Enter arrive as one
     // crossterm can decode, as in the new-session picker.
@@ -3216,6 +3286,9 @@ fn picker(mut app: App) -> io::Result<()> {
         let _ = rx.recv();
     }
     let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste);
+    if let Some(corners) = &app.corners {
+        let _ = corners.delete(&mut io::stdout());
+    }
     ratatui::restore();
     // A message typed but never sent.
     app.close_reply();
