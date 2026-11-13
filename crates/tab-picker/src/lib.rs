@@ -526,7 +526,9 @@ impl App {
         }
         self.follow = true;
         self.query.clear();
-        self.armed = Armed::No;
+        // cmd+i shows Inbox, where the tab is a row: from Archive or Usage,
+        // switch there first, or the highlight lands on nothing visible.
+        self.set_view(View::Inbox);
         self.refilter_to(Some(self.current.clone()));
     }
 
@@ -3075,6 +3077,18 @@ mod tests {
         app.paste("rex-data:current\n");
         assert!(app.query.is_empty());
         assert_eq!(app.selected_key(), picked);
+    }
+
+    #[test]
+    fn cmd_i_from_the_archive_shows_inbox_with_the_current_tab_highlighted() {
+        let mut app = inbox();
+        app.set_view(View::Archive);
+        app.paste("rex-data:current\ns/wait");
+        assert!(app.view == View::Inbox);
+        assert_eq!(
+            app.selected_key(),
+            Some(("s".to_string(), "wait".to_string()))
+        );
     }
 
     #[test]
