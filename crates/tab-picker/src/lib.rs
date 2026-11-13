@@ -34,10 +34,9 @@
 //!   With room, a preview under the list shows the highlighted agent's pane,
 //!   live, below its whole status message.
 //! - Usage: read-only accounting (see usage.rs).
-//! - Archive (ctrl-a): ended tasks grouped by project (those with a
-//!   worktree left behind first), under headings for how they ended
-//!   (Left behind, Merged, Archived, Closed), newest first; ctrl-f hides the
-//!   archived ones, leaving those whose tab or worktree went without one.
+//! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
+//!   row naming its project and how it ended; ctrl-f hides the archived
+//!   ones, leaving those whose tab or worktree went without one.
 //!
 //! ctrl-o cycles a profile filter (all, personal, work): the registry's
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
@@ -111,7 +110,6 @@ const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
 const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
-const ICON_PROJECT: &str = "\u{f024b}"; // nf-md-folder
 
 /// All's sections, in order: Pinned, agents by status (the empty string is
 /// no known status), the tabs with no agent, then Snoozed.
@@ -221,28 +219,13 @@ impl Armed {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
-    /// An Archive project heading, by the index of its first task.
-    Project(usize),
     /// A heading over a section of All: `pinned`, `snoozed`, an agent
     /// status (the empty string means no known status), or `tabs` for the
     /// tabs with no agent.
     Status(&'static str),
-    /// A heading within an Archive project: how its tasks ended (see
-    /// `ending`).
-    Sub(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
     Task(usize),
-}
-
-/// How draw_list draws a row.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Draw {
-    Header,
-    /// A row with a project column.
-    Flat,
-    /// An ended task under its Archive project.
-    Nested,
 }
 
 /// Highlighted character positions: the name, the project column, and a
@@ -585,7 +568,7 @@ impl App {
     /// The (session_id, window_id) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
-            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Status(_) => None,
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
@@ -606,7 +589,7 @@ impl App {
     /// The task a row stands for: a tab's open task, or the row's own.
     fn task_of(&self, item: Item) -> Option<&Task> {
         match item {
-            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Status(_) => None,
             Item::Tab(t) => self.tabs[t].task.map(|k| &self.tasks[k]),
             Item::Task(k) => Some(&self.tasks[k]),
         }
@@ -619,7 +602,7 @@ impl App {
     /// The index of the task a row stands for.
     fn task_index(&self, item: Item) -> Option<usize> {
         match item {
-            Item::Project(_) | Item::Status(_) | Item::Sub(_) => None,
+            Item::Status(_) => None,
             Item::Tab(t) => self.tabs[t].task,
             Item::Task(k) => Some(k),
         }
@@ -823,7 +806,7 @@ impl App {
                 }
             }
             // Headers aren't flat rows.
-            Item::Project(_) | Item::Status(_) | Item::Sub(_) => Flat {
+            Item::Status(_) => Flat {
                 project: "",
                 name: "",
                 msg: "",
@@ -944,17 +927,14 @@ impl App {
         best.map(|(_, i)| i)
     }
 
-    /// Archive: ended tasks by project, under headings for how they
-    /// ended (see `ending`), newest first within each. Projects with a
-    /// worktree left behind come first, then the most recently ended.
-    /// Matches project, name, host and the task's work items (`#42`,
-    /// `card 1041`, `PR #57`), so an ended task can be found by its issue or
-    /// card and resumed. Returns the best match.
+    /// Archive: one flat list of ended tasks, each row naming its project,
+    /// newest first, with no headings. Matches project, name, host and the task's work items
+    /// (`#42`, `card 1041`, `PR #57`), so an ended task can be found by its
+    /// issue or card and resumed. Returns the best match.
     fn filter_archive(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
-        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        // Newest first, as archive() sorts.
         for item in self.archive() {
-            let Item::Task(k) = item else { continue };
             let (project, name, host, work) = {
                 let f = self.flat(item);
                 (f.project.to_string(), f.name.to_string(), f.host.to_string(), f.work)
@@ -973,36 +953,7 @@ impl App {
                     best = Some((score, item));
                 }
             }
-            match groups.iter_mut().find(|(p, _)| *p == project) {
-                Some((_, ks)) => ks.push(k),
-                None => groups.push((project, vec![k])),
-            }
-        }
-        let tasks = &self.tasks;
-        for (_, ks) in &mut groups {
-            // Stable: newest first within each heading, as archive() sorts.
-            ks.sort_by_key(|&k| ENDINGS.iter().position(|&e| e == ending(&tasks[k])));
-        }
-        groups.sort_by_cached_key(|(project, ks)| {
-            let left = ks.iter().any(|&k| tasks[k].left);
-            let latest = ks.iter().map(|&k| tasks[k].since).max().unwrap_or(0);
-            (!left, std::cmp::Reverse(latest), project.clone())
-        });
-        for (project, ks) in groups {
-            let head = Item::Project(ks[0]);
-            if filtering && let Some((_, f)) = score_fields(&mut self.matcher, pattern, &[&project]) {
-                self.hits.insert(head, Hits { name: f[0].clone(), ..Hits::default() });
-            }
-            self.rows.push(head);
-            let mut group = None;
-            for k in ks {
-                let state = ending(&self.tasks[k]);
-                if group != Some(state) {
-                    self.rows.push(Item::Sub(state));
-                    group = Some(state);
-                }
-                self.rows.push(Item::Task(k));
-            }
+            self.rows.push(item);
         }
         best.map(|(_, i)| i)
     }
@@ -1072,7 +1023,7 @@ impl App {
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
         let more = if links > 1 { format!("/{links}") } else { String::new() };
         match item {
-            Item::Project(_) | Item::Status(_) | Item::Sub(_) => String::new(),
+            Item::Status(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
@@ -1769,39 +1720,18 @@ impl App {
         let overflow = self.rows.len() > h && h > 0;
         // Leave a column for the scrollbar only when there is one.
         let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
-        // How each row is drawn: ended tasks under their Archive project on
-        // its tree (no project column); every other row flat.
-        let mut style = Vec::with_capacity(self.rows.len());
-        let mut nested = false;
-        for &row in &self.rows {
-            style.push(match row {
-                Item::Project(_) | Item::Sub(_) => {
-                    nested = true;
-                    Draw::Header
-                }
-                Item::Status(_) => {
-                    nested = false;
-                    Draw::Header
-                }
-                _ if nested => Draw::Nested,
-                _ => Draw::Flat,
-            });
-        }
         // Flat rows line up their project and name columns: size them for
         // the widest values, within what the busiest agent's right side
         // leaves (a plain tab's folder takes what its row has left).
-        let flat = || {
-            self.rows.iter().zip(&style).filter(|(_, d)| matches!(d, Draw::Flat | Draw::Nested)).map(|(&i, d)| (i, *d))
-        };
+        let flat = || self.rows.iter().copied().filter(selectable);
         let right_w = flat()
-            .filter(|&(i, _)| !self.is_plain_tab(i))
-            .map(|(i, _)| self.right_spans(&self.flat(i), self.p.base, "", list.width).1)
+            .filter(|&i| !self.is_plain_tab(i))
+            .map(|i| self.right_spans(&self.flat(i), self.p.base, "", list.width).1)
             .max()
             .unwrap_or(0);
         let room = (list.width as usize).saturating_sub(3 + right_w + 1);
         let proj_w = flat()
-            .filter(|(_, d)| *d == Draw::Flat)
-            .map(|(i, _)| str_width(self.flat(i).project))
+            .map(|i| str_width(self.flat(i).project))
             .max()
             .unwrap_or(0)
             .min(room / 4);
@@ -1810,7 +1740,7 @@ impl App {
         // around it.
         let name_cap = (list.width as usize / 3).max(24);
         let name_w = flat()
-            .map(|(i, _)| {
+            .map(|i| {
                 let w = str_width(self.flat(i).name);
                 if self.is_plain_tab(i) { w.min(name_cap) } else { w }
             })
@@ -1821,16 +1751,9 @@ impl App {
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
             let selected = self.selected == Some(i);
-            let last = !self.rows.get(i + 1).is_some_and(selectable);
-            match (row, style[i]) {
-                (Item::Status(state), _) => self.draw_status_header(f, r, state),
-                (Item::Sub(state), _) => self.draw_sub_header(f, r, state),
-                (Item::Project(_), _) => self.draw_project_row(f, r, row, selected),
-                (_, Draw::Nested) => {
-                    let guide = if last { "╰─ " } else { "├─ " };
-                    self.draw_flat_row(f, r, *row, selected, tick, cols, Some(guide))
-                }
-                _ => self.draw_flat_row(f, r, *row, selected, tick, cols, None),
+            match row {
+                Item::Status(state) => self.draw_status_header(f, r, state),
+                _ => self.draw_flat_row(f, r, *row, selected, tick, cols),
             }
         }
         if overflow {
@@ -1857,30 +1780,6 @@ impl App {
             Line::from(vec![
                 Span::styled(heading, Style::new().fg(color).add_modifier(Modifier::BOLD)),
                 Span::styled(rule, Style::new().fg(p.hl_med)),
-            ]),
-            area,
-        );
-    }
-
-    /// A status heading within a session, indented under it.
-    fn draw_sub_header(&self, f: &mut Frame, area: Rect, state: &str) {
-        let p = &self.p;
-        let (glyph, label, color) = match state {
-            "blocked" => ("●", "Waiting", p.gold),
-            "error" => ("✗", "Failed", p.love),
-            "done" => ("✓", "Done", p.pine),
-            "working" => ("●", "Working", p.foam),
-            "idle" => ("·", "Idle", p.muted),
-            "left" => ("▢", "Left behind", p.gold),
-            "merged" => ("▢", "Merged", p.iris),
-            "archived" => ("▢", "Archived", p.iris),
-            "closed" => ("▢", "Closed", p.muted),
-            _ => ("?", "No status", p.muted),
-        };
-        f.render_widget(
-            Line::from(vec![
-                Span::raw("   "),
-                Span::styled(format!("{glyph} {label}"), Style::new().fg(color).add_modifier(Modifier::BOLD)),
             ]),
             area,
         );
@@ -1976,45 +1875,6 @@ impl App {
         (bg, edge)
     }
 
-    /// An Archive project heading.
-    fn draw_project_row(&self, f: &mut Frame, r: Rect, item: &Item, selected: bool) {
-        let p = &self.p;
-        let width = r.width as usize;
-        let (bg, edge) = self.row_style(selected);
-        let chip_bg = if selected { p.hl_med } else { p.overlay };
-        f.buffer_mut().set_style(r, Style::new().bg(bg));
-        let hits = self.hits.get(item).cloned().unwrap_or_default();
-        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        let Item::Project(k) = item else { return };
-        let project = &self.tasks[*k].project;
-        // This project's rows, up to the next heading over a group.
-        let rows = self.rows.iter().skip_while(|&&i| i != *item).skip(1);
-        let tasks: Vec<&Task> =
-            rows.take_while(|i| !matches!(i, Item::Project(_))).filter_map(|&i| self.task_of(i)).collect();
-        let mut right: Vec<Span> = Vec::new();
-        let mut chip = |text: String, fg: Color| {
-            right.extend(pill(vec![Span::styled(text, Style::new().fg(fg))], chip_bg, bg));
-            right.push(Span::styled(" ", Style::new().bg(bg)));
-        };
-        let left = tasks.iter().filter(|t| t.left).count();
-        if left > 0 {
-            chip(format!("▢ {left} left"), p.gold);
-        }
-        let n = tasks.len();
-        chip(format!("{n} task{}", if n == 1 { "" } else { "s" }), p.subtle);
-        let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
-        let avail = width.saturating_sub(4 + right_w + 2);
-        let label = Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD);
-        let mut spans = vec![
-            edge,
-            Span::styled(ICON_PROJECT, Style::new().fg(if selected { p.iris } else { p.subtle }).bg(bg)),
-            Span::styled("  ", Style::new().bg(bg)),
-        ];
-        spans.extend(highlight(project, &hits.name, avail, false, label, hl));
-        f.render_widget(Line::from(spans), r);
-        f.render_widget(Line::from(right).right_aligned(), r);
-    }
-
     /// A flat row's work items, grouped by kind within `budget` columns
     /// (see model's `badges`), such as `PR #57 ✓ merged · cards 1041 1042`,
     /// or `merged` for a branch in the default branch with no PR. Empty for
@@ -2086,10 +1946,8 @@ impl App {
         right
     }
 
-    /// A flat row; with a guide, on an Archive project's tree, without the
-    /// project column (the heading says it). A tab with no agent shows its
-    /// folder on the right rather than a host and status.
-    #[allow(clippy::too_many_arguments)]
+    /// A flat row. A tab with no agent shows its folder on the right rather
+    /// than a host and status.
     fn draw_flat_row(
         &self,
         f: &mut Frame,
@@ -2098,7 +1956,6 @@ impl App {
         selected: bool,
         tick: usize,
         cols: (usize, usize),
-        guide: Option<&str>,
     ) {
         let p = &self.p;
         let t = self.flat(item);
@@ -2126,15 +1983,9 @@ impl App {
         // plain tab's folder gets what its columns leave.
         let (right, right_w) = if plain { (Vec::new(), 0) } else { self.right_spans(&t, bg, verb, r.width) };
         let mut left = vec![edge];
-        if let Some(guide) = guide {
-            left.push(Span::styled(" ", Style::new().bg(bg)));
-            left.push(Span::styled(guide.to_string(), Style::new().fg(p.hl_med).bg(bg)));
-        }
         left.push(Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)));
-        let lead = if guide.is_some() { 4 } else { 0 };
-        let room = (r.width as usize).saturating_sub(3 + lead + right_w + 1);
+        let room = (r.width as usize).saturating_sub(3 + right_w + 1);
         let (proj_w, name_w) = cols;
-        let proj_w = if guide.is_some() { 0 } else { proj_w };
         let name_style = if selected {
             Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
         } else {
@@ -2148,9 +1999,7 @@ impl App {
             left.extend(spans);
             left.push(Span::styled(" ".repeat(w.saturating_sub(used) + 2), Style::new().bg(bg)));
         };
-        if guide.is_none() {
-            column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
-        }
+        column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
         column(t.name, &hits.name, name_w, name_style);
         if let Item::Tab(tab) = item
             && plain
@@ -2161,7 +2010,7 @@ impl App {
             f.render_widget(Line::from(right).right_aligned(), r);
             return;
         }
-        let msg_room = room.saturating_sub(if guide.is_none() { proj_w + 2 } else { 0 } + name_w + 2);
+        let msg_room = room.saturating_sub(proj_w + 2 + name_w + 2);
         if !t.msg.is_empty() && msg_room > 4 {
             let msg_style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle }).bg(bg);
             left.extend(highlight(t.msg, &[], msg_room, false, msg_style, msg_style));
@@ -2296,7 +2145,6 @@ impl App {
                 }
             }
             View::Archive => {
-                keys.push(("⌥↑↓", "group"));
                 keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" }));
             }
         }
@@ -3080,7 +2928,7 @@ mod tests {
         });
         app.query = "card 1041".into();
         app.refilter();
-        assert_eq!(app.rows, vec![Item::Project(0), Item::Sub("merged"), Item::Task(0)]);
+        assert_eq!(app.rows, vec![Item::Task(0)]);
         assert_eq!(app.pick(), format!("resume:{}/s/a", hex("")));
         assert!(app.tasks[0].archived());
         assert!(!app.tasks[0].safe() && app.tasks[1].safe() && !app.tasks[2].safe() && app.tasks[3].safe());
@@ -3097,11 +2945,11 @@ mod tests {
             assert!(text.contains(label), "missing status heading: {label}");
         }
         app.set_view(View::Archive);
-        assert_eq!(app.rows, vec![Item::Project(5), Item::Sub("closed"), Item::Task(5)]);
+        assert_eq!(app.rows, vec![Item::Task(5)]);
     }
 
     #[test]
-    fn archive_groups_by_project_left_behind_first() {
+    fn archive_is_one_flat_list_newest_first() {
         let mut app = App::new((String::new(), String::new()), View::Archive);
         app.follow = false;
         app.deliver(|app| {
@@ -3116,26 +2964,18 @@ mod tests {
             ]).to_string()).unwrap();
             app.tasks_load = Tasks::Ready;
         });
-        // beta has a worktree left behind, so it leads though alpha ended
-        // more recently; within a project, actionable headings first, then
-        // newest first.
-        #[rustfmt::skip]
-        assert_eq!(app.rows, vec![
-            Item::Project(2), Item::Sub("left"), Item::Task(2), Item::Sub("closed"), Item::Task(1),
-            Item::Project(0), Item::Sub("merged"), Item::Task(0), Item::Sub("archived"), Item::Task(4), Item::Task(3),
-        ]);
-        assert_eq!(app.selected, Some(2));
-        app.jump_group(true);
-        assert_eq!(app.rows[app.selected.unwrap()], Item::Task(1));
-        // ctrl-f hides the archived ones, and with them alpha.
+        // One flat list, newest first, whatever the project or ending.
+        assert_eq!(app.rows, vec![Item::Task(4), Item::Task(0), Item::Task(3), Item::Task(1), Item::Task(2)]);
+        assert_eq!(app.selected, Some(0));
+        // ctrl-f hides the archived (and merged) ones.
         app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
-        assert_eq!(app.rows, vec![Item::Project(2), Item::Sub("left"), Item::Task(2), Item::Sub("closed"), Item::Task(1)]);
+        assert_eq!(app.rows, vec![Item::Task(1), Item::Task(2)]);
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        for want in ["beta", "1 left", "2 tasks", "Left behind", "Closed", "╰─"] {
-            assert!(text.contains(want), "missing {want}");
-        }
+        // Each row names its project and how it ended; no headings.
+        assert!(text.contains("beta") && text.contains("closed"), "{text}");
+        assert!(!text.contains("Left behind") && !text.contains("─"), "{text}");
     }
 
     #[test]
@@ -3177,21 +3017,6 @@ mod tests {
 }
 
 // ---------------------------------------------------------------- main
-
-/// The Archive headings within a project, most actionable first.
-const ENDINGS: [&str; 4] = ["left", "merged", "archived", "closed"];
-
-/// How an ended task ended, as an Archive heading: `left` (its worktree is
-/// still there, for ctrl-x), `merged`, `archived` (or discarded), or
-/// `closed` (its tab closed or worktree went away).
-fn ending(t: &Task) -> &'static str {
-    match t.ended.as_deref() {
-        _ if t.left => "left",
-        Some("merged") => "merged",
-        _ if t.archived() => "archived",
-        _ => "closed",
-    }
-}
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
