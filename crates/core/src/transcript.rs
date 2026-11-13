@@ -18,7 +18,8 @@
 //!
 //! It reads only the end of the log and returns its last messages, tool
 //! calls and questions as `{harness, entries: [{kind, text}]}`, where kind
-//! is `user`, `assistant`, `tool` or `ask`; or `{error}`.
+//! is `user`, `assistant`, `tool` or `ask`; or `{error}`. `fetch` adds
+//! `agent: {host, profile, harness, dir}` once it knows them.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -129,15 +130,27 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
     };
     let pid = pane["pid"].as_u64().unwrap_or(0);
     let agent_session = f("agent_session");
-    if host == local_label() {
-        return Ok(local(&profile, &harness, &dir, &agent_session, pid));
+    // Where the agent runs, for the reply box's slash commands.
+    let agent = json!({ "host": host, "profile": profile, "harness": harness, "dir": dir });
+    let mut v = if host == local_label() {
+        local(&profile, &harness, &dir, &agent_session, pid)
+    } else {
+        remote(host, &profile, &harness, &dir, &agent_session, pid).unwrap_or_else(|e| json!({ "error": e }))
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.insert("agent".into(), agent);
     }
+    Ok(v)
+}
+
+/// `local` on `host`, over SSH.
+fn remote(host: &str, profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Result<Value, String> {
     let script = format!(
         "switchyard transcript --local {} {} {} {} {pid}",
-        sh_quote(&profile),
-        sh_quote(&harness),
-        sh_quote(&dir),
-        sh_quote(&agent_session),
+        sh_quote(profile),
+        sh_quote(harness),
+        sh_quote(dir),
+        sh_quote(agent_session),
     );
     let out = host_bash(host, &script).ok_or_else(|| format!("can't reach {host}"))?;
     if !out.status.success() {

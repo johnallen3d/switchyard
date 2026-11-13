@@ -93,7 +93,7 @@ mod usage;
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::mpsc::TryRecvError;
+use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use model::{
@@ -112,6 +112,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
+use switchyard_core::commands::{self, SlashCommand};
+use switchyard_core::rex::log;
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
@@ -364,6 +366,15 @@ struct App {
     reply: Option<Reply>,
     /// The reply box as drawn while it doesn't have focus.
     idle: PromptBox,
+    /// Each agent's slash commands, by where it runs, once the reply box
+    /// has been on it (None while they're being fetched), and the
+    /// fetches' results.
+    commands: HashMap<preview::Agent, Option<Vec<SlashCommand>>>,
+    commands_tx: Sender<(preview::Agent, Result<Vec<SlashCommand>, String>)>,
+    commands_rx: Receiver<(preview::Agent, Result<Vec<SlashCommand>, String>)>,
+    /// Where the focused reply box was last drawn, and within what, for its
+    /// slash-command menu.
+    reply_card: Option<(Rect, Rect)>,
     /// Smooth prompt-box corners, when the terminal does kitty graphics, and
     /// the cell size they were drawn at, to draw them again after an editor.
     corners: Option<chrome::Corners>,
@@ -421,6 +432,7 @@ struct App {
 
 impl App {
     fn new(current: Key, view: View) -> Self {
+        let (commands_tx, commands_rx) = chan::channel();
         App {
             p: Palette::load(),
             sessions: Vec::new(),
@@ -442,6 +454,10 @@ impl App {
             snooze: None,
             reply: None,
             idle: PromptBox::new(),
+            commands: HashMap::new(),
+            commands_tx,
+            commands_rx,
+            reply_card: None,
             corners: None,
             cell: None,
             edit_requested: false,
@@ -1273,6 +1289,10 @@ impl App {
         let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         let page = self.page();
         let Some(r) = &mut self.reply else { return };
+        // The slash-command menu, while open, has Tab, the arrows and Escape.
+        if r.prompt.menu_key(k) {
+            return;
+        }
         match k.code {
             KeyCode::Esc => self.close_reply(),
             KeyCode::Tab | KeyCode::BackTab if r.prompt.is_empty() => self.close_reply(),
@@ -1288,6 +1308,39 @@ impl App {
             KeyCode::Up if shift => self.scroll_preview(3),
             KeyCode::Down if shift => self.scroll_preview(-3),
             _ => r.prompt.key(k),
+        }
+    }
+
+    /// Give the reply box its agent's slash commands, once the transcript
+    /// has said where the agent runs: fetched in the background the first
+    /// time, then kept for the picker's life.
+    fn sync_commands(&mut self) {
+        while let Ok((agent, got)) = self.commands_rx.try_recv() {
+            let list = got.unwrap_or_else(|e| {
+                log(&format!("slash commands for {} on {}: {e}", agent.harness, agent.host));
+                Vec::new()
+            });
+            self.commands.insert(agent, Some(list));
+        }
+        let Some(r) = &mut self.reply else { return };
+        if r.prompt.has_commands() {
+            return;
+        }
+        let Some(agent) = self.preview.as_ref().filter(|pv| pv.pane.window == r.key.1).and_then(|pv| pv.agent.clone())
+        else {
+            return;
+        };
+        match self.commands.get(&agent) {
+            Some(Some(list)) => r.prompt.set_commands(list.clone(), commands::anywhere(&agent.harness)),
+            Some(None) => {}
+            None => {
+                self.commands.insert(agent.clone(), None);
+                let tx = self.commands_tx.clone();
+                std::thread::spawn(move || {
+                    let got = commands::fetch(&agent.host, &agent.profile, &agent.harness, &agent.dir);
+                    let _ = tx.send((agent, got));
+                });
+            }
         }
     }
 
@@ -1512,6 +1565,7 @@ impl App {
     // ------------------------------------------------------------ drawing
 
     fn draw(&mut self, f: &mut Frame) {
+        self.reply_card = None;
         let mut top = self.header_chips();
         if !top.is_empty() {
             top.insert(0, Span::raw(" "));
@@ -1526,6 +1580,10 @@ impl App {
             self.draw_stacked(f, content);
         }
         self.draw_footer_in_border(f);
+        // The slash-command menu goes over everything but the keys float.
+        if let (Some((card, bounds)), Some(r)) = (self.reply_card, &mut self.reply) {
+            r.prompt.draw_menu(f, &self.p, card, bounds);
+        }
         if self.help.is_some() {
             let sections = self.help_sections();
             let p = self.p;
@@ -1840,6 +1898,7 @@ impl App {
         let (prompt, label, focused) = match (&mut self.reply, unfocused) {
             (Some(r), _) => {
                 r.prompt.set_placeholder(&format!("Message {}", r.label));
+                self.reply_card = Some((card, f.area()));
                 (&mut r.prompt, Some(r.label.clone()), true)
             }
             (None, Some((placeholder, label))) => {
@@ -3901,6 +3960,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.take_fetched();
         app.take_archived();
         app.ask_preview();
+        app.sync_commands();
         let before = app.now;
         app.now = now();
         // A snooze ran out: back to its group.

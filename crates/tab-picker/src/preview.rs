@@ -33,6 +33,15 @@ pub struct Pane {
     pub window: String,
 }
 
+/// Where an agent runs: its host, profile, harness and folder.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Agent {
+    pub host: String,
+    pub profile: String,
+    pub harness: String,
+    pub dir: String,
+}
+
 impl Pane {
     fn header(&self) -> String {
         format!("{}/{}/{}", self.target, self.session, self.window)
@@ -43,6 +52,9 @@ impl Pane {
 /// its lines as last drawn, by width.
 pub struct Preview {
     pub pane: Pane,
+    /// Where the agent runs, when the transcript says (for the reply box's
+    /// slash commands).
+    pub agent: Option<Agent>,
     entries: Result<Vec<(String, String)>, String>,
     drawn: Option<(u16, Drawn)>,
 }
@@ -97,7 +109,13 @@ pub fn parse(body: &str) -> Option<Preview> {
     let (header, json) = body.split_once('\n')?;
     let mut f = header.splitn(3, '/');
     let pane = Pane { target: f.next()?.into(), session: f.next()?.into(), window: f.next()?.trim_end().into() };
-    let entries = match serde_json::from_str::<serde_json::Value>(json) {
+    let v = serde_json::from_str::<serde_json::Value>(json);
+    let agent = v.as_ref().ok().and_then(|v| {
+        let a = &v["agent"];
+        let f = |k: &str| a[k].as_str().map(String::from);
+        Some(Agent { host: f("host")?, profile: f("profile")?, harness: f("harness")?, dir: f("dir")? })
+    });
+    let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
             None => Ok(v["entries"]
@@ -109,7 +127,7 @@ pub fn parse(body: &str) -> Option<Preview> {
         },
         Err(_) => Err("unreadable transcript".to_string()),
     };
-    Some(Preview { pane, entries, drawn: None })
+    Some(Preview { pane, agent, entries, drawn: None })
 }
 
 /// The entries as lines `width` wide: John's messages after `›` on a
@@ -509,6 +527,20 @@ mod tests {
         let p = Palette::load();
         let lines: Vec<String> = pv.lines(14, &p).unwrap().iter().map(text).collect();
         assert_eq!(lines, ["› Fix it      ", "", "· Bash: Run t…", "· Read: /a/ve…", "", "● Done and", "  tested"]);
+    }
+
+    #[test]
+    fn a_transcript_says_where_its_agent_runs() {
+        let json = serde_json::json!({ "error": "no log yet", "agent": { "host": "miller", "profile": "work", "harness": "pi", "dir": "/w" } });
+        let pv = parse(&format!("-/s/w\n{json}")).unwrap();
+        let want = Agent {
+            host: "miller".into(),
+            profile: "work".into(),
+            harness: "pi".into(),
+            dir: "/w".into(),
+        };
+        assert_eq!(pv.agent, Some(want));
+        assert_eq!(parse("-/s/w\n{\"entries\": []}").unwrap().agent, None);
     }
 
     fn agent(md: &str, width: u16) -> Vec<Line<'static>> {

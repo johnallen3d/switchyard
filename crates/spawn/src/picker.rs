@@ -29,6 +29,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
+use switchyard_core::commands::{self, SlashCommand};
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
@@ -63,6 +64,10 @@ impl Kind {
         }
     }
 }
+
+/// Where agent work would run, for its slash commands: (host, profile,
+/// harness, folder).
+type Probe = (String, String, String, String);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -167,6 +172,15 @@ struct App {
     item: TextArea<'static>,
     /// The prompt, kept in its prompt file (see `PromptBox`).
     prompt: PromptBox,
+    /// Slash commands by where the agent would run (`Probe`), None while
+    /// being fetched; the probe the prompt has the commands of; and the
+    /// fetches' results.
+    commands: HashMap<Probe, Option<Vec<SlashCommand>>>,
+    commands_for: Option<Probe>,
+    commands_tx: Sender<(Probe, Result<Vec<SlashCommand>, String>)>,
+    commands_rx: Receiver<(Probe, Result<Vec<SlashCommand>, String>)>,
+    /// Where the prompt box was last drawn, and within what, for its menu.
+    prompt_card: Option<(Rect, Rect)>,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -213,6 +227,7 @@ impl App {
             }
         }
         let (tx, rx) = mpsc::channel();
+        let (commands_tx, commands_rx) = mpsc::channel();
         let mut app = App {
             p: Palette::load(),
             kind,
@@ -232,6 +247,11 @@ impl App {
             name: text_field(),
             item: text_field(),
             prompt: PromptBox::new(),
+            commands: HashMap::new(),
+            commands_for: None,
+            commands_tx,
+            commands_rx,
+            prompt_card: None,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -277,6 +297,64 @@ impl App {
             let r = folders::list(&host, &here, &home, &home_folders);
             let _ = tx.send((host, r));
         });
+    }
+
+    /// Where the highlighted agent work would run, for its slash commands:
+    /// host (on `auto`, this one, where the catalog's config also is),
+    /// profile, harness and folder.
+    fn probe(&self) -> Option<Probe> {
+        let dir = self.target_path()?;
+        let profile = match self.project() {
+            Some(p) => p.profile.clone(),
+            None if dir.contains("/dev/src/amfaro") => "work".into(),
+            None => "personal".into(),
+        };
+        let host = match self.agent_host() {
+            AUTO => self.here.clone(),
+            h => h.to_string(),
+        };
+        Some((host, profile, HARNESSES[self.harness].to_string(), dir))
+    }
+
+    /// Give the prompt the slash commands of where the work would run,
+    /// fetching them in the background once the prompt has focus there.
+    fn sync_commands(&mut self) {
+        while let Ok((probe, got)) = self.commands_rx.try_recv() {
+            let list = got.unwrap_or_else(|e| {
+                log(&format!("slash commands for {} on {}: {e}", probe.2, probe.0));
+                Vec::new()
+            });
+            self.commands.insert(probe, Some(list));
+            // Take them now if they are for the current probe.
+            self.commands_for = None;
+        }
+        let probe = if self.kind == Kind::Agent { self.probe() } else { None };
+        if probe == self.commands_for {
+            return;
+        }
+        let Some(probe) = probe else {
+            self.prompt.set_commands(Vec::new(), true);
+            self.commands_for = None;
+            return;
+        };
+        let anywhere = commands::anywhere(&probe.2);
+        match self.commands.get(&probe) {
+            Some(Some(list)) => {
+                self.prompt.set_commands(list.clone(), anywhere);
+                self.commands_for = Some(probe);
+            }
+            Some(None) => self.prompt.set_commands(Vec::new(), anywhere),
+            None if self.focus == Focus::Prompt => {
+                self.prompt.set_commands(Vec::new(), anywhere);
+                self.commands.insert(probe.clone(), None);
+                let tx = self.commands_tx.clone();
+                std::thread::spawn(move || {
+                    let got = commands::fetch(&probe.0, &probe.1, &probe.2, &probe.3);
+                    let _ = tx.send((probe, got));
+                });
+            }
+            None => self.prompt.set_commands(Vec::new(), anywhere),
+        }
     }
 
     fn receive(&mut self) {
@@ -547,6 +625,10 @@ impl App {
         if !(k.code == KeyCode::Esc || (ctrl && k.code == KeyCode::Char('c'))) {
             self.confirm_close = false;
         }
+        // The slash-command menu, while open, has Tab, the arrows and Escape.
+        if self.focus == Focus::Prompt && self.prompt.menu_key(k) {
+            return true;
+        }
         let page = (self.list_area.height as isize - 2).max(1);
         // The prompt keeps ctrl-n/p/j/k as readline's line keys; elsewhere
         // they move through the list, like the tab picker. The name keeps
@@ -661,6 +743,7 @@ impl App {
         let agent = self.kind == Kind::Agent;
         let title = if agent { "Agent work" } else { "New session" };
         let inner = draw::frame(f, &self.p, title, Vec::new(), "", Margin::new(2, 1));
+        self.prompt_card = None;
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
         let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
@@ -689,6 +772,9 @@ impl App {
             self.draw_session(f, form);
         }
         self.draw_footer(f, footer);
+        if let Some((card, bounds)) = self.prompt_card {
+            self.prompt.draw_menu(f, &self.p, card, bounds);
+        }
     }
 
     fn draw_search(&mut self, f: &mut Frame, area: Rect) {
@@ -992,6 +1078,9 @@ impl App {
         let focused = self.focus == Focus::Prompt;
         let fill = if focused { p.overlay } else { p.surface };
         self.prompt.set_placeholder("What should the agent do? (optional)");
+        if focused {
+            self.prompt_card = Some((card, f.area()));
+        }
         let Some((chips_area, skip)) = self.prompt.draw(f, &p, card, rows, focused, self.corners.as_ref()) else {
             return;
         };
@@ -1257,6 +1346,7 @@ fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool
 fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.receive();
+        app.sync_commands();
         term.draw(|f| app.draw(f))?;
         app.report()?;
         let wait = if app.waiting() { Duration::from_millis(90) } else { Duration::from_millis(250) };

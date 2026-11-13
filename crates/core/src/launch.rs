@@ -65,7 +65,8 @@ const WORK_ITEM_FLAGS: &str = "--create-pr --agent-author";
 /// The prompt that starts work on `item` ahead of the typed `prompt`: a
 /// work project hands it to `WORK_ITEM_COMMAND`, which knows its tracker;
 /// otherwise the agent is told the item, as its URL when the tracker can
-/// place it.
+/// place it. A prompt that starts with a slash command keeps it first, since
+/// Pi runs a command only at the start of a message; the item follows.
 pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &str) -> String {
     let lead = if profile == "work" {
         format!("{WORK_ITEM_COMMAND} {item} {WORK_ITEM_FLAGS}")
@@ -73,7 +74,11 @@ pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &s
         let url = parse_ref(item, tracker).and_then(|l| l["url"].as_str().map(String::from)).unwrap_or_default();
         format!("Let's work on {}", if url.is_empty() { item } else { &url })
     };
-    if prompt.is_empty() { lead } else { format!("{lead}\n\n{prompt}") }
+    match prompt {
+        "" => lead,
+        p if p.starts_with('/') => format!("{p}\n\n{lead}"),
+        p => format!("{lead}\n\n{p}"),
+    }
 }
 
 /// A work item as typed: one ref or key, without spaces.
@@ -360,6 +365,10 @@ mod tests {
         // The prompt's links pick the item up as a spawn link.
         assert_eq!(refs_in_text(&personal, &fizzy)[0]["ref"], "1045");
         assert_eq!(work_item_prompt("personal", "ENG-12", &Tracker::default(), "go"), "Let's work on ENG-12\n\ngo");
+        assert_eq!(
+            work_item_prompt("personal", "ENG-12", &Tracker::default(), "/issue-plan fast"),
+            "/issue-plan fast\n\nLet's work on ENG-12"
+        );
         assert!(work_item_problem("ENG-12").is_none());
         assert!(work_item_problem("two refs").is_some());
     }

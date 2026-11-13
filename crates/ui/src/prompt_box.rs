@@ -7,6 +7,10 @@
 //!
 //! Rex's float modes take plain Enter to act, so a newline is alt- or
 //! shift-Enter (or arrives in a paste).
+//!
+//! Given the agent's slash commands (`set_commands`), it completes them:
+//! see `slash`. Callers offer keys to `menu_key` first and draw the menu
+//! with `draw_menu` after everything else.
 
 use std::io;
 use std::process::Command;
@@ -22,6 +26,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use switchyard_core::commands::SlashCommand;
 use switchyard_core::prompts::{parse_prompt_ref, prompt_dir};
 use switchyard_core::rex::{local_label, log, now};
 use unicode_width::UnicodeWidthChar;
@@ -29,6 +34,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::Palette;
 use crate::chrome;
 use crate::draw::str_width;
+use crate::slash;
 
 /// The rows a prompt box adds around its text: soft top and bottom edges, a
 /// gap and the chip row.
@@ -42,6 +48,8 @@ pub struct PromptBox {
     /// The text as last saved, and whether saving it worked.
     saved: String,
     pub saved_ok: bool,
+    /// The agent's slash commands and their menu.
+    slash: slash::Menu,
 }
 
 impl Default for PromptBox {
@@ -60,6 +68,7 @@ impl PromptBox {
             file_ref: format!("{}:{}-{}-{seq}", local_label(), std::process::id(), now()),
             saved: String::new(),
             saved_ok: true,
+            slash: slash::Menu::default(),
         }
     }
 
@@ -79,6 +88,68 @@ impl PromptBox {
     /// Edit with readline keys (see `text_key`).
     pub fn key(&mut self, k: KeyEvent) {
         text_key(&mut self.field, k);
+    }
+
+    /// Complete these commands after `/`: anywhere in the text, or (for
+    /// Pi) only first in it.
+    pub fn set_commands(&mut self, commands: Vec<SlashCommand>, anywhere: bool) {
+        self.slash.set(commands, anywhere);
+    }
+
+    pub fn has_commands(&self) -> bool {
+        !self.slash.is_empty()
+    }
+
+    fn menu(&mut self) -> Option<(slash::Word, Vec<usize>)> {
+        let c = self.field.cursor();
+        self.slash.open(self.field.lines(), (c.0, c.1))
+    }
+
+    /// Whether the slash-command menu is showing.
+    pub fn menu_open(&mut self) -> bool {
+        self.menu().is_some()
+    }
+
+    /// Take a key for the open menu: Tab completes the highlighted command,
+    /// Up/Down (ctrl-p/n, shift-Tab) move, Escape closes it. False when the
+    /// menu is closed or the key isn't one of these.
+    pub fn menu_key(&mut self, k: KeyEvent) -> bool {
+        let Some((word, found)) = self.menu() else { return false };
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Tab => self.complete(&word, found[self.slash.selected]),
+            KeyCode::Down => self.slash.step(1, found.len()),
+            KeyCode::Char('n') if ctrl => self.slash.step(1, found.len()),
+            KeyCode::Up | KeyCode::BackTab => self.slash.step(-1, found.len()),
+            KeyCode::Char('p') if ctrl => self.slash.step(-1, found.len()),
+            KeyCode::Esc => self.slash.dismiss(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Replace `word` with command `i` and a space after it.
+    fn complete(&mut self, word: &slash::Word, i: usize) {
+        let name = format!("/{}", self.slash.command(i).name);
+        let line_len = self.field.lines()[word.row].chars().count();
+        self.field
+            .move_cursor(CursorMove::Jump(word.row as u16, word.start as u16));
+        self.field.delete_str(word.end - word.start);
+        self.field.insert_str(&name);
+        // Step over a space already there rather than adding a second.
+        if word.end < line_len {
+            self.field.move_cursor(CursorMove::Forward);
+        } else {
+            self.field.insert_char(' ');
+        }
+    }
+
+    /// Draw the open slash-command menu next to the box drawn in `card`,
+    /// within `bounds`; call it after everything else.
+    pub fn draw_menu(&mut self, f: &mut Frame, p: &Palette, card: Rect, bounds: Rect) {
+        if let Some((word, found)) = self.menu() {
+            self.slash.draw(f, p, &word, &found, card, bounds);
+        }
     }
 
     /// Insert pasted text: line endings as newlines, tabs as spaces, and no
@@ -346,4 +417,71 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmd(name: &str) -> SlashCommand {
+        SlashCommand {
+            name: name.into(),
+            description: String::new(),
+            hint: String::new(),
+        }
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn typed(b: &mut PromptBox, s: &str) {
+        for c in s.chars() {
+            b.key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn tab_completes_the_highlighted_command() {
+        let mut b = PromptBox::new();
+        b.set_commands(
+            vec![cmd("issue-create"), cmd("issue-plan"), cmd("wrap")],
+            true,
+        );
+        typed(&mut b, "then /iss");
+        assert!(b.menu_open());
+        assert!(b.menu_key(key(KeyCode::Down)));
+        assert!(b.menu_key(key(KeyCode::Tab)));
+        assert_eq!(b.text(), "then /issue-plan");
+        assert_eq!(b.field.lines()[0], "then /issue-plan ");
+        assert!(!b.menu_open());
+        typed(&mut b, "now");
+        assert_eq!(b.text(), "then /issue-plan now");
+    }
+
+    #[test]
+    fn completing_mid_text_replaces_the_word_and_keeps_one_space() {
+        let mut b = PromptBox::new();
+        b.set_commands(vec![cmd("wrap")], true);
+        b.paste("/w please");
+        b.field.move_cursor(CursorMove::Jump(0, 2));
+        assert!(b.menu_key(key(KeyCode::Tab)));
+        assert_eq!(b.field.lines()[0], "/wrap please");
+        assert_eq!(b.field.cursor(), ratatui_textarea::DataCursor(0, 6));
+    }
+
+    #[test]
+    fn the_menu_leaves_keys_alone_when_closed_or_dismissed() {
+        let mut b = PromptBox::new();
+        assert!(!b.menu_key(key(KeyCode::Tab)));
+        b.set_commands(vec![cmd("wrap")], false);
+        typed(&mut b, "do /w");
+        assert!(!b.menu_open(), "Pi takes commands only first");
+        b.clear();
+        typed(&mut b, "/w");
+        assert!(b.menu_key(key(KeyCode::Esc)));
+        assert!(!b.menu_key(key(KeyCode::Tab)));
+        typed(&mut b, "r");
+        assert!(b.menu_open());
+    }
 }

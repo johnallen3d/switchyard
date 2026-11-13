@@ -10,5 +10,6 @@ pub mod glyphs;
 pub mod palette;
 pub mod prompt_box;
 pub mod protocol;
+pub mod slash;
 
 pub use palette::Palette;
