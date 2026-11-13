@@ -128,8 +128,8 @@ impl Scrollback {
         let last = lines.len().saturating_sub(1);
         match k.code {
             KeyCode::Char('c' | 'v') if ctrl => return Outcome::Exit,
-            KeyCode::Char('d') if ctrl => self.go(half, last),
-            KeyCode::Char('u') if ctrl => self.go(-half, last),
+            KeyCode::Char('d') if ctrl => self.scroll(half, last),
+            KeyCode::Char('u') if ctrl => self.scroll(-half, last),
             KeyCode::Char('f') if ctrl => self.go(page, last),
             KeyCode::Char('b') if ctrl => self.go(-page, last),
             KeyCode::PageDown => self.go(page, last),
@@ -162,6 +162,13 @@ impl Scrollback {
 
     fn go(&mut self, delta: isize, last: usize) {
         self.cursor = self.cursor.saturating_add_signed(delta).min(last);
+    }
+
+    /// Move the view and the cursor together, as vi's ctrl-d/ctrl-u do, so
+    /// the view moves on the first press; sync clamps the view at the ends.
+    fn scroll(&mut self, delta: isize, last: usize) {
+        self.top = self.top.saturating_add_signed(delta);
+        self.go(delta, last);
     }
 
     fn type_key(&mut self, k: KeyEvent, lines: &[String]) {
@@ -302,6 +309,20 @@ mod tests {
         let (cursor, top) = (s.cursor, s.top);
         s.sync(14, 4);
         assert_eq!((s.cursor, s.top), (cursor, top));
+    }
+
+    #[test]
+    fn half_pages_move_the_view_at_once() {
+        let l: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut s = Scrollback::new(pane(), l.len(), 4);
+        assert_eq!((s.cursor, s.top), (19, 16));
+        s.key(ctrl('u'), &l, 4);
+        s.sync(l.len(), 4);
+        assert_eq!((s.cursor, s.top), (17, 14));
+        s.key(ctrl('d'), &l, 4);
+        s.sync(l.len(), 4);
+        assert_eq!((s.cursor, s.top), (19, 16));
     }
 
     #[test]
