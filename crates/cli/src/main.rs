@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use switchyard_spawn::Kind;
 use switchyard_tabs::View;
 
-const USAGE: &str = "usage: switchyard [--view all|usage|archive] [--current SESSION/WINDOW]
+const USAGE: &str = "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -28,8 +28,8 @@ const USAGE: &str = "usage: switchyard [--view all|usage|archive] [--current SES
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-r (review), ctrl-b (open the task's work item), ctrl-t (pin) and
-ctrl-s (snooze), staying open until Escape or ctrl-c. ctrl-h and ctrl-l
-move along the top bar: All, Usage, Archive. --current highlights that
+ctrl-s (snooze), staying open until its tab is closed. ctrl-h and ctrl-l
+cycle the views: Inbox, Usage, Archive. --current highlights that
 tab (cmd+k passes the tab it was pressed on). new opens the
 new-session picker: agent work by default, or a plain session with
 --session. link and unlink record the work items the current branch is
@@ -63,7 +63,7 @@ fn done(result: io::Result<()>) -> ExitCode {
 /// The interactive pickers need a terminal.
 /// Bare: `[--view VIEW] [--current SESSION/WINDOW]`, in any order.
 fn picker(mut args: &[&str]) -> ExitCode {
-    let (mut view, mut current) = (View::All, None);
+    let (mut view, mut current) = (View::Inbox, None);
     loop {
         args = match args {
             [] => break,

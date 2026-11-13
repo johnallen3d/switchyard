@@ -25,7 +25,7 @@
 //! link to tabs by (session_id, window_id). Views, moved along with ctrl-h
 //! and ctrl-l:
 //!
-//! - All (default): one flat list across every session, each row naming
+//! - Inbox (default): one flat list across every session, each row naming
 //!   its project. Agents (tabs with live agent status or an open task, and
 //!   open tasks with no listed tab) go under status headings in urgency
 //!   order (Waiting, Failed, Done, Working, Idle, No status), then the other
@@ -53,14 +53,14 @@
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
 //! a new tab), ctrl-r opens a review beside the task's agent, and ctrl-t
 //! pins or unpins the highlighted open task (`pinned` in the registry),
-//! which puts it in a Pinned group at the top of All. ctrl-s, in All, opens
+//! which puts it in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens
 //! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
 //! empty prompt wakes a snoozed one. ctrl-b opens the highlighted task's
 //! work item; task rows show their links as badges grouped by kind. With
 //! several it opens a chooser over them (PRs, cards, then issues).
 //!
-//! All keeps a reply box at its bottom, under the preview (or the
+//! Inbox keeps a reply box at its bottom, under the preview (or the
 //! transcript), expanded or not:
 //! the new-session picker's prompt box (see the ui crate's prompt_box),
 //! with its rounded corners. Tab moves into it to message the highlighted
@@ -117,7 +117,7 @@ const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
 const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
 
-/// All's sections, in order: Pinned, agents by status (the empty string is
+/// Inbox's sections, in order: Pinned, agents by status (the empty string is
 /// no known status), the tabs with no agent, then Snoozed.
 const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed"];
 
@@ -145,19 +145,19 @@ enum Tasks {
     Failed,
 }
 
-/// The picker's views, along its top bar.
+/// The picker's views, cycled with ctrl-h and ctrl-l.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    All,
+    Inbox,
     Usage,
     Archive,
 }
 
 impl View {
-    /// `all`, `usage` or `archive`.
+    /// `inbox` (or the older `all`), `usage` or `archive`.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "all" => Some(View::All),
+            "inbox" | "all" => Some(View::Inbox),
             "archive" => Some(View::Archive),
             "usage" => Some(View::Usage),
             _ => None,
@@ -166,20 +166,9 @@ impl View {
 
     fn next(self, back: bool) -> Self {
         match (self, back) {
-            (View::All, false) | (View::Archive, true) => View::Usage,
-            (View::Usage, false) | (View::All, true) => View::Archive,
-            (View::Archive, false) | (View::Usage, true) => View::All,
-        }
-    }
-
-    const ALL: [View; 3] = [View::All, View::Usage, View::Archive];
-
-    /// Its label in the top bar.
-    fn label(self) -> &'static str {
-        match self {
-            View::All => "All tabs",
-            View::Archive => "Archive",
-            View::Usage => "Usage",
+            (View::Inbox, false) | (View::Archive, true) => View::Usage,
+            (View::Usage, false) | (View::Inbox, true) => View::Archive,
+            (View::Archive, false) | (View::Usage, true) => View::Inbox,
         }
     }
 }
@@ -225,7 +214,7 @@ impl Armed {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Item {
-    /// A heading over a section of All: `pinned`, `snoozed`, an agent
+    /// A heading over a section of Inbox: `pinned`, `snoozed`, an agent
     /// status (the empty string means no known status), or `tabs` for the
     /// tabs with no agent.
     Status(&'static str),
@@ -318,7 +307,7 @@ struct Reply {
 const REPLY_MIN_ROWS: u16 = 2;
 const REPLY_MAX_ROWS: u16 = 6;
 
-/// The narrowest content All splits into the sidebar and the highlighted
+/// The narrowest content Inbox splits into the sidebar and the highlighted
 /// row, and the sidebar's width range (three tenths of the content).
 const SIDEBAR_MIN_WIDTH: u16 = 90;
 const SIDEBAR_MIN: u16 = 30;
@@ -396,7 +385,7 @@ struct App {
     /// The preview fills the picker (ctrl-e), for reading: with the
     /// sidebar, it is collapsed.
     expanded: bool,
-    /// All is drawn as the sidebar and the highlighted row (see
+    /// Inbox is drawn as the sidebar and the highlighted row (see
     /// draw_split), as of the last frame.
     sidebar: bool,
     /// How far the preview is scrolled back from its bottom, in lines, and
@@ -632,7 +621,7 @@ impl App {
     }
 
     /// The highlighted open task, which ctrl-t can pin (not in the archive)
-    /// and ctrl-s snooze (in All).
+    /// and ctrl-s snooze (in Inbox).
     fn selected_open_task(&self) -> Option<usize> {
         self.selected_item().and_then(|i| self.task_index(i)).filter(|&k| self.tasks[k].ended.is_none())
     }
@@ -642,7 +631,7 @@ impl App {
     }
 
     fn can_snooze(&self) -> bool {
-        self.view == View::All && self.selected_open_task().is_some()
+        self.view == View::Inbox && self.selected_open_task().is_some()
     }
 
     /// The Agents group a row goes in: `pinned`, `snoozed` (which wins), or
@@ -689,9 +678,9 @@ impl App {
         }
     }
 
-    /// The tab whose agent to preview: the highlighted agent's, in All.
+    /// The tab whose agent to preview: the highlighted agent's, in Inbox.
     fn preview_want(&self) -> Option<preview::Pane> {
-        if self.view != View::All {
+        if self.view != View::Inbox {
             return None;
         }
         let item = self.selected_item()?;
@@ -730,7 +719,7 @@ impl App {
 
     /// Whether a row is the picker's own tab: the plain tab cmd+k opens on
     /// the config host, labelled `switchyard` (see
-    /// lua/switchyard/tab-picker.lua). All leaves it out, as it is always
+    /// lua/switchyard/tab-picker.lua). Inbox leaves it out, as it is always
     /// there and cmd+k already shows it.
     fn is_picker_tab(&self, item: Item) -> bool {
         let Item::Tab(t) = item else { return false };
@@ -878,7 +867,7 @@ impl App {
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let filtering = !self.query.trim().is_empty();
         let best = match self.view {
-            View::All => self.filter_merged(&pattern, filtering),
+            View::Inbox => self.filter_merged(&pattern, filtering),
             View::Archive => self.filter_archive(&pattern, filtering),
             View::Usage => None,
         };
@@ -887,7 +876,7 @@ impl App {
         self.offset = 0;
     }
 
-    /// Score an All row against the search, recording its highlights;
+    /// Score an Inbox row against the search, recording its highlights;
     /// None when it doesn't match. Matches name, folder, project, session,
     /// host and work items.
     fn score_row(&mut self, item: Item, pattern: &Pattern) -> Option<u32> {
@@ -906,13 +895,13 @@ impl App {
         Some(score)
     }
 
-    /// The All section a row goes in (see `SECTIONS`): an agent's group,
+    /// The Inbox section a row goes in (see `SECTIONS`): an agent's group,
     /// or `tabs` for a tab with no agent.
     fn section(&self, item: Item) -> &'static str {
         if self.is_agent(item) { self.agent_group(item) } else { "tabs" }
     }
 
-    /// All: one flat list across every session, in sections under
+    /// Inbox: one flat list across every session, in sections under
     /// headings (see `SECTIONS`). Agents go by urgency and age within
     /// theirs (see `agent_key`); tabs with no agent keep Rex's order. Each
     /// row carries its project, so no session headings are needed. Returns
@@ -1092,7 +1081,7 @@ impl App {
         self.pending.insert((t.host.clone(), t.window_id.clone()), (pinned, until, Instant::now()));
     }
 
-    /// Open the snooze prompt on the highlighted open task in All.
+    /// Open the snooze prompt on the highlighted open task in Inbox.
     fn open_snooze(&mut self) {
         if !self.can_snooze() {
             return;
@@ -1174,7 +1163,7 @@ impl App {
         }
     }
 
-    /// Open the reply box on the highlighted agent in All. An agent waiting
+    /// Open the reply box on the highlighted agent in Inbox. An agent waiting
     /// on a prompt is refused: the message would answer it.
     fn open_reply(&mut self) {
         let Some(item) = self.selected_item() else { return };
@@ -1301,8 +1290,8 @@ impl App {
         match k.code {
             // standalone_key acts on ctrl-b, ctrl-r and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
-            KeyCode::Tab | KeyCode::BackTab if self.view == View::All => self.open_reply(),
-            KeyCode::Char('e') if ctrl && self.view == View::All => self.expanded = !self.expanded,
+            KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
+            KeyCode::Char('e') if ctrl && self.view == View::Inbox => self.expanded = !self.expanded,
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             KeyCode::Char('u') if ctrl => {
@@ -1315,7 +1304,7 @@ impl App {
                 self.refilter();
             }
             KeyCode::Char('a') if ctrl => {
-                self.set_view(if self.view == View::Archive { View::All } else { View::Archive })
+                self.set_view(if self.view == View::Archive { View::Inbox } else { View::Archive })
             }
             KeyCode::Char('f') if ctrl && self.view == View::Archive => {
                 self.kept = !self.kept;
@@ -1326,7 +1315,7 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
-            // ctrl-h and ctrl-b move along the top bar, so every letter
+            // ctrl-h and ctrl-l cycle the views, so every letter
             // stays free for the search.
             KeyCode::Char('h') if ctrl => self.set_view(self.view.next(true)),
             KeyCode::Char('l') if ctrl => self.set_view(self.view.next(false)),
@@ -1378,14 +1367,14 @@ impl App {
     // ------------------------------------------------------------ drawing
 
     fn draw(&mut self, f: &mut Frame) {
-        let labels = View::ALL.map(View::label);
-        let active = View::ALL.iter().position(|&v| v == self.view).unwrap_or(0);
-        let mut top = draw::tabs(&self.p, &labels, active);
-        top.extend(self.header_chips());
+        let mut top = self.header_chips();
+        if !top.is_empty() {
+            top.insert(0, Span::raw(" "));
+        }
         let inner = draw::frame_spans(f, &self.p, top, "⌘K", Margin::new(2, 1));
         let [content, _, footer] =
             Layout::vertical([Constraint::Min(5), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
-        self.sidebar = self.view == View::All && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
+        self.sidebar = self.view == View::Inbox && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
         if self.sidebar {
             self.draw_split(f, content);
         } else {
@@ -1394,7 +1383,7 @@ impl App {
         self.draw_footer(f, footer);
     }
 
-    /// All, with room: the sidebar of every open tab and agent on the left
+    /// Inbox, with room: the sidebar of every open tab and agent on the left
     /// (search over its list), and the highlighted one on the right: its
     /// name and status message, its transcript, and the reply box under it.
     /// ctrl-e collapses the sidebar, giving the right side the whole width.
@@ -1508,8 +1497,8 @@ impl App {
         f.render_widget(Paragraph::new(lines), msg_area);
     }
 
-    /// The other views, and All without room for the sidebar: the search
-    /// over the list, with All's preview and reply box under it.
+    /// The other views, and Inbox without room for the sidebar: the search
+    /// over the list, with Inbox's preview and reply box under it.
     fn draw_stacked(&mut self, f: &mut Frame, area: Rect) {
         let [search, rule, _, body] = Layout::vertical([
             Constraint::Length(1),
@@ -1520,10 +1509,10 @@ impl App {
         .areas(area);
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
-        // The reply box keeps the bottom of All, under the preview, with
+        // The reply box keeps the bottom of Inbox, under the preview, with
         // one text row until Tab moves into it.
         let mut reply_card = None;
-        let body = if self.view == View::All && body.height >= prompt_box::CHROME_ROWS + 4 {
+        let body = if self.view == View::Inbox && body.height >= prompt_box::CHROME_ROWS + 4 {
             let rows = match &self.reply {
                 Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
                 None => 1,
@@ -1557,14 +1546,14 @@ impl App {
         }
     }
 
-    /// All's list and the preview under it, when there is room for both:
+    /// Inbox's list and the preview under it, when there is room for both:
     /// a third of the height (8 to 14 lines) for the preview, the rest
     /// for the list; expanded (ctrl-e), the preview alone. The
     /// preview stays while John moves, whatever the row, so the list
     /// doesn't change height under him. With focus in the reply box, the
     /// preview gets half of what is left, as what John is replying to.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
-        if self.view != View::All {
+        if self.view != View::Inbox {
             return None;
         }
         if self.expanded {
@@ -1817,8 +1806,8 @@ impl App {
         let p = &self.p;
         let typing = !self.query.is_empty();
         let placeholder = match self.view {
-            View::All if self.sidebar => "Search",
-            View::All => "Search tabs, agents, and work items",
+            View::Inbox if self.sidebar => "Search",
+            View::Inbox => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
         };
@@ -1837,7 +1826,7 @@ impl App {
         }
         // The sidebar is too narrow for the counts by status; its
         // headings say them.
-        if self.view == View::All && !self.sidebar {
+        if self.view == View::Inbox && !self.sidebar {
             // Counts by what needs attention, the snoozed aside.
             let count = |st: &str| {
                 self.rows
@@ -1981,7 +1970,7 @@ impl App {
         } else {
             match self.view {
                 View::Usage => Vec::new(),
-                View::All => match &self.load {
+                View::Inbox => match &self.load {
                     Load::Waiting => vec![spin(), Line::from(""), text("Loading tabs…".into())],
                     Load::Failed(err) => vec![
                         icon(ICON_SESSION, p.love),
@@ -2164,7 +2153,7 @@ impl App {
         if selectable(item) { SIDE_ROW_LINES } else { 1 }
     }
 
-    /// All's list as the sidebar: each tab or task on two lines (see
+    /// Inbox's list as the sidebar: each tab or task on two lines (see
     /// draw_side_row) under the one-line status headings, scrolled to keep
     /// the highlighted row, and the heading over it, in view.
     fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
@@ -2436,7 +2425,7 @@ impl App {
         keys.push(("⌃O", self.profile.next().name()));
         match self.view {
             View::Usage => {}
-            View::All => {
+            View::Inbox => {
                 keys.push(("⌥↑↓", "group"));
                 if self.sidebar {
                     keys.push(("⌃E", if self.expanded { "show sidebar" } else { "hide sidebar" }));
@@ -2459,7 +2448,7 @@ impl App {
         let (spans, used) = draw::hints(p, &keys, area.width as usize);
         f.render_widget(Line::from(spans), area);
         // The summary only when it still fits beside the hints.
-        if self.view != View::All {
+        if self.view != View::Inbox {
             return;
         }
         let n = self.sessions.len();
@@ -2704,7 +2693,7 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     fn inbox() -> App {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
             (app.sessions, app.tabs) = parse_rows(concat!(
@@ -2730,13 +2719,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_h_and_l_move_along_the_top_bar_while_letters_search() {
+    fn ctrl_h_and_l_cycle_the_views_while_letters_search() {
         let mut app = inbox();
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.key(plain(KeyCode::Char('h')));
         app.key(plain(KeyCode::Char('l')));
-        assert!(app.view == View::All && app.query == "hl");
+        assert!(app.view == View::Inbox && app.query == "hl");
         app.key(ctrl('l'));
         assert!(app.view == View::Usage);
         app.key(ctrl('l'));
@@ -2744,7 +2733,7 @@ mod tests {
         app.key(ctrl('h'));
         assert!(app.view == View::Usage);
         app.key(ctrl('h'));
-        assert!(app.view == View::All);
+        assert!(app.view == View::Inbox);
     }
 
     #[test]
@@ -2775,7 +2764,7 @@ mod tests {
     #[test]
     fn working_agents_keep_their_order_as_they_report() {
         let order = |a: u64, b: u64| {
-            let mut app = App::new((String::new(), String::new()), View::All);
+            let mut app = App::new((String::new(), String::new()), View::Inbox);
             app.follow = false;
             app.deliver(|app| {
                 app.tasks = parse_tasks(&serde_json::json!([
@@ -2842,7 +2831,7 @@ mod tests {
     }
 
     fn inbox_with_lifecycle() -> App {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.now = 1000;
         app.deliver(|app| {
@@ -2896,7 +2885,7 @@ mod tests {
 
     #[test]
     fn all_leaves_out_the_pickers_own_tab() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
             (app.sessions, app.tabs) = parse_rows(concat!(
@@ -2920,7 +2909,7 @@ mod tests {
 
     #[test]
     fn every_session_shares_the_status_sections_and_plain_tabs_come_last() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
             (app.sessions, app.tabs) = parse_rows(concat!(
@@ -3102,7 +3091,7 @@ mod tests {
 
     #[test]
     fn failed_hosts_keep_the_other_rows_and_show_in_the_header() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         let chips = |app: &App| app.header_chips().iter().map(|s| s.content.to_string()).collect::<String>();
         app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\tshell\t~\nE\tmiller\tmiller: timed out\n");
         assert!(matches!(app.load, Load::Ready));
@@ -3116,7 +3105,7 @@ mod tests {
 
     #[test]
     fn task_rows_show_work_item_badges_and_open_hint() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
             app.tasks = parse_tasks(&serde_json::json!([
@@ -3141,7 +3130,7 @@ mod tests {
 
     #[test]
     fn ctrl_l_chooses_among_several_links_prs_first() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
             app.tasks = parse_tasks(&serde_json::json!([
@@ -3190,7 +3179,7 @@ mod tests {
 
     #[test]
     fn ctrl_x_arms_on_any_agent_tab_and_says_why_elsewhere() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         // An agent with no task (started by hand, or its task ended by
         // mistake) and a plain shell.
@@ -3287,8 +3276,8 @@ mod tests {
     #[test]
     fn usage_is_integrated_read_only_and_handles_narrow_frames() {
         let mut app = inbox();
-        let mut view = View::All;
-        for expected in [View::Usage, View::Archive, View::All] {
+        let mut view = View::Inbox;
+        for expected in [View::Usage, View::Archive, View::Inbox] {
             view = view.next(false);
             assert!(view == expected);
             assert!(view.next(true).next(false) == view);
@@ -3304,13 +3293,13 @@ mod tests {
             terminal.draw(|f| app.draw(f)).unwrap();
             assert_eq!(app.pick(), "");
         }
-        app.set_view(View::All);
+        app.set_view(View::Inbox);
         assert!(!app.rows.is_empty());
     }
 
     #[test]
     fn long_tab_names_stop_at_a_third_of_the_row() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         let long = "x".repeat(200);
         app.paste(&format!("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\t{long}\t~/dev/src/project\n"));
         let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
@@ -3345,7 +3334,7 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("show sidebar")));
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
-        // Too narrow, All stacks the list over the reply box as before.
+        // Too narrow, Inbox stacks the list over the reply box as before.
         app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 80);
         assert!(!app.sidebar);
@@ -3354,7 +3343,7 @@ mod tests {
 
     #[test]
     fn sidebar_rows_take_two_lines_and_scroll_to_the_highlight() {
-        let mut app = App::new((String::new(), String::new()), View::All);
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.now = 1000;
         let mut rows = String::from("S\t-\tlocal\ts\tdemo\n");

@@ -1,4 +1,4 @@
-//! The preview in the All view: what the highlighted agent has been
+//! The preview in the Inbox view: what the highlighted agent has been
 //! saying, from its session log (see core's `transcript`).
 //!
 //! A thread here fetches it for the tab the picker asks for (see `follow`)

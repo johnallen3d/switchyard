@@ -35,26 +35,6 @@ pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>,
     frame_spans(f, p, left, shortcut, margin)
 }
 
-/// A top bar of views for the frame's title, as gh-dash shows its
-/// sections: the `active` one as an iris pill, the others muted, `│`
-/// between them.
-pub fn tabs(p: &Palette, names: &[&str], active: usize) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled(" ", Style::new().bg(p.base))];
-    for (i, name) in names.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" │ ", Style::new().fg(p.hl_med)));
-        }
-        if i == active {
-            let label = Span::styled(format!(" {name} "), Style::new().fg(p.iris).add_modifier(Modifier::BOLD));
-            spans.extend(pill(vec![label], p.overlay, p.base));
-        } else {
-            spans.push(Span::styled(format!("  {name}  "), Style::new().fg(p.muted)));
-        }
-    }
-    spans.push(Span::styled(" ", Style::new().bg(p.base)));
-    spans
-}
-
 /// [`frame`] with the title's spans given whole.
 pub fn frame_spans(f: &mut Frame, p: &Palette, left: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
     let area = f.area();
