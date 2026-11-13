@@ -437,6 +437,20 @@ impl App {
         self.prompt.text()
     }
 
+    /// What a blank name is named from on Enter (see core's `autoname`):
+    /// the work item, else the prompt; None when the work must be named.
+    fn names_from(&self) -> Option<&'static str> {
+        if !self.name_text().is_empty() {
+            None
+        } else if !self.item_text().is_empty() {
+            Some("work item")
+        } else if !self.prompt_text().is_empty() {
+            Some("prompt")
+        } else {
+            None
+        }
+    }
+
     /// Whether closing would throw away typed text (only agent work keeps a
     /// prompt and work item).
     fn has_draft(&self) -> bool {
@@ -451,7 +465,8 @@ impl App {
             Kind::Session => format!("session/{}/{}", hex(self.listed()), hex(&path)),
             Kind::Agent => {
                 let name = self.name_text();
-                if name_problem(&name).is_some() {
+                // A blank name is fine when launch can name the work.
+                if name_problem(&name).is_some() && self.names_from().is_none() {
                     return String::new();
                 }
                 let mut pick = format!(
@@ -872,7 +887,10 @@ impl App {
         let room = (name_row.width as usize).saturating_sub(label_w as usize + str_width(&name) + 2);
         let (candidates, color) = match name_problem(&name) {
             Some(problem) if !name.is_empty() => (vec![format!("{problem} ")], p.love),
-            Some(_) => (vec![], p.muted),
+            Some(_) => match self.names_from() {
+                Some(from) => (vec![format!("named on ⏎ from the {from} "), "named on ⏎ ".into()], p.muted),
+                None => (vec![], p.muted),
+            },
             None => {
                 let (branch, slug) = branch_and_slug(&name);
                 (vec![format!("{branch} · .worktrees/{slug} "), format!("{branch} ")], p.muted)
@@ -1067,7 +1085,7 @@ impl App {
                     } else if self.target_path().is_none() {
                         "spawn (pick a folder)"
                     } else {
-                        "spawn (name it first)"
+                        "spawn (name it, or add a prompt)"
                     };
                     hints.push(("⏎", spawn_label, if ready { p.pine } else { p.muted }));
                     if self.focus == Focus::Prompt {
@@ -1177,7 +1195,8 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         return Ok(false);
     };
     let name = app.name_text();
-    if let Some(problem) = name_problem(&name) {
+    let names_from = app.names_from();
+    if let Some(problem) = name_problem(&name).filter(|_| names_from.is_none()) {
         app.note = Some((problem.into(), true));
         return Ok(false);
     }
@@ -1192,7 +1211,10 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
     let item = app.item_text();
     let host = app.agent_host().to_string();
     let label = folders::home_relative(&path);
-    app.note = Some((format!("Spawning {label}/{name} on {host}…"), false));
+    app.note = Some((match names_from {
+        Some(from) => format!("Naming from the {from} and spawning in {label} on {host}…"),
+        None => format!("Spawning {label}/{name} on {host}…"),
+    }, false));
     term.draw(|f| app.draw(f))?;
     match launch(&host, &path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), Some(item.as_str()).filter(|i| !i.is_empty()), None) {
         // Launched: close even if the tab can't be shown, so a second Enter
@@ -1356,6 +1378,26 @@ mod tests {
         app.focus = Focus::Name;
         app.next_focus(true);
         assert!(app.focus == Focus::Item);
+    }
+
+    #[test]
+    fn blank_name_is_named_on_launch_from_the_item_or_prompt() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        app.name.clear();
+        assert_eq!(app.names_from(), None);
+        assert!(app.pick().is_empty(), "nothing to name it from");
+        let base = format!("agent/{}/{}//{}", hex("picker-host"), hex("/repos/local"), HARNESSES[0]);
+        app.prompt.field.insert_str("do the work");
+        app.prompt.file_ref = "picker-host:test-prompt".into();
+        assert_eq!(app.names_from(), Some("prompt"));
+        assert_eq!(app.pick(), format!("{base}/{}", hex(&app.prompt.file_ref)));
+        app.item.insert_str("#42");
+        assert_eq!(app.names_from(), Some("work item"));
+        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42")));
+        app.name.insert_str("typed");
+        assert_eq!(app.names_from(), None, "a typed name wins");
     }
 
     #[test]

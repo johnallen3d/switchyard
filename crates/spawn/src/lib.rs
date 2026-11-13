@@ -8,7 +8,9 @@
 //!   zoxide folders of one host (ctrl-o chooses the host), and takes either a
 //!   plain session in the highlighted folder or project, or agent work in a
 //!   catalog project or Git folder: a name, a harness (ctrl-t, Claude by
-//!   default), an optional work item and an optional prompt. ctrl-s switches
+//!   default), an optional work item and an optional prompt. The name may be
+//!   left blank when there is a work item or prompt: `task launch` names the
+//!   work from it (see core's `autoname`). ctrl-s switches
 //!   the kind; `--kind` starts it (cmd+shift+n: session, ctrl+cmd+n: agent).
 //!   The picker reports the choice in the terminal title as
 //!   `rex-new:session/HOST/PATH` or
@@ -33,7 +35,8 @@
 //!   Rex host. HOST `auto` picks from the project's host pool (see core's
 //!   `hosts::pool`), least busy first. A Git folder outside the catalog uses
 //!   its explicit host and primary checkout. Reads the prompt from the
-//!   picker's host (PROMPT_REF may be empty), leads it with the optional work
+//!   picker's host (PROMPT_REF may be empty), names the work when NAME is
+//!   empty (see core's `autoname`), leads the prompt with the optional work
 //!   item (see core's `launch::work_item_prompt`), finds or creates the
 //!   project's session on the host, opens a tab running `task run` there,
 //!   deletes the prompt file, records the task (see core's `tasks`), and

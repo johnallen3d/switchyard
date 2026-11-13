@@ -156,11 +156,36 @@ fn fresh(entry: &Value, ttl: u64, stamp: u64) -> bool {
 /// run, fails, or takes too long.
 fn gh(profile: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("gh");
-    cmd.args(args).env("GH_PROMPT_DISABLED", "1").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    cmd.args(args).env("GH_PROMPT_DISABLED", "1");
     if profile == "work" {
         cmd.envs(work_env().ok()?);
     }
+    bounded_output(&mut cmd, None, GH_TIMEOUT)
+}
+
+/// A GitHub issue or PR's title, under `profile`'s GitHub auth (see `gh`).
+pub(crate) fn gh_title(profile: &str, kind: &str, repo: &str, number: &str) -> Option<String> {
+    let kind = if kind == "pr" { "pr" } else { "issue" };
+    gh(profile, &[kind, "view", number, "-R", repo, "--json", "title", "-q", ".title"])
+}
+
+/// Run `cmd` with `input` (or nothing) on stdin and stderr dropped, giving
+/// up after `timeout`. Its stdout, or None when it can't run, fails, or
+/// takes too long.
+pub(crate) fn bounded_output(cmd: &mut Command, input: Option<&str>, timeout: Duration) -> Option<String> {
+    cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
     let mut child = cmd.spawn().ok()?;
+    if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
+        let text = text.to_string();
+        // Write from a thread so a child that never reads can't block us
+        // past the timeout; dropping stdin closes it.
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(text.as_bytes());
+        });
+    }
     let mut stdout = child.stdout.take()?;
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
@@ -171,7 +196,7 @@ fn gh(profile: &str, args: &[&str]) -> Option<String> {
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if start.elapsed() < GH_TIMEOUT => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(50)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();

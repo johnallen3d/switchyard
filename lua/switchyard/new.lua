@@ -6,7 +6,8 @@
 -- and reports its pick in the terminal title, hex encoded:
 --   rex-new:session/HOST/PATH
 --   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]
--- (PROMPT_REF is empty when only a work item follows).
+-- (PROMPT_REF is empty when only a work item follows; NAME is empty when
+-- `task launch` names the work from the work item or prompt).
 -- Enter acts from this config host, the only one that can reach every Rex
 -- host: a session opens with `switchyard task open`, and agent work launches
 -- with `switchyard task launch`, which opens a tab running `task run` on the target
@@ -155,13 +156,15 @@ rex.action{
     end
 
     if kind == "agent" then
-      local host, path, name, harness = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)$")
+      -- NAME is empty when `task launch` is to name the work from its work
+      -- item or prompt (the picker reports that only when one is there).
+      local host, path, name, harness = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)$")
       local prompt_ref, work_item
       if host == nil then
-        host, path, name, harness, prompt_ref = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)/(%x+)$")
+        host, path, name, harness, prompt_ref = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)/(%x+)$")
       end
       if host == nil then
-        host, path, name, harness, prompt_ref, work_item = rest:match("^(%x+)/(%x+)/(%x+)/(%a+)/(%x*)/(%x+)$")
+        host, path, name, harness, prompt_ref, work_item = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)/(%x*)/(%x+)$")
       end
       -- An incomplete form reports nothing; keep the float open.
       if host == nil then return end

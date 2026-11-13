@@ -1,6 +1,7 @@
 //! `switchyard task launch`: open a work's tab on its host and record the task.
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
+use crate::autoname::name_work;
 use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
@@ -86,6 +87,8 @@ fn work_item_problem(item: &str) -> Option<&'static str> {
 /// existing Git folder on that explicit host. With `resume`, the tab
 /// resumes that agent session with its recorded profile instead of starting
 /// a new one, and `host` is used as is (never `auto`: the session lives there).
+/// An empty `name` is named here (see `autoname`), from the work item or the
+/// prompt; with neither, or when naming fails, the launch fails.
 pub fn launch(
     host: &str,
     path: &str,
@@ -136,8 +139,11 @@ fn launch_with(
     if let Some((_, profile)) = resume.filter(|(_, profile)| !profile.is_empty()) {
         project.profile = profile.to_string();
     }
-    if let Some(problem) = name_problem(name) {
-        return Err(format!("{name}: {problem}"));
+    // An empty name is named below, once the prompt and tracker are known.
+    if !name.is_empty() || resume.is_some() {
+        if let Some(problem) = name_problem(name) {
+            return Err(format!("{name}: {problem}"));
+        }
     }
     if !HARNESSES.contains(&harness) {
         return Err(format!("unknown harness {harness}"));
@@ -151,10 +157,12 @@ fn launch_with(
         Prompt::Ref(r) => (r.map(fetch_prompt).transpose()?.unwrap_or_default(), r),
         Prompt::Text(text) => (text.to_string(), None),
     };
-    let (branch, slug) = branch_and_slug(name);
+    if name.is_empty() && typed.trim().is_empty() && work_item.is_none() {
+        return Err("name the work, or give it a prompt or work item to name it from".into());
+    }
     let host = if host == AUTO {
         let (chosen, why) = choose_host(&project)?;
-        log(&format!("auto chose {chosen} for {}/{name}: {why}", project.name));
+        log(&format!("auto chose {chosen} for {}/{}: {why}", project.name, if name.is_empty() { "(unnamed)" } else { name }));
         chosen
     } else {
         host.to_string()
@@ -197,8 +205,20 @@ fn launch_with(
     let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &board), &project.clone_url);
     let prompt = match work_item {
         Some(item) => work_item_prompt(&project.profile, item, &tracker, typed.trim()),
-        None => typed,
+        None => typed.clone(),
     };
+    let named;
+    let name = if name.is_empty() {
+        named = name_work(&project.profile, work_item, &tracker, typed.trim()).ok_or(
+            "couldn't name the work from its work item or prompt (macOS's fm model is unavailable \
+             or gave no usable name); name it yourself",
+        )?;
+        log(&format!("named {}/{named} from its {}", project.name, if work_item.is_some() { "work item or prompt" } else { "prompt" }));
+        named.as_str()
+    } else {
+        name
+    };
+    let (branch, slug) = branch_and_slug(name);
     let mut run = vec![
         "switchyard", "task", "run", &project.profile, &project.path, name, harness, &project.clone_url,
         &agent_session, mode,
