@@ -42,6 +42,9 @@
 //!   row naming its project and how it ended; ctrl-f hides the archived
 //!   ones, leaving those whose tab or worktree went without one.
 //!
+//! `?` (F1 where `?` is text) opens a float of every key, filtered with
+//! `/` (see help.rs); the footer keeps outcomes and confirmations.
+//!
 //! ctrl-o cycles a profile filter (all, personal, work): the registry's
 //! profile, else work for a tab under ~/dev/src/amfaro. ctrl-x arms an
 //! archive of the highlighted task (open, or ended with its worktree left)
@@ -76,8 +79,10 @@
 //! showing its outcome. No key quits it: it's a tab, closed like any
 //! other (cmd+w).
 
+mod help;
 mod model;
 mod preview;
+mod scrollback;
 mod snooze;
 mod standalone;
 mod usage;
@@ -390,6 +395,15 @@ struct App {
     /// How far the preview is scrolled back from its bottom, in lines, and
     /// the pane that is for.
     scroll: (usize, Option<preview::Pane>),
+    /// Scrollback over the transcript (ctrl-v; see scrollback.rs), while
+    /// it has the keys.
+    scrollback: Option<scrollback::Scrollback>,
+    /// The transcript's text area as last drawn, which scrollback moves in.
+    transcript: Rect,
+    /// Text scrollback copied, for the run loop to send to the clipboard.
+    copied: Option<String>,
+    /// The keys float (`?` or F1; see help.rs), over everything else.
+    help: Option<help::Help>,
 }
 
 impl App {
@@ -430,6 +444,10 @@ impl App {
             preview: None,
             asked: None,
             scroll: (0, None),
+            scrollback: None,
+            transcript: Rect::default(),
+            copied: None,
+            help: None,
             expanded: false,
             sidebar: false,
         }
@@ -1152,6 +1170,7 @@ impl App {
         match k.code {
             KeyCode::Esc => self.chooser = None,
             KeyCode::Char('c') if ctrl => self.chooser = None,
+            KeyCode::Char('?') => self.help = Some(help::Help::default()),
             KeyCode::Up | KeyCode::Char('k') => c.selected = c.selected.saturating_sub(1),
             KeyCode::Char('p') if ctrl => c.selected = c.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => c.selected = (c.selected + 1).min(last),
@@ -1213,6 +1232,7 @@ impl App {
             KeyCode::Enter => self.finish_reply(),
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
             KeyCode::Char('c') if ctrl => self.close_reply(),
+            KeyCode::Char('v') if ctrl => self.enter_scrollback(None),
             KeyCode::PageUp => self.scroll_preview(page),
             KeyCode::PageDown => self.scroll_preview(-page),
             KeyCode::Up if shift => self.scroll_preview(3),
@@ -1231,11 +1251,26 @@ impl App {
     // ------------------------------------------------------------ keys
 
     fn key(&mut self, k: KeyEvent) {
+        if let Some(h) = &mut self.help {
+            if h.key(k) == help::Outcome::Close {
+                self.help = None;
+            }
+            return;
+        }
+        if k.code == KeyCode::F(1) {
+            self.help = Some(help::Help::default());
+            return;
+        }
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
         if self.snooze.is_some() {
             return self.snooze_key(k);
+        }
+        // Scrollback has the keys over the reply box it was entered from,
+        // which gets them back when it ends.
+        if self.scrollback.is_some() {
+            return self.scrollback_key(k);
         }
         if self.reply.is_some() {
             return self.reply_key(k);
@@ -1291,6 +1326,7 @@ impl App {
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::Inbox => self.expanded = !self.expanded,
+            KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             KeyCode::Char('u') if ctrl => {
@@ -1318,6 +1354,7 @@ impl App {
             // stays free for the search.
             KeyCode::Char('h') if ctrl => self.set_view(self.view.next(true)),
             KeyCode::Char('l') if ctrl => self.set_view(self.view.next(false)),
+            KeyCode::Char('?') if !ctrl && !alt => self.help = Some(help::Help::default()),
             KeyCode::Char(c) if !ctrl && !alt => {
                 // Searching brings back the list it searches.
                 self.expanded = false;
@@ -1325,14 +1362,13 @@ impl App {
                 self.moved();
                 self.refilter();
             }
-            // Shift scrolls the preview back through the transcript, as the
-            // arrows do with it expanded.
-            KeyCode::Up if shift || self.expanded => self.scroll_preview(3),
-            KeyCode::Down if shift || self.expanded => self.scroll_preview(-3),
-            KeyCode::PageUp if shift || self.expanded => self.scroll_preview(page),
-            KeyCode::PageDown if shift || self.expanded => self.scroll_preview(-page),
-            KeyCode::Home if self.expanded => self.scroll_preview(isize::MAX),
-            KeyCode::End if self.expanded => self.scroll.0 = 0,
+            // Shift scrolling back through the transcript, as the arrows
+            // do with it expanded, goes into scrollback; it is already at
+            // its end.
+            KeyCode::Up | KeyCode::PageUp if shift || self.expanded => self.enter_scrollback(Some(k)),
+            KeyCode::Home if self.expanded => self.enter_scrollback(Some(k)),
+            KeyCode::Down | KeyCode::PageDown if shift || self.expanded => {}
+            KeyCode::End if self.expanded => {}
             KeyCode::Up if alt => self.jump_group(false),
             KeyCode::Down if alt => self.jump_group(true),
             KeyCode::Up => self.step(-1),
@@ -1363,6 +1399,63 @@ impl App {
         self.refilter();
     }
 
+    /// The highlighted agent's transcript as text, wrapped as last drawn.
+    fn transcript_text(&mut self) -> Option<Vec<String>> {
+        let p = self.p;
+        let pane = self.preview_want()?;
+        let width = self.transcript.width;
+        if width == 0 {
+            return None;
+        }
+        let pv = self.preview.as_mut().filter(|pv| pv.pane == pane)?;
+        let lines = pv.lines(width, &p).ok()?;
+        Some(lines.iter().map(scrollback::line_text).collect())
+    }
+
+    /// Scrollback over the transcript, from the bottom of what the preview
+    /// shows, then `k` in it.
+    fn enter_scrollback(&mut self, k: Option<KeyEvent>) {
+        let (Some(pane), Some(lines)) = (self.preview_want(), self.transcript_text()) else {
+            self.note = Some(("no transcript here to scroll back through".into(), true));
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let h = self.transcript.height as usize;
+        let back = if self.scroll.1.as_ref() == Some(&pane) { self.scroll.0 } else { 0 };
+        let mut sb = scrollback::Scrollback::new(pane, lines.len(), h);
+        sb.cursor = sb.cursor.saturating_sub(back);
+        sb.sync(lines.len(), h);
+        if let Some(k) = k {
+            sb.key(k, &lines, h);
+            sb.sync(lines.len(), h);
+        }
+        self.scrollback = Some(sb);
+    }
+
+    fn scrollback_key(&mut self, k: KeyEvent) {
+        let Some(lines) = self.transcript_text() else { return self.leave_scrollback() };
+        let h = self.transcript.height as usize;
+        let Some(sb) = &mut self.scrollback else { return };
+        match sb.key(k, &lines, h) {
+            scrollback::Outcome::Stay => sb.sync(lines.len(), h),
+            scrollback::Outcome::Exit => self.leave_scrollback(),
+            scrollback::Outcome::Copy(text) => {
+                let n = text.lines().count();
+                self.note = Some((format!("copied {n} line{}", if n == 1 { "" } else { "s" }), false));
+                self.copied = Some(text);
+                self.leave_scrollback();
+            }
+        }
+    }
+
+    /// Back to the live end of the transcript.
+    fn leave_scrollback(&mut self) {
+        self.scrollback = None;
+        self.scroll.0 = 0;
+    }
+
     // ------------------------------------------------------------ drawing
 
     fn draw(&mut self, f: &mut Frame) {
@@ -1370,16 +1463,23 @@ impl App {
         if !top.is_empty() {
             top.insert(0, Span::raw(" "));
         }
-        let inner = draw::frame_spans(f, &self.p, top, "⌘K", Margin::new(2, 1));
-        let [content, _, footer] =
-            Layout::vertical([Constraint::Min(5), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+        let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1));
+        // Down to the bottom border, which holds the footer.
+        let content = Rect { height: inner.height + 1, ..inner };
         self.sidebar = self.view == View::Inbox && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
         if self.sidebar {
             self.draw_split(f, content);
         } else {
             self.draw_stacked(f, content);
         }
-        self.draw_footer(f, footer);
+        self.draw_footer_in_border(f);
+        if self.help.is_some() {
+            let sections = self.help_sections();
+            let p = self.p;
+            if let Some(h) = &mut self.help {
+                h.draw(f, &p, inner, &sections);
+            }
+        }
     }
 
     /// Inbox, with room: the sidebar of every open tab and agent on the left
@@ -1598,7 +1698,12 @@ impl App {
         let p = self.p;
         let p = &p;
         let muted = |text: &str| vec![Line::styled(text.to_string(), Style::new().fg(p.muted))];
-        let Some(pane) = self.preview_want() else {
+        let want = self.preview_want();
+        // Scrollback is for one agent's transcript.
+        if self.scrollback.as_ref().is_some_and(|sb| Some(&sb.pane) != want.as_ref()) {
+            self.leave_scrollback();
+        }
+        let Some(pane) = want else {
             let why = match self.selected_item() {
                 Some(i) if self.is_plain_tab(i) => "No agent in this tab: Enter goes to it",
                 Some(Item::Task(_)) => "This task has no tab listed",
@@ -1612,6 +1717,7 @@ impl App {
         }
         // Leave a column for the scrollbar.
         let text = Rect { width: screen.width.saturating_sub(2), ..screen };
+        self.transcript = text;
         let Some(pv) = self.preview.as_mut().filter(|pv| pv.pane == pane) else {
             return draw::centered(f, screen, muted("Loading the transcript…"));
         };
@@ -1619,6 +1725,38 @@ impl App {
             Err(e) => draw::centered(f, screen, muted(e)),
             Ok(lines) => {
                 let h = text.height as usize;
+                if let Some(sb) = &mut self.scrollback {
+                    sb.sync(lines.len(), h);
+                    let sel = sb.selection();
+                    let query = sb.query();
+                    let lit = Style::new().fg(p.base).bg(p.gold);
+                    let end = lines.len().min(sb.top + h);
+                    let shown: Vec<Line> = (sb.top..end)
+                        .map(|i| {
+                            let mut line = lines[i].clone();
+                            if let Some(q) = query {
+                                let at = scrollback::matches(&scrollback::line_text(&line), q);
+                                line = scrollback::mark(line, &at, lit);
+                            }
+                            let bg = if sel.is_some_and(|(a, b)| (a..=b).contains(&i)) {
+                                Some(p.hl_med)
+                            } else if i == sb.cursor {
+                                Some(p.surface)
+                            } else {
+                                None
+                            };
+                            match bg {
+                                Some(bg) => line.style(Style::new().bg(bg)),
+                                None => line,
+                            }
+                        })
+                        .collect();
+                    f.render_widget(Paragraph::new(shown), text);
+                    if lines.len() > h {
+                        draw::scrollbar(f, p, screen, sb.top, lines.len());
+                    }
+                    return;
+                }
                 let top = lines.len().saturating_sub(h);
                 self.scroll.0 = self.scroll.0.min(top);
                 let skip = top - self.scroll.0;
@@ -2309,6 +2447,184 @@ impl App {
         f.render_widget(Line::from(right).right_aligned(), r);
     }
 
+    /// The keys float's bindings, the group for where John is first: the
+    /// highlighted row's actions as the footer used to name them.
+    fn help_sections(&self) -> Vec<help::Section> {
+        use help::Section;
+        let own = |keys: Vec<(&str, &str)>| keys.into_iter().map(|(k, d)| (k.to_string(), d.to_string())).collect();
+        let mut sections = Vec::new();
+        if self.view != View::Usage {
+            let task = self.selected_task();
+            let mut row: Vec<(&str, &str)> = match task {
+                Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
+                Some(t) if t.ended.is_some() && t.left => vec![("⏎", "resume"), ("⌃X", "remove worktree")],
+                Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
+                Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
+                Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
+                None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
+                None if self.selected_item().is_some() => vec![("⏎", "go")],
+                None => vec![],
+            };
+            // ⌃B opens the task's only work item, or a chooser over several.
+            let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
+            match links.as_slice() {
+                [] => {}
+                [link] => row.push(("⌃B", if link.kind == "pr" { "open PR" } else { "open link" })),
+                _ => row.push(("⌃B", "choose a link to open")),
+            }
+            if self.can_pin() {
+                row.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
+            }
+            if self.can_snooze() {
+                row.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
+            }
+            if self.preview_want().is_some() {
+                row.push(("⇥", "message the agent"));
+            }
+            if !row.is_empty() {
+                sections.push(Section { title: "Highlighted row", keys: own(row) });
+            }
+            let mut moving = vec![("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"), ("PgUp PgDn", "page"), ("Home End", "first, last")];
+            if self.view == View::Inbox {
+                moving.push(("⌥↑↓", "previous, next group"));
+            }
+            moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word"), ("⌃U", "clear the search")]);
+            sections.push(Section { title: "Moving and searching", keys: own(moving) });
+        } else {
+            sections.push(Section::new("Usage", &[("↑↓ ⌃P ⌃N", "scroll"), ("PgUp PgDn", "page"), ("Home End", "top, bottom")]));
+        }
+        let profile = format!("show {}", self.profile.next().name());
+        let mut views = vec![("⌃H ⌃L", "previous, next view"), ("⌃A", "archive, and back"), ("⌃O", profile.as_str())];
+        match self.view {
+            View::Inbox if self.sidebar => views.push(("⌃E", if self.expanded { "show the sidebar" } else { "hide the sidebar" })),
+            View::Inbox => views.push(("⌃E", if self.expanded { "back to the list" } else { "expand the preview" })),
+            View::Archive => views.push(("⌃F", if self.kept { "show archived tasks" } else { "hide archived tasks" })),
+            View::Usage => {}
+        }
+        views.push(("? F1", "these keys"));
+        sections.push(Section { title: "Views", keys: own(views) });
+        sections.push(Section::new(
+            "Transcript",
+            &[("⌃V", "scroll back"), ("⇧↑ ⇧PgUp", "scroll back from here"), ("⇥", "message the agent")],
+        ));
+        sections.push(Section::new(
+            "Scrollback",
+            &[
+                ("j k ↑↓", "move a line"),
+                ("⌃D ⌃U", "half a page"),
+                ("⌃F ⌃B PgDn PgUp", "a page"),
+                ("{ }", "previous, next blank line"),
+                ("g G Home End", "top, bottom"),
+                ("/ ?", "search forward, back"),
+                ("n N", "next, previous match"),
+                ("v V Space", "start or drop a selection"),
+                ("y ⏎", "copy and leave"),
+                ("esc", "drop selection, search, then leave"),
+                ("q ⌃C ⌃V", "leave"),
+            ],
+        ));
+        sections.push(Section::new(
+            "Reply box",
+            &[
+                ("⏎", "send"),
+                ("⌥⏎ ⇧⏎", "new line"),
+                ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
+                ("⌃V", "scroll back, then back here"),
+                ("⌃C", "clear, then leave"),
+                ("esc", "leave"),
+            ],
+        ));
+        sections.push(Section::new("Snooze prompt", &[("⏎", "snooze (empty: wake)"), ("⌃U", "clear"), ("esc", "cancel")]));
+        sections.push(Section::new("Link chooser", &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")]));
+        sections.push(Section::new(
+            "This float",
+            &[("/", "filter"), ("⌃U", "clear the filter"), ("j k ↑↓", "scroll"), ("esc q", "close")],
+        ));
+        // Where John is goes first.
+        let here = if self.scrollback.is_some() {
+            Some("Scrollback")
+        } else if self.reply.is_some() {
+            Some("Reply box")
+        } else if self.snooze.is_some() {
+            Some("Snooze prompt")
+        } else if self.chooser.is_some() {
+            Some("Link chooser")
+        } else {
+            None
+        };
+        if let Some(i) = here.and_then(|t| sections.iter().position(|s| s.title == t)) {
+            let s = sections.remove(i);
+            sections.insert(0, s);
+        }
+        sections
+    }
+
+    /// Scrollback's footer: the search being typed, else its keys, with
+    /// where the cursor is on the right.
+    fn draw_scrollback_footer(&self, f: &mut Frame, area: Rect, sb: &scrollback::Scrollback) {
+        let p = &self.p;
+        if let Some(t) = &sb.typing {
+            let line = Line::from(vec![
+                Span::styled(if t.forward { " /" } else { " ?" }, Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
+                Span::styled(t.query.clone(), Style::new().fg(p.text)),
+                Span::styled("▏", Style::new().fg(p.subtle)),
+            ]);
+            return f.render_widget(line, area);
+        }
+        let right = Span::styled(format!("SCROLLBACK {}/{} ", sb.cursor + 1, sb.len()), Style::new().fg(p.iris));
+        let right_w = str_width(&right.content);
+        let room = (area.width as usize).saturating_sub(right_w + 1);
+        let mut spans = match &sb.note {
+            Some(note) => vec![Span::raw(" "), Span::styled(note.clone(), Style::new().fg(p.love))],
+            None => {
+                let select = if sb.anchor.is_some() { "copy selection" } else { "copy line" };
+                draw::hints(p, &[("y", select, p.subtle), ("q", "done", p.subtle), ("F1", "keys", p.subtle)], room).0
+            }
+        };
+        let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        spans.push(Span::raw(" ".repeat((area.width as usize).saturating_sub(used + right_w))));
+        spans.push(right);
+        f.render_widget(Line::from(spans), area);
+    }
+
+    /// The footer, in the frame's bottom border as the shortcut is in its
+    /// top one: the border runs on through its gaps, a space either side
+    /// of what it shows.
+    fn draw_footer_in_border(&self, f: &mut Frame) {
+        let outer = f.area();
+        if outer.width < 6 || outer.height < 2 {
+            return;
+        }
+        let row = Rect { x: outer.x + 2, y: outer.bottom() - 1, width: outer.width - 4, height: 1 };
+        let border = Style::new().fg(self.p.hl_med).bg(self.p.base);
+        let buf = f.buffer_mut();
+        for x in row.x..row.right() {
+            buf[(x, row.y)].set_symbol(" ");
+        }
+        self.draw_footer(f, row);
+        let buf = f.buffer_mut();
+        let blank = |buf: &ratatui::buffer::Buffer, x: u16| buf[(x, row.y)].symbol() == " ";
+        let mut x = row.x;
+        while x < row.right() {
+            if !blank(buf, x) {
+                x += 1;
+                continue;
+            }
+            let start = x;
+            while x < row.right() && blank(buf, x) {
+                x += 1;
+            }
+            // Gaps between hints are three spaces; longer ones are border,
+            // as is all of an empty footer.
+            let (from, to) = (if start == row.x { start } else { start + 1 }, if x == row.right() { x } else { x - 1 });
+            if x - start > 3 && from < to {
+                for bx in from..to {
+                    buf[(bx, row.y)].set_symbol("─").set_style(border);
+                }
+            }
+        }
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         if let Some((msg, failed)) = &self.note {
@@ -2316,15 +2632,13 @@ impl App {
             f.render_widget(Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]), area);
             return;
         }
+        if let Some(sb) = &self.scrollback {
+            return self.draw_scrollback_footer(f, area, sb);
+        }
         if let Some(r) = &self.reply {
             let ready = !r.prompt.text().is_empty() && r.prompt.saved_ok;
-            let keys = [
-                ("⏎", "send", if ready { p.pine } else { p.muted }),
-                ("⌥⏎", "newline", p.subtle),
-                ("⇧↑↓", "scroll", p.subtle),
-                ("esc", "cancel", p.subtle),
-            ];
-            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            let hints = [("⏎", "send", if ready { p.pine } else { p.muted }), ("F1", "keys", p.subtle)];
+            let (spans, _) = draw::hints(p, &hints, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
         }
@@ -2333,14 +2647,12 @@ impl App {
                 Ok(0) => "wake",
                 _ => "snooze",
             };
-            let keys = [("⏎", enter, p.subtle), ("⌃U", "clear", p.subtle), ("esc", "cancel", p.subtle)];
-            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            let (spans, _) = draw::hints(p, &[("⏎", enter, p.subtle), ("F1", "keys", p.subtle)], area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
         }
         if self.chooser.is_some() {
-            let keys = [("⏎", "open", p.subtle), ("↑↓", "move", p.subtle), ("esc", "cancel", p.subtle)];
-            let (spans, _) = draw::hints(p, &keys, area.width as usize);
+            let (spans, _) = draw::hints(p, &[("⏎", "open", p.subtle), ("?", "keys", p.subtle)], area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
         }
@@ -2388,63 +2700,7 @@ impl App {
             f.render_widget(line, area);
             return;
         }
-        if self.view == View::Usage {
-            let keys = [("↑↓", "scroll", p.subtle), ("⌃H/L", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle)];
-            let (spans, _) = draw::hints(p, &keys, area.width as usize);
-            f.render_widget(Line::from(spans), area);
-            return;
-        }
-        let task = self.selected_task();
-        let mut keys: Vec<(&str, &str)> = match task {
-            Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
-            Some(t) if t.ended.is_some() && t.left => vec![("⏎", "resume"), ("⌃X", "remove worktree")],
-            Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
-            Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
-            Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
-            None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
-            None => vec![("⏎", "go")],
-        };
-        // ⌃B opens the task's only work item, or a chooser over several.
-        let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
-        match links.as_slice() {
-            [] => {}
-            [link] => keys.push(("⌃B", if link.kind == "pr" { "open PR" } else { "open link" })),
-            _ => keys.push(("⌃B", "links")),
-        }
-        if self.can_pin() {
-            keys.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
-        }
-        if self.can_snooze() {
-            keys.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
-        }
-        if self.preview_want().is_some() {
-            keys.push(("⇥", "message"));
-        }
-        keys.push(("⌃H/L", "views"));
-        keys.push(("⌃O", self.profile.next().name()));
-        match self.view {
-            View::Usage => {}
-            View::Inbox => {
-                keys.push(("⌥↑↓", "group"));
-                if self.sidebar {
-                    keys.push(("⌃E", if self.expanded { "show sidebar" } else { "hide sidebar" }));
-                    if self.preview_want().is_some() {
-                        keys.push((if self.expanded { "↑↓" } else { "⇧↑↓" }, "scroll"));
-                    }
-                } else if self.expanded {
-                    keys.push(("⌃E", "list"));
-                    keys.push(("↑↓", "scroll"));
-                } else if self.preview_want().is_some() {
-                    keys.push(("⌃E", "expand"));
-                    keys.push(("⇧↑↓", "scroll"));
-                }
-            }
-            View::Archive => {
-                keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" }));
-            }
-        }
-        let keys: Vec<_> = keys.into_iter().map(|(k, label)| (k, label, p.subtle)).collect();
-        let (spans, used) = draw::hints(p, &keys, area.width as usize);
+        let (spans, used) = draw::hints(p, &[("?", "keys", p.subtle)], area.width as usize);
         f.render_widget(Line::from(spans), area);
         // The summary only when it still fits beside the hints.
         if self.view != View::Inbox {
@@ -2523,6 +2779,10 @@ impl App {
     /// The keys that act: Enter, ctrl-b, ctrl-t, and Enter in the
     /// snooze prompt and reply box; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        // The keys float and scrollback have every key while they last.
+        if self.help.is_some() || self.scrollback.is_some() {
+            return false;
+        }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
         // The reply box's Enter sends the message; other keys edit it. A
@@ -3036,7 +3296,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("to /woke") && text.contains("report") && text.contains("newline"), "{text}");
+        assert!(text.contains("to /woke") && text.contains("report") && text.contains("F1 keys"), "{text}");
+        assert!(help_text(&app).starts_with("Reply box\n⏎ send\n⌥⏎ ⇧⏎ new line"), "{}", help_text(&app));
         // Enter, typed back by the config once the message is sent, closes
         // the box with a note.
         app.key(plain(KeyCode::Enter));
@@ -3117,7 +3378,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(160, 3)).unwrap();
         terminal.draw(|f| app.draw_footer(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("⌃B links"), "{text}");
+        assert!(text.contains("? keys"), "{text}");
+        assert!(help_text(&app).contains("⌃B choose a link to open"));
     }
 
     #[test]
@@ -3163,10 +3425,112 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Open link") && text.contains("card 1041") && text.contains("cancel"), "{text}");
+        assert!(text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"), "{text}");
+        assert!(help_text(&app).starts_with("Link chooser"));
         app.key(plain(KeyCode::Esc));
         assert!(app.chooser.is_none());
         assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
+    }
+
+    /// The keys float's bindings as text: each group's title, then a line
+    /// per binding.
+    fn help_text(app: &App) -> String {
+        let mut out = Vec::new();
+        for s in app.help_sections() {
+            out.push(s.title.to_string());
+            out.extend(s.keys.iter().map(|(k, d)| format!("{k} {d}")));
+        }
+        out.join("\n")
+    }
+
+    #[test]
+    fn question_mark_opens_a_filterable_keys_float_over_the_picker() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tagent\tdone\tclaude\t~/r\n");
+        app.paste("rex-data:tasks\n[]");
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut screen = |app: &mut App| {
+            terminal.draw(|f| app.draw(f)).unwrap();
+            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+        };
+        let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        app.key(plain('?'));
+        assert!(app.query.is_empty());
+        let text = screen(&mut app);
+        assert!(text.contains(" Keys ") && text.contains("Highlighted row") && text.contains("archive"), "{text}");
+        for c in "/copy".chars() {
+            app.key(plain(c));
+        }
+        let text = screen(&mut app);
+        assert!(text.contains("copy and leave") && !text.contains("Highlighted row"), "{text}");
+        // Escape stops typing, clears the filter, then closes.
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.help.is_some());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.help.is_none() && app.query.is_empty());
+        // F1 opens it from the reply box, which takes `?` as text.
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(plain('?'));
+        assert!(app.help.is_none());
+        app.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(app.help.is_some() && help_text(&app).starts_with("Reply box"));
+    }
+
+    #[test]
+    fn scrollback_moves_searches_and_copies_the_transcript() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tagent\tdone\tclaude\t~/r\n");
+        app.paste("rex-data:tasks\n[]");
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        let entries: Vec<_> = (0..40).map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")})).collect();
+        app.paste(&format!("rex-data:preview\n-/s/agent\n{}", serde_json::json!({"entries": entries})));
+        let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
+        let mut screen = |app: &mut App| {
+            terminal.draw(|f| app.draw(f)).unwrap();
+            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+        };
+        let text = screen(&mut app);
+        assert!(app.sidebar && text.contains("answer 39") && !text.contains("answer 30 "), "{text}");
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        app.key(ctrl('v'));
+        let text = screen(&mut app);
+        assert!(text.contains("SCROLLBACK 79/79"), "{text}");
+        // Search back for an early answer: the view moves to it.
+        for c in "?answer 3\n".chars() {
+            app.key(if c == '\n' { KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE) } else { plain(c) });
+        }
+        app.key(plain('N'));
+        app.key(plain('N'));
+        let text = screen(&mut app);
+        assert!(text.contains("answer 3 ") && !text.contains("answer 39"), "{text}");
+        // New output arriving leaves the view where it is.
+        let more: Vec<_> = (0..45).map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")})).collect();
+        app.paste(&format!("rex-data:preview\n-/s/agent\n{}", serde_json::json!({"entries": more})));
+        let text = screen(&mut app);
+        assert!(text.contains("answer 3 ") && !text.contains("answer 44"), "{text}");
+        app.key(plain('v'));
+        app.key(plain('j'));
+        app.key(plain('j'));
+        app.key(plain('y'));
+        assert_eq!(app.copied.as_deref(), Some("answer 3\n\nanswer 4"));
+        assert!(app.scrollback.is_none());
+        let text = screen(&mut app);
+        assert!(text.contains("copied 3 lines") && text.contains("answer 44"), "{text}");
+        // From the reply box, ctrl-v toggles scrollback and leaves the box
+        // as it was.
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(plain('h'));
+        app.key(ctrl('v'));
+        assert!(app.scrollback.is_some() && app.reply.is_some());
+        app.key(plain('k'));
+        app.key(ctrl('v'));
+        assert!(app.scrollback.is_none());
+        assert_eq!(app.reply.as_ref().map(|r| r.prompt.text()).as_deref(), Some("h"));
     }
 
     #[test]
@@ -3323,7 +3687,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 140);
         assert!(!rows.iter().any(|r| r.contains("Search") || r.contains("pinned")), "{rows:#?}");
-        assert!(rows.iter().any(|r| r.contains("show sidebar")));
+        assert!(help_text(&app).contains("⌃E show the sidebar"));
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
         // Too narrow, Inbox stacks the list over the reply box as before.
@@ -3437,6 +3801,11 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 }
                 app.note = None;
                 app.key(k);
+                if let Some(text) = app.copied.take() {
+                    use std::io::Write;
+                    let mut out = io::stdout();
+                    let _ = out.write_all(scrollback::osc52(&text).as_bytes()).and_then(|()| out.flush());
+                }
             }
             // cmd+k's `current`, and John's own pastes, for the reply box.
             Event::Paste(text) if app.reply.is_some() || protocol::data(&text).is_some_and(|(k, _)| k == "current") => {

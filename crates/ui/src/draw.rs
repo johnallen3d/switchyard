@@ -23,7 +23,7 @@ pub fn delete_word(s: &mut String) {
 }
 
 /// Fill the float and draw its rounded frame: `title` in iris, then `extra`
-/// spans, on the left, and the `shortcut` that opens it on the right.
+/// spans, on the left, and the `shortcut` that opens it, if any, on the right.
 /// Returns the area inside, less `margin`.
 pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
     let mut left = vec![
@@ -39,12 +39,14 @@ pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>,
 pub fn frame_spans(f: &mut Frame, p: &Palette, left: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
     let area = f.area();
     f.buffer_mut().set_style(area, Style::new().bg(p.base).fg(p.text));
-    let block = Block::bordered()
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(p.hl_med).bg(p.base))
         .title_top(Line::from(left).left_aligned())
-        .title_top(Line::from(Span::styled(format!(" {shortcut} "), Style::new().fg(p.muted))).right_aligned())
         .style(Style::new().bg(p.base));
+    if !shortcut.is_empty() {
+        block = block.title_top(Line::from(Span::styled(format!(" {shortcut} "), Style::new().fg(p.muted))).right_aligned());
+    }
     let inner = block.inner(area).inner(margin);
     f.render_widget(block, area);
     inner
