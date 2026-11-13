@@ -1,7 +1,7 @@
 # The Rex float tools, one Cargo workspace and one binary, `switchyard`:
 #
-# - bare `switchyard` (crates/tab-picker): the cmd+k picker for tabs and
-#   agents, grouped by session and status, and ended tasks
+# - bare `switchyard` (crates/tab-picker): the cmd+i Inbox tab and cmd+k
+#   quick jump float for tabs and agents, grouped by session and status, and ended tasks
 #   (lua/switchyard/tab-picker.lua).
 # - `switchyard new` (crates/spawn): the new-session picker
 #   (lua/switchyard/new.lua), which opens a plain session in a zoxide folder

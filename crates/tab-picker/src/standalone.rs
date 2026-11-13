@@ -90,7 +90,9 @@ pub struct Feed {
 }
 
 impl Feed {
-    pub fn start() -> Feed {
+    /// `quick` (the cmd+k float) wants only the rows and tasks: no usage
+    /// accounting, and no transcripts, as it has no preview.
+    pub fn start(quick: bool) -> Feed {
         let (tx, rx) = mpsc::channel();
         let (poke, poked) = mpsc::channel();
         let on_server = Arc::new(AtomicBool::new(false));
@@ -102,18 +104,20 @@ impl Feed {
             let (tx, poke, on_server) = (tx.clone(), poke.clone(), on_server.clone());
             thread::spawn(move || follow_server(first, tx, poke, on_server));
         }
-        let usage_tx = tx.clone();
-        thread::spawn(move || {
-            let mut collector = switchyard_core::usage::Collector::default();
-            loop {
-                let body = serde_json::to_string(&collector.collect().summary()).unwrap_or_default();
-                if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() { return; }
-                thread::sleep(switchyard_core::usage::REFRESH);
-            }
-        });
         let (preview, wants) = mpsc::channel();
-        let preview_tx = tx.clone();
-        thread::spawn(move || preview::follow(wants, preview_tx));
+        if !quick {
+            let usage_tx = tx.clone();
+            thread::spawn(move || {
+                let mut collector = switchyard_core::usage::Collector::default();
+                loop {
+                    let body = serde_json::to_string(&collector.collect().summary()).unwrap_or_default();
+                    if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() { return; }
+                    thread::sleep(switchyard_core::usage::REFRESH);
+                }
+            });
+            let preview_tx = tx.clone();
+            thread::spawn(move || preview::follow(wants, preview_tx));
+        }
         thread::spawn(move || fetch_when_needed(tx, poked, on_server));
         Feed { rx, poke, preview }
     }

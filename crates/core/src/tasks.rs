@@ -78,7 +78,7 @@ pub fn record_task(task: serde_json::Value) -> Result<(), String> {
 /// Every window on a host's Rex server with its most urgent agent status, as
 /// `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` lines (the last three empty
 /// for a tab with no status). A tab shows its most urgent pane, as in the
-/// cmd+k tab picker.
+/// tab picker (cmd+i, cmd+k).
 const WINDOWS_SCRIPT: &str = r#"
 local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }

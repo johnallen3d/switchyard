@@ -12,7 +12,7 @@
 -- with `switchyard task launch`, which opens a tab running `task run` on the target
 -- host (the worktree and the harness are made there). See
 -- ../../crates/spawn/src/main.rs. Agent work then shows the tab picker's
--- tab (cmd+k, tab-picker.lua) with the new task highlighted, rather than
+-- tab (cmd+i, tab-picker.lua) with the new task highlighted, rather than
 -- the task's own tab.
 local util = require("switchyard.float")
 local tab_picker = require("switchyard.tab-picker")

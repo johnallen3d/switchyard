@@ -41,7 +41,7 @@
 //! - `switchyard task list`: runs on the config host. Checks every recorded
 //!   task against its host, marks the ones whose tab or worktree is gone as
 //!   ended, and prints the registry as JSON with each open task's live agent
-//!   status, for the tab picker's tabs and archive views (cmd+k).
+//!   status, for the tab picker's tabs and archive views (cmd+i).
 //! - `switchyard task act ACTION HOST SESSION WINDOW`: runs on the config
 //!   host. Archives the task in that tab, resumes an ended one, or
 //!   prints its main work item's URL (see core's `actions` and `links`).

@@ -18,7 +18,7 @@ use std::process::ExitCode;
 use switchyard_spawn::Kind;
 use switchyard_tabs::View;
 
-const USAGE: &str = "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW]
+const USAGE: &str = "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW] [--quick]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -30,7 +30,9 @@ tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-b (open the task's work item), ctrl-t (pin) and
 ctrl-s (snooze), staying open until its tab is closed. ctrl-h and ctrl-l
 cycle the views: Inbox, Usage, Archive. --current highlights that
-tab (cmd+k passes the tab it was pressed on). new opens the
+tab (cmd+i and cmd+k pass the tab they were pressed on). --quick is
+cmd+k's float: Inbox's list alone, where Enter jumps to the highlighted
+tab and quits, and Escape quits. new opens the
 new-session picker: agent work by default, or a plain session with
 --session. link and unlink record the work items the current branch is
 for (see switchyard link --help). usage opens the picker's Usage view;
@@ -61,9 +63,10 @@ fn done(result: io::Result<()>) -> ExitCode {
 }
 
 /// The interactive pickers need a terminal.
-/// Bare: `[--view VIEW] [--current SESSION/WINDOW]`, in any order.
+/// Bare: `[--view VIEW] [--current SESSION/WINDOW] [--quick]`, in any
+/// order.
 fn picker(mut args: &[&str]) -> ExitCode {
-    let (mut view, mut current) = (View::Inbox, None);
+    let (mut view, mut current, mut quick) = (View::Inbox, None, false);
     loop {
         args = match args {
             [] => break,
@@ -78,8 +81,15 @@ fn picker(mut args: &[&str]) -> ExitCode {
                 current = Some(*c);
                 rest
             }
+            ["--quick", rest @ ..] => {
+                quick = true;
+                rest
+            }
             _ => return usage_error(USAGE),
         };
+    }
+    if quick {
+        return interactive(|| switchyard_tabs::quick(current));
     }
     interactive(|| switchyard_tabs::standalone(view, current))
 }
@@ -116,7 +126,7 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        [] | ["--view" | "--current", ..] => picker(&a),
+        [] | ["--view" | "--current" | "--quick", ..] => picker(&a),
         ["new"] | ["new", "--agent"] => interactive(|| switchyard_spawn::standalone(Kind::Agent)),
         ["new", "--session"] => interactive(|| switchyard_spawn::standalone(Kind::Session)),
         ["link" | "unlink", ..] => link::main(args),

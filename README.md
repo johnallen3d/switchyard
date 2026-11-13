@@ -5,19 +5,25 @@ One Rust binary (`switchyard`), Lua actions, and a Home Manager module.
 
 | Key           | Opens                                    |
 | ------------- | ---------------------------------------- |
-| `cmd+k`       | Tab picker tab: tabs and agents, Archive |
+| `cmd+i`       | Tab picker tab: Inbox, Usage, Archive    |
+| `cmd+k`       | Quick jump float: tabs and agents        |
 | `cmd+shift+n` | New session                              |
 | `ctrl+cmd+n`  | New agent task in a project worktree     |
 
-cmd+k shows the tab picker's own tab, the bare `switchyard` picker in the
+cmd+i shows the tab picker's own tab, the bare `switchyard` picker in the
 Mac's `agents` session. Without one it opens the tab there, creating the
 session if needed; on that tab already, it does nothing. No key quits the
 picker; close its tab like any other (cmd+w).
+
+cmd+k opens a quick jump float over the current tab: Inbox's list alone,
+searchable, with that tab highlighted. Enter jumps to the highlighted tab
+and Escape closes the float; cmd+k again closes it too.
 
 From a terminal on the Mac:
 
 ```bash
 switchyard                  # tab picker: tabs, agents, archive
+switchyard --quick          # quick jump: Enter jumps and quits
 switchyard new              # new agent task (--session: plain session)
 switchyard link [REF...]    # link the current branch to work items
 switchyard usage            # usage view (--json, --local: print JSON)

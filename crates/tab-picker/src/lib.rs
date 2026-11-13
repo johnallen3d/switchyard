@@ -1,7 +1,10 @@
 //! The tab picker for Rex: tabs, agents and the task archive, run bare from
-//! a shell (`switchyard`). cmd+k in the Rex config shows its tab in the
+//! a shell (`switchyard`). cmd+i in the Rex config shows its tab in the
 //! Mac's agents session, opening it there when there is none (see
-//! lua/switchyard/tab-picker.lua).
+//! lua/switchyard/tab-picker.lua). cmd+k opens it with `--quick` in a
+//! float over the current tab instead: Inbox's list alone, no sidebar,
+//! preview or reply box, where Enter jumps to the highlighted tab and
+//! Escape closes it, quitting either way (see `quick`).
 //!
 //! It fetches its own data in the background (see standalone.rs), which
 //! arrives as the data pastes `protocol::DATA` describes, in any order:
@@ -17,7 +20,7 @@
 //! - `usage` and `usage-error`: accounting for the Usage view.
 //! - `preview`: the highlighted agent's transcript (see preview.rs).
 //!
-//! cmd+k also pastes `current`, SESSION/WINDOW, the tab it was pressed on,
+//! cmd+i also pastes `current`, SESSION/WINDOW, the tab it was pressed on,
 //! into the terminal (or passes it as `--current` when opening the picker),
 //! and the picker highlights that tab again.
 //!
@@ -129,7 +132,7 @@ const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "i
 /// have it yet (the registry is saved, but the data was read before).
 const PENDING_TTL: Duration = Duration::from_secs(15);
 
-/// The label cmd+k gives the picker's own tab (lua/switchyard/tab-picker.lua).
+/// The label cmd+i gives the picker's own tab (lua/switchyard/tab-picker.lua).
 const PICKER_TAB: &str = "switchyard";
 
 /// Whether the tabs have arrived.
@@ -404,6 +407,9 @@ struct App {
     copied: Option<String>,
     /// The keys float (`?` or F1; see help.rs), over everything else.
     help: Option<help::Help>,
+    /// The cmd+k quick jump float (`--quick`): Inbox's list alone, which
+    /// Enter jumps from and Escape closes, quitting either way.
+    quick: bool,
 }
 
 impl App {
@@ -450,6 +456,7 @@ impl App {
             help: None,
             expanded: false,
             sidebar: false,
+            quick: false,
         }
     }
 
@@ -497,7 +504,7 @@ impl App {
         }
     }
 
-    /// cmd+k came from the tab `current` (SESSION/WINDOW): highlight it, as
+    /// cmd+i came from the tab `current` (SESSION/WINDOW): highlight it, as
     /// a fresh picker would, unless a prompt is open over another row.
     /// Without a tab, just clear the search, keeping the highlighted row.
     fn set_current(&mut self, current: &str) {
@@ -734,10 +741,10 @@ impl App {
         }
     }
 
-    /// Whether a row is the picker's own tab: the plain tab cmd+k opens on
+    /// Whether a row is the picker's own tab: the plain tab cmd+i opens on
     /// the config host, labelled `switchyard` (see
     /// lua/switchyard/tab-picker.lua). Inbox leaves it out, as it is always
-    /// there and cmd+k already shows it.
+    /// there and cmd+i already shows it.
     fn is_picker_tab(&self, item: Item) -> bool {
         let Item::Tab(t) = item else { return false };
         let tab = &self.tabs[t];
@@ -1466,7 +1473,7 @@ impl App {
         let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1));
         // Down to the bottom border, which holds the footer.
         let content = Rect { height: inner.height + 1, ..inner };
-        self.sidebar = self.view == View::Inbox && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
+        self.sidebar = !self.quick && self.view == View::Inbox && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
         if self.sidebar {
             self.draw_split(f, content);
         } else {
@@ -1611,7 +1618,7 @@ impl App {
         // The reply box keeps the bottom of Inbox, under the preview, with
         // one text row until Tab moves into it.
         let mut reply_card = None;
-        let body = if self.view == View::Inbox && body.height >= prompt_box::CHROME_ROWS + 4 {
+        let body = if !self.quick && self.view == View::Inbox && body.height >= prompt_box::CHROME_ROWS + 4 {
             let rows = match &self.reply {
                 Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
                 None => 1,
@@ -1652,7 +1659,7 @@ impl App {
     /// doesn't change height under him. With focus in the reply box, the
     /// preview gets half of what is left, as what John is replying to.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
-        if self.view != View::Inbox {
+        if self.view != View::Inbox || self.quick {
             return None;
         }
         if self.expanded {
@@ -1944,6 +1951,7 @@ impl App {
         let typing = !self.query.is_empty();
         let placeholder = match self.view {
             View::Inbox if self.sidebar => "Search",
+            View::Inbox if self.quick => "Jump to a tab or agent",
             View::Inbox => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
@@ -2700,7 +2708,12 @@ impl App {
             f.render_widget(line, area);
             return;
         }
-        let (spans, used) = draw::hints(p, &[("?", "keys", p.subtle)], area.width as usize);
+        let hints: &[(&str, &str, Color)] = if self.quick {
+            &[("⏎", "jump", p.subtle), ("esc", "close", p.subtle)]
+        } else {
+            &[("?", "keys", p.subtle)]
+        };
+        let (spans, used) = draw::hints(p, hints, area.width as usize);
         f.render_widget(Line::from(spans), area);
         // The summary only when it still fits beside the hints.
         if self.view != View::Inbox {
@@ -2720,7 +2733,7 @@ impl App {
 impl App {
     /// Start a standalone picker's data (see standalone::Feed).
     fn start_feed(&mut self) {
-        self.feed = Some(standalone::Feed::start());
+        self.feed = Some(standalone::Feed::start(self.quick));
     }
 
     /// Ask for the data again after an action, keeping what is shown until
@@ -2921,6 +2934,50 @@ impl App {
         self.note = Some(note);
         self.refetch();
         true
+    }
+
+    /// The quick float's keys: typing searches and the arrows (or ctrl-n,
+    /// ctrl-p) move; Enter jumps to the highlighted tab and Escape (or
+    /// ctrl-c, ctrl-g) closes the float. Whether to quit.
+    fn quick_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        match k.code {
+            KeyCode::Esc => return true,
+            KeyCode::Char('c' | 'g') if ctrl => return true,
+            KeyCode::Enter => {
+                let Some(pick) = standalone::parse_pick(&self.pick()) else { return false };
+                let label = self.selected_label();
+                let r = if pick.action == "resume" {
+                    self.busy(term, format!("Resuming {label}…"));
+                    standalone::resume(&pick)
+                } else {
+                    standalone::go(&pick)
+                };
+                // A failure stays, so it can be read.
+                match r {
+                    Ok(()) => return true,
+                    Err(e) => self.note = Some((e, true)),
+                }
+            }
+            KeyCode::Char(c) if !ctrl && !alt => {
+                self.note = None;
+                self.query.push(c);
+                self.moved();
+                self.refilter();
+            }
+            KeyCode::Char('p' | 'k' | 'n' | 'j' | 'u' | 'w' | 'o') if ctrl => self.key(k),
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            | KeyCode::Backspace
+                if !shift =>
+            {
+                self.note = None;
+                self.key(k)
+            }
+            _ => {}
+        }
+        false
     }
 
     /// The highlighted row's name for an outcome: the task, or the tab.
@@ -3795,6 +3852,11 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             continue;
         }
         match event::read()? {
+            Event::Key(k) if k.kind != KeyEventKind::Release && app.quick => {
+                if app.quick_key(k, term) {
+                    return Ok(());
+                }
+            }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 if app.standalone_key(k, term) {
                     continue;
@@ -3819,8 +3881,20 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 /// The picker from a terminal: it fetches its own tabs and tasks and acts on
 /// Enter itself. `current` is the SESSION/WINDOW to highlight, if any.
 pub fn standalone(view: View, current: Option<&str>) -> io::Result<()> {
+    start(view, current, false)
+}
+
+/// The cmd+k quick jump float (see lua/switchyard/tab-picker.lua): Inbox's
+/// list alone over the current tab, `current` highlighted. Enter shows the
+/// highlighted tab and quits, closing the float; Escape just quits.
+pub fn quick(current: Option<&str>) -> io::Result<()> {
+    start(View::Inbox, current, true)
+}
+
+fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
+    app.quick = quick;
     if let Some(c) = current {
         app.set_current(c);
     }

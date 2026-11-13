@@ -1,12 +1,20 @@
--- cmd+k: show the tab picker's own tab, the bare `switchyard` picker (see
--- ../../crates/tab-picker/src/standalone.rs) in the Mac's "agents" session.
+-- cmd+k: the quick jump float, `switchyard --quick` over the focused tab:
+-- Inbox's list alone, with the tab cmd+k was pressed on highlighted. Enter
+-- shows the highlighted tab and Escape closes it; either way the picker
+-- quits, which closes the float. It acts on its own, so it needs no key
+-- mode, and it runs on the focused session's host (tabs only away from the
+-- Mac, where the task registry is). cmd+k over it closes it.
+--
+-- cmd+i: show the tab picker's own tab, Inbox, the bare `switchyard` picker
+-- (see ../../crates/tab-picker/src/standalone.rs) in the Mac's "agents"
+-- session.
 -- It finds the tab by its pane's label in any session on this host (the
 -- config host, the Mac), and selects it. Without one it opens the tab in
 -- the agents session, making the session if there isn't one (and moving
 -- it to the top of the session list, as a new session goes last). On that tab
--- already, cmd+k does nothing. The picker acts on its picks itself and
+-- already, cmd+i does nothing. The picker acts on its picks itself and
 -- stays open, and no key quits it: the tab stays until it is closed
--- like any other (cmd+w); the next cmd+k opens a new one.
+-- like any other (cmd+w); the next cmd+i opens a new one.
 --
 -- An action can only view (or add windows to) sessions its connection is
 -- attached to, and rex.session.attach is for scripts, so the finding and
@@ -14,7 +22,7 @@
 -- session. It prints the tab as JSON: session_id, window_id, and whether
 -- that is its session's active window.
 --
--- The picker highlights the tab cmd+k was pressed on, as the float did: the
+-- The picker highlights the tab cmd+i was pressed on, as the float does: the
 -- script gets it as session= and window= (a key action has no window, so
 -- the session's active one), and passes it to a new picker as --current
 -- SESSION/WINDOW, or pastes it into a running one as rex-data:current,
@@ -27,7 +35,7 @@ local SESSION, LABEL, WINDOW = "agents", "switchyard", "switchyard"
 local T = "com.superlogical.terminal"
 COMMAND = rex.json.decode(COMMAND)
 
--- The tab cmd+k was pressed on, as SESSION/WINDOW, or nil.
+-- The tab cmd+i was pressed on, as SESSION/WINDOW, or nil.
 local current
 do
   local session, window = rex.args.session, rex.args.window
@@ -76,7 +84,7 @@ for _, session in ipairs(list.sessions or {}) do
       if layer.kind == "tiled" then
         for _, block in ipairs(layer.blocks or {}) do
           if block.label == LABEL then
-            -- Not when cmd+k is pressed on the picker's own tab.
+            -- Not when cmd+i is pressed on the picker's own tab.
             if current ~= session.session_id .. "/" .. window.window_id then
               paste_current(session.session_id, block.block_id)
             end
@@ -128,16 +136,53 @@ function M.find_or_open(session_id, window_id)
   return out
 end
 
+local function show_inbox(ctx)
+  local tab = M.find_or_open(ctx.session_id, ctx.window_id)
+  if tab.session_id == ctx.session_id and tab.active then return end
+  rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
+end
+
 rex.action{
-  name  = "tab_picker",
+  name  = "inbox",
+  title = "Go to Inbox",
+  run   = function(ctx, args) show_inbox(ctx) end,
+}
+
+local quick_label = "quick-jump"
+
+rex.action{
+  name  = "quick_jump",
   title = "Go to Tab…",
   run   = function(ctx, args)
-    local tab = M.find_or_open(ctx.session_id, ctx.window_id)
-    if tab.session_id == ctx.session_id and tab.active then return end
-    rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
+    -- With no session to float over, Inbox does the same job.
+    if ctx.session_id == nil then return show_inbox(ctx) end
+    if util.find_float(ctx, quick_label) ~= nil then return util.close_float(ctx, quick_label) end
+    -- A key action has no window: the session's active one.
+    local window = ctx.window_id
+    if window == nil or window == "" then
+      local view = rex.session.view{ session_id = ctx.session_id }
+      window = view and view.active_window_id
+    end
+    local command = util.float_command("switchyard", "--quick")
+    if window ~= nil and window ~= "" then
+      command[#command + 1] = "--current"
+      command[#command + 1] = ctx.session_id .. "/" .. window
+    end
+    local _, err = rex.session.new_layer{
+      session_id = ctx.session_id,
+      bounds     = { 0.15, 0.1, 0.7, 0.75 },
+      focus      = true,
+      layout     = rex.layout.block{
+        flavor  = "com.superlogical.terminal.shell",
+        label   = quick_label,
+        options = { command = command },
+      },
+    }
+    if err ~= nil then error(err, 0) end
   end,
 }
 
-rex.bind("cmd+k", "tab_picker")
+rex.bind("cmd+i", "inbox")
+rex.bind("cmd+k", "quick_jump")
 
 return M

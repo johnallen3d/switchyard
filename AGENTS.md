@@ -70,7 +70,8 @@ completion.
 - `nix`: package and Home Manager module
 
 The new-session float dispatches actions through Lua; standalone binaries,
-including the tab picker cmd+k shows in its own tab, act directly. Consider
+including the tab picker cmd+i shows in its own tab and cmd+k's quick jump
+float, act directly. Consider
 both paths when changing the new-session picker or its protocol.
 `lua/switchyard/host_rows.lua` is embedded into Rust for the tab picker and
 switchyard-server.
