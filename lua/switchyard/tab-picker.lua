@@ -5,8 +5,8 @@
 -- the agents session, making the session if there isn't one (and moving
 -- it to the top of the session list, as a new session goes last). On that tab
 -- already, cmd+k does nothing. The picker acts on its picks itself and
--- stays open, so the tab stays until it is quit (Escape or ctrl-c), which
--- closes it; the next cmd+k opens a new one.
+-- stays open, and no key quits it: the tab stays until it is closed
+-- like any other (cmd+w); the next cmd+k opens a new one.
 --
 -- An action can only view (or add windows to) sessions its connection is
 -- attached to, and rex.session.attach is for scripts, so the finding and

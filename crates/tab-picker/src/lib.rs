@@ -69,7 +69,8 @@
 //! with an open task), `resume` (an ended task), or an armed `archive`,
 //! `ask` or `force-archive`; TARGET is `-` for this host, else the
 //! hex-encoded host label. The picker stays open after each action,
-//! showing its outcome, until Escape or ctrl-c (see standalone.rs).
+//! showing its outcome. No key quits it: it's a tab, closed like any
+//! other (cmd+w).
 
 mod model;
 mod preview;
@@ -1105,18 +1106,18 @@ impl App {
     }
 
     /// Keys while the snooze prompt is open: type, Enter (see
-    /// finish_snooze) or Escape to close it. False to quit.
-    fn snooze_key(&mut self, k: KeyEvent) -> bool {
+    /// finish_snooze), or Escape or ctrl-c to close it.
+    fn snooze_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let now = self.now;
-        let Some(z) = &mut self.snooze else { return true };
+        let Some(z) = &mut self.snooze else { return };
         match k.code {
-            KeyCode::Char('c') if ctrl => return false,
             KeyCode::Esc => self.snooze = None,
+            KeyCode::Char('c') if ctrl => self.snooze = None,
             KeyCode::Enter => {
                 self.finish_snooze();
-                return true;
+                return;
             }
             KeyCode::Char('u') if ctrl => z.text.clear(),
             KeyCode::Char('w') if ctrl => delete_word(&mut z.text),
@@ -1125,23 +1126,22 @@ impl App {
                 z.text.pop();
             }
             KeyCode::Char(c) if !ctrl && !alt => z.text.push(c),
-            _ => return true,
+            _ => return,
         }
         if let Some(z) = &mut self.snooze {
             z.update(now);
         }
-        true
     }
 
-    /// Keys while the chooser is open: move, or Escape to close it. Enter
-    /// never gets here (standalone_key opens the pick). False to quit.
-    fn chooser_key(&mut self, k: KeyEvent) -> bool {
+    /// Keys while the chooser is open: move, or Escape or ctrl-c to close
+    /// it. Enter never gets here (standalone_key opens the pick).
+    fn chooser_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(c) = &mut self.chooser else { return true };
+        let Some(c) = &mut self.chooser else { return };
         let last = c.links.len() - 1;
         match k.code {
-            KeyCode::Char('c') if ctrl => return false,
             KeyCode::Esc => self.chooser = None,
+            KeyCode::Char('c') if ctrl => self.chooser = None,
             KeyCode::Up | KeyCode::Char('k') => c.selected = c.selected.saturating_sub(1),
             KeyCode::Char('p') if ctrl => c.selected = c.selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => c.selected = (c.selected + 1).min(last),
@@ -1150,7 +1150,6 @@ impl App {
             KeyCode::End => c.selected = last,
             _ => {}
         }
-        true
     }
 
     /// Open the reply box on the highlighted agent in All. An agent waiting
@@ -1190,12 +1189,12 @@ impl App {
     /// a newline), scroll the preview with the page keys or shift and the
     /// arrows, Enter (see finish_reply), or Escape to leave it (Tab too,
     /// while it's empty). ctrl-c clears the message, then leaves the box.
-    fn reply_key(&mut self, k: KeyEvent) -> bool {
+    fn reply_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         let page = (self.list_area.height as isize - 2).max(1);
-        let Some(r) = &mut self.reply else { return true };
+        let Some(r) = &mut self.reply else { return };
         match k.code {
             KeyCode::Esc => self.close_reply(),
             KeyCode::Tab | KeyCode::BackTab if r.prompt.is_empty() => self.close_reply(),
@@ -1210,7 +1209,6 @@ impl App {
             KeyCode::Down if shift => self.scroll_preview(-3),
             _ => r.prompt.key(k),
         }
-        true
     }
 
     /// Keep the reply box's message in its prompt file as it is typed.
@@ -1222,7 +1220,7 @@ impl App {
 
     // ------------------------------------------------------------ keys
 
-    fn key(&mut self, k: KeyEvent) -> bool {
+    fn key(&mut self, k: KeyEvent) {
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
@@ -1255,12 +1253,12 @@ impl App {
                 armed if armed.archives() => armed,
                 _ => Armed::Archive,
             };
-            return true;
+            return;
         }
         // standalone_key acts on Enter before it gets here.
         if k.code == KeyCode::Enter {
             self.armed = Armed::No;
-            return true;
+            return;
         }
         self.armed = Armed::No;
         if self.view == View::Usage {
@@ -1269,17 +1267,16 @@ impl App {
                 KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => Some(1),
                 KeyCode::PageUp => Some(-page),
                 KeyCode::PageDown => Some(page),
-                KeyCode::Home => { self.usage.offset = 0; return true; }
-                KeyCode::End => { self.usage.offset = usize::MAX; return true; }
+                KeyCode::Home => { self.usage.offset = 0; return; }
+                KeyCode::End => { self.usage.offset = usize::MAX; return; }
                 _ => None,
             };
             if let Some(delta) = delta {
                 self.usage.offset = self.usage.offset.saturating_add_signed(delta);
-                return true;
+                return;
             }
         }
         match k.code {
-            KeyCode::Char('c') if ctrl => return false,
             // standalone_key acts on ctrl-b, ctrl-r and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::All => self.open_reply(),
@@ -1334,7 +1331,6 @@ impl App {
             KeyCode::End => self.edge(true),
             _ => {}
         }
-        true
     }
 
     /// Scroll the preview back (positive) or forward; draw_preview keeps it
@@ -2099,7 +2095,7 @@ impl App {
             return;
         }
         if self.view == View::Usage {
-            let keys = [("↑↓", "scroll", p.subtle), ("⌃H/L", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle), ("esc", "close", p.subtle)];
+            let keys = [("↑↓", "scroll", p.subtle), ("⌃H/L", "views", p.subtle), ("⌃O", self.profile.next().name(), p.subtle)];
             let (spans, _) = draw::hints(p, &keys, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
@@ -2148,7 +2144,6 @@ impl App {
                 keys.push(("⌃F", if self.kept { "show archived" } else { "hide archived" }));
             }
         }
-        keys.push(("esc", "close"));
         let keys: Vec<_> = keys.into_iter().map(|(k, label)| (k, label, p.subtle)).collect();
         let (spans, used) = draw::hints(p, &keys, area.width as usize);
         f.render_widget(Line::from(spans), area);
@@ -3041,16 +3036,11 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         }
         match event::read()? {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if k.code == KeyCode::Esc && app.chooser.is_none() && app.snooze.is_none() && app.reply.is_none() {
-                    return Ok(());
-                }
                 if app.standalone_key(k, term) {
                     continue;
                 }
                 app.note = None;
-                if !app.key(k) {
-                    return Ok(());
-                }
+                app.key(k);
             }
             // cmd+k's `current`, and John's own pastes, for the reply box.
             Event::Paste(text) if app.reply.is_some() || protocol::data(&text).is_some_and(|(k, _)| k == "current") => {

@@ -11,8 +11,8 @@ One Rust binary (`switchyard`), Lua actions, and a Home Manager module.
 
 cmd+k shows the tab picker's own tab, the bare `switchyard` picker in the
 Mac's `agents` session. Without one it opens the tab there, creating the
-session if needed; on that tab already, it does nothing. Quitting the picker
-(Escape or ctrl-c) closes the tab.
+session if needed; on that tab already, it does nothing. No key quits the
+picker; close its tab like any other (cmd+w).
 
 From a terminal on the Mac:
 
@@ -47,7 +47,7 @@ Paths assume Cargo's default `target/` directory.
 
 **These are real actions, not a sandbox.** Task loading can update registry
 state; selections act on live tabs and worktrees. Use a disposable task for
-action checks. Escape closes the picker; force-archive can discard changes.
+action checks. Close the picker's tab to quit it; force-archive can discard changes.
 
 ### Build against your Mac config
 

@@ -10,7 +10,7 @@
 //! the task's work item), ctrl-t (pin), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
 //! stays open, showing the outcome and the data after
-//! it. Escape or ctrl-c closes it. The registry is on the Mac; elsewhere it
+//! it; closing its tab quits it. The registry is on the Mac; elsewhere it
 //! shows tabs only.
 
 use std::sync::Arc;
