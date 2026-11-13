@@ -474,8 +474,16 @@ impl App {
 
     /// cmd+k came from the tab `current` (SESSION/WINDOW): highlight it, as
     /// a fresh picker would, unless a prompt is open over another row.
+    /// Without a tab, just clear the search, keeping the highlighted row.
     fn set_current(&mut self, current: &str) {
-        let (s, w) = current.trim().split_once('/').unwrap_or((current.trim(), ""));
+        let current = current.trim();
+        if current.is_empty() {
+            if self.chooser.is_none() && self.snooze.is_none() && self.reply.is_none() {
+                self.clear_search();
+            }
+            return;
+        }
+        let (s, w) = current.split_once('/').unwrap_or((current, ""));
         self.current = (s.to_string(), w.to_string());
         if self.chooser.is_some() || self.snooze.is_some() || self.reply.is_some() {
             return;
@@ -484,6 +492,14 @@ impl App {
         self.query.clear();
         self.armed = Armed::No;
         self.refilter_to(Some(self.current.clone()));
+    }
+
+    /// Empty the search, keeping the highlighted row.
+    fn clear_search(&mut self) {
+        if !self.query.is_empty() {
+            self.query.clear();
+            self.refilter();
+        }
     }
 
     /// Before any tasks, show tabs only; after, keep them (only their
@@ -2443,7 +2459,14 @@ impl App {
                 self.busy(term, format!("Resuming {label}…"));
                 done(standalone::resume(&pick), format!("resumed {label}"))
             }
-            _ => done(standalone::go(&pick), format!("showed {label}")),
+            _ => {
+                let r = standalone::go(&pick);
+                // Jumped away: come back to an empty search.
+                if r.is_ok() {
+                    self.clear_search();
+                }
+                done(r, format!("showed {label}"))
+            }
         };
         self.note = Some(note);
         self.refetch();
@@ -2513,6 +2536,17 @@ mod tests {
         assert!(app.view == View::Usage);
         app.key(ctrl('h'));
         assert!(app.view == View::All);
+    }
+
+    #[test]
+    fn cmd_k_without_a_tab_clears_the_search_and_keeps_the_row() {
+        let mut app = inbox();
+        app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        let picked = app.selected_key();
+        assert!(picked.is_some());
+        app.paste("rex-data:current\n");
+        assert!(app.query.is_empty());
+        assert_eq!(app.selected_key(), picked);
     }
 
     #[test]

@@ -16,7 +16,8 @@
 -- The picker highlights the tab cmd+k was pressed on, as the float did: the
 -- script gets it as session= and window= (a key action has no window, so
 -- the session's active one), and passes it to a new picker as --current
--- SESSION/WINDOW, or pastes it into a running one as rex-data:current.
+-- SESSION/WINDOW, or pastes it into a running one as rex-data:current,
+-- which also clears the running picker's search.
 local util = require("switchyard.float")
 
 local FIND_OR_OPEN = "local COMMAND = " .. string.format("%q", rex.json.encode(util.float_command("switchyard"))) .. [==[
@@ -52,12 +53,12 @@ local function pane_spec()
   }
 end
 
--- Tell a running picker which tab to highlight. Best effort: a picker
--- that doesn't take it still shows.
+-- Tell a running picker which tab to highlight, and to clear its search
+-- (an empty tab just clears it). Best effort: a picker that doesn't take
+-- it still shows.
 local function paste_current(session_id, block_id)
-  if current == nil then return end
   rex.block.call(T, "write", { session_id = session_id, block_id = block_id,
-    data = "\27[200~rex-data:current\n" .. current .. "\27[201~" })
+    data = "\27[200~rex-data:current\n" .. (current or "") .. "\27[201~" })
 end
 
 local list, list_err = rex.call("session.list")
