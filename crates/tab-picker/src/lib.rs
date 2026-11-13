@@ -97,8 +97,8 @@ use std::sync::mpsc::TryRecvError;
 use std::time::{Duration, Instant};
 
 use model::{
-    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, link, now, parse_rows, parse_tasks,
-    urgency, work_dir,
+    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, in_folders, link, now,
+    parse_rows, parse_tasks, resolve_folders, urgency, work_dir,
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
@@ -411,6 +411,8 @@ struct App {
     /// The cmd+k quick jump float (`--quick`): Inbox's list alone, which
     /// Enter jumps from and Escape closes, quitting either way.
     quick: bool,
+    /// Folders the Inbox leaves out (`[inbox] exclude`), resolved.
+    excluded: Vec<std::path::PathBuf>,
 }
 
 impl App {
@@ -437,6 +439,7 @@ impl App {
             reply: None,
             idle: PromptBox::new(),
             corners: None,
+            excluded: Vec::new(),
             pending: HashMap::new(),
             list_area: Rect::default(),
             started: Instant::now(),
@@ -761,7 +764,15 @@ impl App {
     /// it already), and a plain tab only in the quick float, which jumps to
     /// any tab.
     fn listed(&self, item: Item) -> bool {
-        !self.is_picker_tab(item) && (self.quick || !self.is_plain_tab(item))
+        !self.is_picker_tab(item) && (self.quick || !self.is_plain_tab(item)) && !self.left_out(item)
+    }
+
+    /// Whether a tab on the config host sits in a folder `[inbox] exclude`
+    /// names, or under one.
+    fn left_out(&self, item: Item) -> bool {
+        let Item::Tab(t) = item else { return false };
+        let tab = &self.tabs[t];
+        self.sessions[tab.session].target == "-" && in_folders(&tab.dir, &self.excluded)
     }
 
     /// Open tasks with no listed tab.
@@ -3909,6 +3920,7 @@ fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
     app.quick = quick;
+    app.excluded = resolve_folders(&switchyard_core::config::read().map(|c| c.inbox.exclude).unwrap_or_default());
     if let Some(c) = current {
         app.set_current(c);
     }

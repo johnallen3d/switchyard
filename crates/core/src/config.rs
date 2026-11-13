@@ -26,6 +26,18 @@ pub struct Config {
     pub usage: crate::usage::Settings,
     /// switchyard-server's MCP endpoint for agents on the tailnet.
     pub mcp: Mcp,
+    /// `[inbox]`: what the tab picker's Inbox leaves out.
+    pub inbox: Inbox,
+}
+
+/// `[inbox]`: what the tab picker's Inbox and cmd+k float leave out.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct Inbox {
+    /// Folders on the config host whose agent tabs stay out of the Inbox:
+    /// each one and everything under it. `~` is home; a folder reached
+    /// through a symlink matches its target too.
+    pub exclude: Vec<String>,
 }
 
 /// `[mcp]`: switchyard-server's MCP endpoint (see the server's `mcp`).

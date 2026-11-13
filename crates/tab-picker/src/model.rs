@@ -3,6 +3,7 @@
 //! (session_id, window_id) because the two name hosts differently (`local`
 //! against `hostname -s`).
 
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use switchyard_ui::draw::str_width;
 
@@ -424,6 +425,32 @@ fn home_relative(dir: &str) -> String {
         }
     }
     dir.to_string()
+}
+
+/// The folders from `[inbox] exclude`, as the config host sees them: `~`
+/// expanded, and symlinks followed where the folder exists.
+pub fn resolve_folders(list: &[String]) -> Vec<PathBuf> {
+    list.iter().map(|f| resolve_path(f)).collect()
+}
+
+/// Whether a tab's folder (home-relative, as the rows give it) is one of
+/// `folders` or under one.
+pub fn in_folders(dir: &str, folders: &[PathBuf]) -> bool {
+    !folders.is_empty() && {
+        let path = resolve_path(dir);
+        folders.iter().any(|f| path.starts_with(f))
+    }
+}
+
+/// `path` with `~` expanded to home, and symlinks followed when it exists,
+/// so a folder compares the same however the shell reached it.
+fn resolve_path(path: &str) -> PathBuf {
+    let home = switchyard_core::rex::home();
+    let expanded = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        _ => PathBuf::from(path),
+    };
+    std::fs::canonicalize(&expanded).unwrap_or(expanded)
 }
 
 /// Whether a home-relative folder is under the work profile's project root.
