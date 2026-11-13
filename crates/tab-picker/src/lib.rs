@@ -29,7 +29,8 @@
 //!   its project. Agents (tabs with live agent status or an open task, and
 //!   open tasks with no listed tab) go under status headings in urgency
 //!   order (Waiting, Failed, Done, Working, Idle, No status), then the other
-//!   tabs under Tabs. Pinned tasks lead the list and Snoozed ones trail it.
+//!   tabs under Tabs, leaving out the picker's own `switchyard` tab.
+//!   Pinned tasks lead the list and Snoozed ones trail it.
 //!   With room, a preview under the list shows the highlighted agent's pane,
 //!   live, below its whole status message.
 //! - Usage: read-only accounting (see usage.rs).
@@ -117,6 +118,9 @@ const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "i
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
 const PENDING_TTL: Duration = Duration::from_secs(15);
+
+/// The label cmd+k gives the picker's own tab (lua/switchyard/tab-picker.lua).
+const PICKER_TAB: &str = "switchyard";
 
 /// Whether the tabs have arrived.
 enum Load {
@@ -709,6 +713,16 @@ impl App {
         }
     }
 
+    /// Whether a row is the picker's own tab: the plain tab cmd+k opens on
+    /// the config host, labelled `switchyard` (see
+    /// lua/switchyard/tab-picker.lua). All leaves it out, as it is always
+    /// there and cmd+k already shows it.
+    fn is_picker_tab(&self, item: Item) -> bool {
+        let Item::Tab(t) = item else { return false };
+        let tab = &self.tabs[t];
+        tab.name == PICKER_TAB && self.sessions[tab.session].target == "-" && self.is_plain_tab(item)
+    }
+
     /// Whether a row is a tab with no agent.
     fn is_plain_tab(&self, item: Item) -> bool {
         matches!(item, Item::Tab(_)) && !self.is_agent(item)
@@ -893,7 +907,7 @@ impl App {
         let mut sections: Vec<Vec<Item>> = vec![Vec::new(); SECTIONS.len()];
         let items: Vec<Item> = (0..self.tabs.len()).map(Item::Tab).chain(self.orphans()).collect();
         for item in items {
-            if !self.profile_passes(self.flat(item).work) {
+            if self.is_picker_tab(item) || !self.profile_passes(self.flat(item).work) {
                 continue;
             }
             if filtering {
@@ -1686,7 +1700,10 @@ impl App {
         }
         let (total, kind) = match self.view {
             View::Archive => (self.tasks.iter().filter(|t| t.ended.is_some()).count(), "ended"),
-            _ => (self.tabs.len() + self.orphans().count(), "tabs"),
+            _ => {
+                let picker = (0..self.tabs.len()).filter(|&t| self.is_picker_tab(Item::Tab(t))).count();
+                (self.tabs.len() - picker + self.orphans().count(), "tabs")
+            }
         };
         if typing || shown != total {
             right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
@@ -2683,6 +2700,30 @@ mod tests {
         for tab in 0..4 {
             assert!(app.rows.contains(&Item::Tab(tab)), "missing tab {tab}");
         }
+    }
+
+    #[test]
+    fn all_leaves_out_the_pickers_own_tab() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        app.follow = false;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ta\tagents\n",
+                "T\tpicker\t\tswitchyard\t~\n",
+                "T\tshell\t\tshell\t~\n",
+                "T\tagent\tworking\tswitchyard\t~\n",
+                "S\t6d696c6c6572\tmiller\tb\tagents\n",
+                "T\tremote\t\tswitchyard\t~\n",
+            ));
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        // Only the config host's plain switchyard tab goes; an agent or a
+        // tab on another host with the same name stays.
+        assert_eq!(app.rows, vec![
+            Item::Status("working"), Item::Tab(2),
+            Item::Status("tabs"), Item::Tab(1), Item::Tab(3),
+        ]);
     }
 
     #[test]
