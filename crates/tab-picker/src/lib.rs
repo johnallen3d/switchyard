@@ -364,8 +364,12 @@ struct App {
     reply: Option<Reply>,
     /// The reply box as drawn while it doesn't have focus.
     idle: PromptBox,
-    /// Smooth prompt-box corners, when the terminal does kitty graphics.
+    /// Smooth prompt-box corners, when the terminal does kitty graphics, and
+    /// the cell size they were drawn at, to draw them again after an editor.
     corners: Option<chrome::Corners>,
+    cell: Option<chrome::CellSize>,
+    /// Whether ctrl-g asked for the reply box's message in `$EDITOR`.
+    edit_requested: bool,
     /// Pins and snoozes made here, by (host, window_id): (pinned,
     /// snoozed_until, when), kept over deliveries until they agree.
     pending: HashMap<Key, (bool, u64, Instant)>,
@@ -439,6 +443,8 @@ impl App {
             reply: None,
             idle: PromptBox::new(),
             corners: None,
+            cell: None,
+            edit_requested: false,
             excluded: Vec::new(),
             pending: HashMap::new(),
             list_area: Rect::default(),
@@ -1242,10 +1248,25 @@ impl App {
         }
     }
 
+    /// Edit the reply box's message in `$VISUAL` or `$EDITOR` (ctrl-g), then
+    /// put the saved text back; ctrl-z undoes that.
+    fn edit_reply(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
+        let Some(r) = &mut self.reply else { return Ok(()) };
+        let before = r.prompt.field.lines().join("\n");
+        let fills = [self.p.overlay, self.p.surface];
+        let edited = prompt_box::edit_in_editor(term, &r.prompt, &mut self.corners, self.cell, fills, || {})?;
+        if let Some(text) = edited.filter(|text| *text != before) {
+            r.prompt.clear();
+            r.prompt.paste(&text);
+        }
+        Ok(())
+    }
+
     /// Keys while the reply box has focus: edit it (alt- or shift-Enter for
     /// a newline), scroll the preview with the page keys or shift and the
     /// arrows, Enter (see finish_reply), or Escape to leave it (Tab too,
-    /// while it's empty). ctrl-c clears the message, then leaves the box.
+    /// while it's empty). ctrl-c clears the message, then leaves the box;
+    /// ctrl-g edits it in the editor (see edit_reply).
     fn reply_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -1261,6 +1282,7 @@ impl App {
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
             KeyCode::Char('c') if ctrl => self.close_reply(),
             KeyCode::Char('v') if ctrl => self.enter_scrollback(None),
+            KeyCode::Char('g') if ctrl => self.edit_requested = true,
             KeyCode::PageUp => self.scroll_preview(page),
             KeyCode::PageDown => self.scroll_preview(-page),
             KeyCode::Up if shift => self.scroll_preview(3),
@@ -2561,6 +2583,7 @@ impl App {
                 ("⌥⏎ ⇧⏎", "new line"),
                 ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
                 ("⌃V", "scroll back, then back here"),
+                ("⌃G", "edit in the editor"),
                 ("⌃C", "clear, then leave"),
                 ("esc", "leave"),
             ],
@@ -2668,7 +2691,11 @@ impl App {
         }
         if let Some(r) = &self.reply {
             let ready = !r.prompt.text().is_empty() && r.prompt.saved_ok;
-            let hints = [("⏎", "send", if ready { p.pine } else { p.muted }), ("F1", "keys", p.subtle)];
+            let hints = [
+                ("⏎", "send", if ready { p.pine } else { p.muted }),
+                ("⌃G", "editor", p.subtle),
+                ("F1", "keys", p.subtle),
+            ];
             let (spans, _) = draw::hints(p, &hints, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
@@ -3902,6 +3929,9 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 }
                 app.note = None;
                 app.key(k);
+                if std::mem::take(&mut app.edit_requested) {
+                    app.edit_reply(term)?;
+                }
                 if let Some(text) = app.copied.take() {
                     use std::io::Write;
                     let mut out = io::stdout();
@@ -3962,6 +3992,7 @@ fn picker(mut app: App) -> io::Result<()> {
     // Raw mode is on and nothing has read stdin yet: ask about graphics now,
     // for the reply box's rounded corners.
     if let Some(cell) = chrome::detect(Duration::from_millis(300)) {
+        app.cell = Some(cell);
         app.corners = chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
     }
     // No mouse capture, so the terminal's own selection and copy work. Kitty

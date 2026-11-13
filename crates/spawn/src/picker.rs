@@ -33,7 +33,7 @@ use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
-use switchyard_core::prompts::{parse_prompt_ref, prompt_dir, prune_prompts};
+use switchyard_core::prompts::prune_prompts;
 use switchyard_core::rex::{local_label, log, select};
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
@@ -1266,65 +1266,28 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 /// (ctrl-z undoes that). An editor that fails, such as nvim's `:cq`, keeps
 /// the prompt as it was.
 fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    let Ok((_, id)) = parse_prompt_ref(&app.prompt.file_ref) else { return Ok(()) };
-    let dir = prompt_dir();
-    let path = dir.join(format!("{id}.edit.md"));
     let before = app.prompt.field.lines().join("\n");
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n"))) {
-        log(&format!("could not write the prompt for the editor: {e}"));
-        return Ok(());
-    }
-    // The mode would take the editor's Enter as the action.
-    if !app.standalone {
-        let _ = Command::new("rex")
-            .args(["do", "client.mode.exit_all"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let mut out = io::stdout();
-    let _ = execute!(out, PopKeyboardEnhancementFlags, DisableBracketedPaste, DisableFocusChange);
-    if let Some(corners) = app.corners.take() {
-        let _ = corners.delete(&mut out);
-    }
-    ratatui::restore();
-    let status = Command::new("sh")
-        .args([
-            "-c",
-            r#"e=${VISUAL:-$EDITOR}; [ -n "$e" ] || e=$(command -v nvim-editor || command -v nvim || echo vi); exec $e "$1""#,
-            "sh",
-        ])
-        .arg(&path)
-        .status();
-    ratatui::crossterm::terminal::enable_raw_mode()?;
-    execute!(out, ratatui::crossterm::terminal::EnterAlternateScreen)?;
-    term.clear()?;
-    if let Some(cell) = app.cell {
-        app.corners = chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut out).ok();
-    }
-    let _ = execute!(
-        out,
-        EnableBracketedPaste,
-        EnableFocusChange,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    );
+    let standalone = app.standalone;
+    let fills = [app.p.overlay, app.p.surface];
+    let edited = prompt_box::edit_in_editor(term, &app.prompt, &mut app.corners, app.cell, fills, || {
+        // The mode would take the editor's Enter as the action.
+        if !standalone {
+            let _ = Command::new("rex")
+                .args(["do", "client.mode.exit_all"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        let _ = execute!(io::stdout(), DisableFocusChange);
+    });
+    let _ = execute!(io::stdout(), EnableFocusChange);
     app.away = true;
     app.rearm_mode();
-    let edited = match status {
-        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
-        Ok(_) => None,
-        Err(e) => {
-            log(&format!("could not run the editor: {e}"));
-            None
-        }
-    };
-    let _ = std::fs::remove_file(&path);
-    if let Some(text) = edited {
-        let text = text.trim_end_matches(['\n', '\r']);
+    if let Some(text) = edited? {
         if text != before {
             app.prompt.clear();
-            app.paste(text);
+            app.paste(&text);
         }
     }
     Ok(())

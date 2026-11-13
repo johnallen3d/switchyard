@@ -9,16 +9,21 @@
 //! shift-Enter (or arrives in a paste).
 
 use std::io;
+use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
+use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 use switchyard_core::prompts::{parse_prompt_ref, prompt_dir};
-use switchyard_core::rex::{local_label, now};
+use switchyard_core::rex::{local_label, log, now};
 use unicode_width::UnicodeWidthChar;
 
 use crate::Palette;
@@ -235,6 +240,67 @@ pub fn text_key(field: &mut TextArea<'static>, k: KeyEvent) {
             field.input(k);
         }
     }
+}
+
+/// Edit `prompt`'s text in `$VISUAL` or `$EDITOR` (else nvim-editor, nvim or
+/// vi), in its own `.edit.md` file, taking the terminal until the editor
+/// exits. `before_editor` runs once the file is written, to leave any key
+/// mode the editor's keys would reach. Returns the text the editor saved,
+/// without trailing newlines, or `None` when it failed (such as nvim's
+/// `:cq`); the caller puts the text back if it changed. The corners are
+/// deleted while the editor runs and drawn again at `cell` in `fills`.
+pub fn edit_in_editor(
+    term: &mut DefaultTerminal,
+    prompt: &PromptBox,
+    corners: &mut Option<chrome::Corners>,
+    cell: Option<chrome::CellSize>,
+    fills: [Color; 2],
+    before_editor: impl FnOnce(),
+) -> io::Result<Option<String>> {
+    let Ok((_, id)) = parse_prompt_ref(&prompt.file_ref) else { return Ok(None) };
+    let dir = prompt_dir();
+    let path = dir.join(format!("{id}.edit.md"));
+    let before = prompt.field.lines().join("\n");
+    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n"))) {
+        log(&format!("could not write the prompt for the editor: {e}"));
+        return Ok(None);
+    }
+    before_editor();
+    let mut out = io::stdout();
+    let _ = execute!(out, PopKeyboardEnhancementFlags, DisableBracketedPaste);
+    if let Some(c) = corners.take() {
+        let _ = c.delete(&mut out);
+    }
+    ratatui::restore();
+    let status = Command::new("sh")
+        .args([
+            "-c",
+            r#"e=${VISUAL:-$EDITOR}; [ -n "$e" ] || e=$(command -v nvim-editor || command -v nvim || echo vi); exec $e "$1""#,
+            "sh",
+        ])
+        .arg(&path)
+        .status();
+    ratatui::crossterm::terminal::enable_raw_mode()?;
+    execute!(out, ratatui::crossterm::terminal::EnterAlternateScreen)?;
+    term.clear()?;
+    if let Some(cell) = cell {
+        *corners = chrome::Corners::new(cell, &fills, &mut out).ok();
+    }
+    let _ = execute!(
+        out,
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    let edited = match status {
+        Ok(s) if s.success() => std::fs::read_to_string(&path).ok(),
+        Ok(_) => None,
+        Err(e) => {
+            log(&format!("could not run the editor: {e}"));
+            None
+        }
+    };
+    let _ = std::fs::remove_file(&path);
+    Ok(edited.map(|text| text.trim_end_matches(['\n', '\r']).to_string()))
 }
 
 /// Put the terminal cursor where `field`, drawn in `area`, has its cursor.
