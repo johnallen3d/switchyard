@@ -110,10 +110,13 @@ if window == nil then error(err, 0) end
 return rex.json.encode({ session_id = agents, window_id = window.window_id, active = false })
 ]==]
 
--- The picker's tab, found or just opened (see FIND_OR_OPEN).
-local function find_or_open(ctx)
+local M = {}
+
+-- The picker's tab, found or just opened (see FIND_OR_OPEN), highlighting
+-- the tab SESSION/WINDOW (WINDOW nil: the session's active one).
+function M.find_or_open(session_id, window_id)
   local r, err = rex.exec({ "rex", "do", "-e", FIND_OR_OPEN,
-    "session=" .. (ctx.session_id or ""), "window=" .. (ctx.window_id or "") }, { env = util.cli_env() })
+    "session=" .. (session_id or ""), "window=" .. (window_id or "") }, { env = util.cli_env() })
   if r == nil then error(err, 0) end
   if not r.ok then error("can't find or open the switchyard tab: " .. (r.stderr:gsub("%s+$", "")), 0) end
   -- `rex do` prints the returned string as JSON.
@@ -129,10 +132,12 @@ rex.action{
   name  = "tab_picker",
   title = "Go to Tab…",
   run   = function(ctx, args)
-    local tab = find_or_open(ctx)
+    local tab = M.find_or_open(ctx.session_id, ctx.window_id)
     if tab.session_id == ctx.session_id and tab.active then return end
     rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
   end,
 }
 
 rex.bind("cmd+k", "tab_picker")
+
+return M

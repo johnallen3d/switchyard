@@ -11,8 +11,11 @@
 -- host: a session opens with `switchyard task open`, and agent work launches
 -- with `switchyard task launch`, which opens a tab running `task run` on the target
 -- host (the worktree and the harness are made there). See
--- ../../crates/spawn/src/main.rs.
+-- ../../crates/spawn/src/main.rs. Agent work then shows the tab picker's
+-- tab (cmd+k, tab-picker.lua) with the new task highlighted, rather than
+-- the task's own tab.
 local util = require("switchyard.float")
+local tab_picker = require("switchyard.tab-picker")
 
 local label = "new-picker"
 -- Labels the shell of a session made only to hold the picker, so a pick can
@@ -42,8 +45,16 @@ local function holds_only_picker_shell(ctx)
   return found
 end
 
--- Show the pick's tab or session on its host, then drop the picker's own
--- session when it only held the picker.
+-- Drop the picker's own session when it only held the picker, unless the
+-- session now shown is that one.
+local function drop_picker_session(ctx, shown_session_id)
+  if shown_session_id ~= ctx.session_id and holds_only_picker_shell(ctx) then
+    local _, destroy_err = rex.call("session.destroy", { session_id = ctx.session_id })
+    if destroy_err ~= nil then error(destroy_err, 0) end
+  end
+end
+
+-- Show the pick's tab or session on its host.
 local function show(ctx, host, session_id, window_id)
   local env = util.cli_env()
   if host == host_label() then
@@ -51,10 +62,17 @@ local function show(ctx, host, session_id, window_id)
   else
     util.select_on_host(host, "new-picker.log", env, session_id, window_id)
   end
-  if session_id ~= ctx.session_id and holds_only_picker_shell(ctx) then
-    local _, destroy_err = rex.call("session.destroy", { session_id = ctx.session_id })
-    if destroy_err ~= nil then error(destroy_err, 0) end
-  end
+  drop_picker_session(ctx, session_id)
+end
+
+-- Show the tab picker's tab (on this host) with the new task's tab
+-- highlighted; it follows the task in as soon as its data lists it. If the
+-- picker's tab can't be found or opened, show the task's tab instead.
+local function show_in_picker(ctx, host, session_id, window_id)
+  local ok, tab = pcall(tab_picker.find_or_open, session_id, window_id)
+  if not ok then return show(ctx, host, session_id, window_id) end
+  rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
+  drop_picker_session(ctx, tab.session_id)
 end
 
 rex.mode("new")
@@ -158,7 +176,7 @@ rex.action{
       local session_id, window_id
       host, session_id, window_id = r.stdout:match("^(%S+)\t(%S+)\t(%S+)$")
       if session_id == nil then error("switchyard task launch: unexpected output: " .. r.stdout, 0) end
-      show(ctx, host, session_id, window_id)
+      show_in_picker(ctx, host, session_id, window_id)
     end
   end,
 }
