@@ -44,7 +44,8 @@
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
-//!   ones, leaving those whose tab or worktree went without one.
+//!   ones, leaving those whose tab or worktree went without one. ctrl-u
+//!   and ctrl-d page by half a page here instead of clearing the search.
 //!
 //! `?` (F1 where `?` is text) opens a float of every key, filtered with
 //! `/` (see help.rs); the footer keeps outcomes and confirmations.
@@ -1432,6 +1433,10 @@ impl App {
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
+            // The archive is long and has no transcript, so ctrl-u and
+            // ctrl-d page through it by half a page, as in scrollback.
+            KeyCode::Char('u') if ctrl && self.view == View::Archive => self.step(-(page / 2).max(1)),
+            KeyCode::Char('d') if ctrl && self.view == View::Archive => self.step((page / 2).max(1)),
             KeyCode::Char('u') if ctrl => {
                 self.query.clear();
                 self.refilter();
@@ -2214,7 +2219,11 @@ impl App {
                     Span::styled("Nothing matches ", Style::new().fg(p.subtle)),
                     Span::styled(format!("“{}”", self.query), Style::new().fg(p.text)),
                 ]),
-                draw::key_hint(p, "⌃U", " clears the search"),
+                if self.view == View::Archive {
+                    draw::key_hint(p, "⌃W", " deletes a word of the search")
+                } else {
+                    draw::key_hint(p, "⌃U", " clears the search")
+                },
             ]
         } else {
             match self.view {
@@ -2600,7 +2609,11 @@ impl App {
             if self.view == View::Inbox {
                 moving.push(("⌥↑↓", "previous, next group"));
             }
-            moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word"), ("⌃U", "clear the search")]);
+            if self.view == View::Archive {
+                moving.extend([("⌃D ⌃U", "half a page"), ("type", "search"), ("⌃W ⌥⌫", "delete a word")]);
+            } else {
+                moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word"), ("⌃U", "clear the search")]);
+            }
             sections.push(Section { title: "Moving and searching", keys: own(moving) });
         } else {
             sections.push(Section::new("Usage", &[("↑↓ ⌃P ⌃N", "scroll"), ("PgUp PgDn", "page"), ("Home End", "top, bottom")]));
@@ -3076,7 +3089,7 @@ impl App {
                 self.moved();
                 self.refilter();
             }
-            KeyCode::Char('p' | 'k' | 'n' | 'j' | 'u' | 'w' | 'o') if ctrl => self.key(k),
+            KeyCode::Char('p' | 'k' | 'n' | 'j' | 'u' | 'd' | 'w' | 'o') if ctrl => self.key(k),
             KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
             | KeyCode::Backspace
                 if !shift =>
@@ -3798,6 +3811,14 @@ mod tests {
         // One flat list, newest first, whatever the project or ending.
         assert_eq!(app.rows, vec![Item::Task(4), Item::Task(0), Item::Task(3), Item::Task(1), Item::Task(2)]);
         assert_eq!(app.selected, Some(0));
+        // ctrl-d and ctrl-u page by half a page, leaving the search be.
+        app.list_area = Rect::new(0, 0, 100, 6);
+        app.query = "a".into();
+        app.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!((app.selected, app.query.as_str()), (Some(2), "a"));
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!((app.selected, app.query.as_str()), (Some(0), "a"));
+        app.query.clear();
         // ctrl-f hides the archived (and merged) ones.
         app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
         assert_eq!(app.rows, vec![Item::Task(1), Item::Task(2)]);
