@@ -31,8 +31,9 @@
 //! - Inbox (default): one flat list across every session, each row naming
 //!   its project. Agents (tabs with live agent status or an open task, and
 //!   open tasks with no listed tab) go under status headings in urgency
-//!   order (Waiting, Failed, Done, Working, Idle, No status), then the other
-//!   tabs under Tabs, leaving out the picker's own `switchyard` tab.
+//!   order (Waiting, Failed, Done, Working, Idle, No status). Plain tabs
+//!   with no agent are left out, as is the picker's own `switchyard` tab;
+//!   the quick float (cmd+k) lists them under Tabs.
 //!   Pinned tasks lead the list and Snoozed ones trail it.
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
@@ -125,7 +126,7 @@ const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
-/// no known status), the tabs with no agent, then Snoozed.
+/// no known status), the tabs with no agent (quick float only), then Snoozed.
 const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed"];
 
 /// How long a pin or snooze made here holds over deliveries that don't
@@ -223,7 +224,7 @@ impl Armed {
 enum Item {
     /// A heading over a section of Inbox: `pinned`, `snoozed`, an agent
     /// status (the empty string means no known status), or `tabs` for the
-    /// tabs with no agent.
+    /// tabs with no agent (quick float only).
     Status(&'static str),
     Tab(usize),
     /// An archive row, or an open task with no listed tab.
@@ -756,6 +757,13 @@ impl App {
         matches!(item, Item::Tab(_)) && !self.is_agent(item)
     }
 
+    /// Whether Inbox lists a row: never the picker's own tab (cmd+i shows
+    /// it already), and a plain tab only in the quick float, which jumps to
+    /// any tab.
+    fn listed(&self, item: Item) -> bool {
+        !self.is_picker_tab(item) && (self.quick || !self.is_plain_tab(item))
+    }
+
     /// Open tasks with no listed tab.
     fn orphans(&self) -> impl Iterator<Item = Item> + '_ {
         (0..self.tasks.len()).filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none()).map(Item::Task)
@@ -935,7 +943,7 @@ impl App {
         let mut sections: Vec<Vec<Item>> = vec![Vec::new(); SECTIONS.len()];
         let items: Vec<Item> = (0..self.tabs.len()).map(Item::Tab).chain(self.orphans()).collect();
         for item in items {
-            if self.is_picker_tab(item) || !self.profile_passes(self.flat(item).work) {
+            if !self.listed(item) || !self.profile_passes(self.flat(item).work) {
                 continue;
             }
             if filtering {
@@ -1715,7 +1723,6 @@ impl App {
         }
         let Some(pane) = want else {
             let why = match self.selected_item() {
-                Some(i) if self.is_plain_tab(i) => "No agent in this tab: Enter goes to it",
                 Some(Item::Task(_)) => "This task has no tab listed",
                 _ => "Highlight an agent to see what it has been saying",
             };
@@ -1997,8 +2004,8 @@ impl App {
         let (total, kind) = match self.view {
             View::Archive => (self.tasks.iter().filter(|t| t.ended.is_some()).count(), "ended"),
             _ => {
-                let picker = (0..self.tabs.len()).filter(|&t| self.is_picker_tab(Item::Tab(t))).count();
-                (self.tabs.len() - picker + self.orphans().count(), "tabs")
+                let listed = (0..self.tabs.len()).filter(|&t| self.listed(Item::Tab(t))).count();
+                (listed + self.orphans().count(), "tabs")
             }
         };
         if typing || shown != total {
@@ -3211,8 +3218,13 @@ mod tests {
             app.load = Load::Ready;
             app.tasks_load = Tasks::Ready;
         });
-        // Only the config host's plain switchyard tab goes; an agent or a
-        // tab on another host with the same name stays.
+        // Inbox leaves out plain tabs: the config host's switchyard tab, and
+        // the other plain tabs too. The agent stays.
+        assert_eq!(app.rows, vec![Item::Status("working"), Item::Tab(2)]);
+        // The quick float (cmd+k) keeps the plain tabs, the picker's own
+        // tab still out.
+        app.quick = true;
+        app.refilter();
         assert_eq!(app.rows, vec![
             Item::Status("working"), Item::Tab(2),
             Item::Status("tabs"), Item::Tab(1), Item::Tab(3),
@@ -3220,7 +3232,7 @@ mod tests {
     }
 
     #[test]
-    fn every_session_shares_the_status_sections_and_plain_tabs_come_last() {
+    fn every_session_shares_the_status_sections_and_plain_tabs_stay_out() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
@@ -3240,14 +3252,13 @@ mod tests {
             app.load = Load::Ready;
             app.tasks_load = Tasks::Ready;
         });
-        // Agents from every session share the status sections, the open
-        // task with no listed session among them; the tabs with no agent
-        // follow in Rex's order.
+        // Agents from every session share the status sections, and the open
+        // task with no listed session among them. The plain tabs are left
+        // out of Inbox.
         assert_eq!(app.rows, vec![
             Item::Status("blocked"), Item::Tab(3),
             Item::Status("done"), Item::Task(0),
             Item::Status("working"), Item::Tab(1),
-            Item::Status("tabs"), Item::Tab(0), Item::Tab(2), Item::Tab(4),
         ]);
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
@@ -3255,11 +3266,12 @@ mod tests {
             let buf = terminal.backend().buffer();
             (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
         };
-        for label in ["Waiting", "Done", "Working", "Tabs", "approval", "stray"] {
+        for label in ["Waiting", "Done", "Working", "approval", "stray"] {
             assert!((0..10).any(|y| line(y).contains(label)), "{label}");
         }
+        assert!((0..10).all(|y| !line(y).contains("Tabs")), "plain tabs in Inbox");
         // Each row names its session: no session headings or tree guides.
-        assert!(line(1).contains("busy") && line(5).contains("quiet") && line(9).contains("plain"), "{}", line(9));
+        assert!(line(1).contains("busy") && line(5).contains("quiet"), "{}", line(5));
         assert!((0..10).all(|y| !line(y).contains('├') && !line(y).contains('╰')));
     }
 
@@ -3610,11 +3622,8 @@ mod tests {
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(text.contains("archive claude") && text.contains("removes its worktree"), "{text}");
-        app.selected = Some(at(&app, 1));
-        app.key(ctrl('x'));
-        assert_eq!(app.pick(), "go:-/s/shell");
-        assert!(app.note.as_ref().is_some_and(|(m, failed)| *failed && m.contains("no agent")));
-        // An agent waiting at its prompt is one too.
+        // An agent waiting at its prompt is one too. (The plain shell tab
+        // isn't listed in Inbox, so there is no row to arm there.)
         app.selected = Some(at(&app, 2));
         app.key(ctrl('x'));
         assert_eq!(app.pick(), "archive:-/s/ready");
@@ -3715,7 +3724,9 @@ mod tests {
 
     #[test]
     fn long_tab_names_stop_at_a_third_of_the_row() {
+        // Plain tabs are listed only in the quick float.
         let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.quick = true;
         let long = "x".repeat(200);
         app.paste(&format!("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\t{long}\t~/dev/src/project\n"));
         let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();

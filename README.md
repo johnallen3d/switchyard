@@ -22,7 +22,7 @@ and Escape closes the float; cmd+k again closes it too.
 From a terminal on the Mac:
 
 ```bash
-switchyard                  # tab picker: tabs, agents, archive
+switchyard                  # tab picker: agents, archive
 switchyard --quick          # quick jump: Enter jumps and quits
 switchyard new              # new agent task (--session: plain session)
 switchyard link [REF...]    # link the current branch to work items
