@@ -31,8 +31,12 @@
 //!   order (Waiting, Failed, Done, Working, Idle, No status), then the other
 //!   tabs under Tabs, leaving out the picker's own `switchyard` tab.
 //!   Pinned tasks lead the list and Snoozed ones trail it.
-//!   With room, a preview under the list shows the highlighted agent's pane,
-//!   live, below its whole status message.
+//!   With the width, the list is a sidebar on the left (search over it,
+//!   compact rows), and the right side shows the highlighted row: its name,
+//!   work items and host over its whole status message, the agent's
+//!   transcript, live, and the reply box. ctrl-e collapses the sidebar, and
+//!   typing to search brings it back. Narrower, a preview under the list
+//!   shows the transcript, and ctrl-e expands it over the list.
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
@@ -56,7 +60,8 @@
 //! work item; task rows show their links as badges grouped by kind. With
 //! several it opens a chooser over them (PRs, cards, then issues).
 //!
-//! All keeps a reply box at its bottom, under the preview, expanded or not:
+//! All keeps a reply box at its bottom, under the preview (or the
+//! transcript), expanded or not:
 //! the new-session picker's prompt box (see the ui crate's prompt_box),
 //! with its rounded corners. Tab moves into it to message the highlighted
 //! agent; alt- or shift-Enter adds a line, Escape (or Tab, while it's
@@ -313,6 +318,18 @@ struct Reply {
 const REPLY_MIN_ROWS: u16 = 2;
 const REPLY_MAX_ROWS: u16 = 6;
 
+/// The narrowest content All splits into the sidebar and the highlighted
+/// row, and the sidebar's width range (three tenths of the content).
+const SIDEBAR_MIN_WIDTH: u16 = 90;
+const SIDEBAR_MIN: u16 = 30;
+const SIDEBAR_MAX: u16 = 46;
+
+/// Lines a tab or task takes in the sidebar.
+const SIDE_ROW_LINES: usize = 2;
+
+/// Lines of status message the right side's header shows at most.
+const DETAIL_MSG_ROWS: usize = 3;
+
 /// How wide a row's work-item badges may be in a list `width` wide.
 fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
@@ -376,8 +393,12 @@ struct App {
     preview: Option<preview::Preview>,
     /// The pane a standalone picker last asked its feed to capture.
     asked: Option<preview::Pane>,
-    /// The preview fills the picker (ctrl-e), for reading.
+    /// The preview fills the picker (ctrl-e), for reading: with the
+    /// sidebar, it is collapsed.
     expanded: bool,
+    /// All is drawn as the sidebar and the highlighted row (see
+    /// draw_split), as of the last frame.
+    sidebar: bool,
     /// How far the preview is scrolled back from its bottom, in lines, and
     /// the pane that is for.
     scroll: (usize, Option<preview::Pane>),
@@ -422,6 +443,7 @@ impl App {
             asked: None,
             scroll: (0, None),
             expanded: false,
+            sidebar: false,
         }
     }
 
@@ -1193,7 +1215,7 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
-        let page = (self.list_area.height as isize - 2).max(1);
+        let page = self.page();
         let Some(r) = &mut self.reply else { return };
         match k.code {
             KeyCode::Esc => self.close_reply(),
@@ -1233,7 +1255,7 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let page = (self.list_area.height as isize - 2).max(1);
+        let page = self.page();
         // ctrl-x arms an archive; on a worktree with uncommitted changes, the
         // next ctrl-x (typed by the config when Enter answers `ask`) moves on
         // to "are you sure". Enter and Escape never get here.
@@ -1309,6 +1331,8 @@ impl App {
             KeyCode::Char('h') if ctrl => self.set_view(self.view.next(true)),
             KeyCode::Char('l') if ctrl => self.set_view(self.view.next(false)),
             KeyCode::Char(c) if !ctrl && !alt => {
+                // Searching brings back the list it searches.
+                self.expanded = false;
                 self.query.push(c);
                 self.moved();
                 self.refilter();
@@ -1333,6 +1357,13 @@ impl App {
         }
     }
 
+    /// How far the page keys move: a list's height in rows, less two for
+    /// context (two-line rows in the sidebar).
+    fn page(&self) -> isize {
+        let lines = (self.list_area.height as isize - 2).max(1);
+        if self.sidebar && !self.expanded { (lines / SIDE_ROW_LINES as isize).max(1) } else { lines }
+    }
+
     /// Scroll the preview back (positive) or forward; draw_preview keeps it
     /// within the capture.
     fn scroll_preview(&mut self, delta: isize) {
@@ -1352,15 +1383,141 @@ impl App {
         let mut top = draw::tabs(&self.p, &labels, active);
         top.extend(self.header_chips());
         let inner = draw::frame_spans(f, &self.p, top, "⌘K", Margin::new(2, 1));
-        let [search, rule, _, body, _, footer] = Layout::vertical([
+        let [content, _, footer] =
+            Layout::vertical([Constraint::Min(5), Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+        self.sidebar = self.view == View::All && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
+        if self.sidebar {
+            self.draw_split(f, content);
+        } else {
+            self.draw_stacked(f, content);
+        }
+        self.draw_footer(f, footer);
+    }
+
+    /// All, with room: the sidebar of every open tab and agent on the left
+    /// (search over its list), and the highlighted one on the right: its
+    /// name and status message, its transcript, and the reply box under it.
+    /// ctrl-e collapses the sidebar, giving the right side the whole width.
+    fn draw_split(&mut self, f: &mut Frame, area: Rect) {
+        let p = self.p;
+        let main = if self.expanded {
+            area
+        } else {
+            let w = (area.width * 3 / 10).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+            let [side, gap, main] =
+                Layout::horizontal([Constraint::Length(w), Constraint::Length(3), Constraint::Min(0)]).areas(area);
+            let [search, rule, list] =
+                Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]).areas(side);
+            self.draw_search(f, search);
+            draw::rule(f, &p, rule);
+            self.draw_list(f, list);
+            let buf = f.buffer_mut();
+            for y in gap.y..gap.y + gap.height {
+                buf[(gap.x + 1, y)].set_symbol("│").set_style(Style::new().fg(p.hl_med));
+            }
+            main
+        };
+        let head_h = self.detail_rows(main.width);
+        let rows = match &self.reply {
+            Some(r) => r.prompt.rows(main.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
+            None => 1,
+        };
+        let card_h = (rows + prompt_box::CHROME_ROWS).min(main.height.saturating_sub(head_h + 4));
+        let [head, rule, pane, _, card] = Layout::vertical([
+            Constraint::Length(head_h),
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(card_h),
+        ])
+        .areas(main);
+        if self.expanded {
+            // Page keys page through the transcript.
+            self.list_area = pane;
+        }
+        self.draw_detail(f, head);
+        draw::rule(f, &p, rule);
+        self.draw_transcript(f, pane);
+        if card_h > prompt_box::CHROME_ROWS {
+            self.draw_reply(f, card, card_h - prompt_box::CHROME_ROWS);
+        }
+        self.draw_chooser(f, main);
+        self.draw_snooze(f, main);
+    }
+
+    /// Rows the right side's header takes in `width`: the name line, then
+    /// the status message wrapped to at most DETAIL_MSG_ROWS.
+    fn detail_rows(&self, width: u16) -> u16 {
+        let Some(item) = self.selected_item() else { return 1 };
+        let msg = self.flat(item).msg;
+        if msg.is_empty() {
+            return 1;
+        }
+        1 + preview::wrap(msg, (width as usize).saturating_sub(2).max(1)).len().min(DETAIL_MSG_ROWS) as u16
+    }
+
+    /// The right side's header: the highlighted row's status, project and
+    /// name, with its work items, host and age on the right (a plain tab's
+    /// folder), then its whole status message.
+    fn draw_detail(&self, f: &mut Frame, area: Rect) {
+        let p = &self.p;
+        let [line, msg_area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let Some(item) = self.selected_item() else {
+            f.render_widget(Line::styled(" Nothing highlighted", Style::new().fg(p.muted)), line);
+            return;
+        };
+        let t = self.flat(item);
+        let plain = self.is_plain_tab(item);
+        let (glyph, color, verb) = self.status_of(&t, item, tick(self.started));
+        let (right, right_w) = match item {
+            Item::Tab(tab) if plain => {
+                let room = (area.width as usize).saturating_sub(str_width(t.name) + 6);
+                let right = self.tab_right(tab, &[], p.base, true, room);
+                let w = right.iter().map(|s| str_width(&s.content)).sum();
+                (right, w)
+            }
+            _ => self.right_spans(&t, p.base, verb, area.width),
+        };
+        let mut left = vec![Span::styled(format!("{glyph} "), Style::new().fg(color))];
+        let mut room = (area.width as usize).saturating_sub(2 + right_w + 1);
+        let (project, _) = self.project_of(item);
+        if !project.is_empty() && str_width(&project) + 4 < room / 2 {
+            room -= str_width(&project) + 3;
+            left.push(Span::styled(project, Style::new().fg(p.iris)));
+            left.push(Span::styled(" / ", Style::new().fg(p.muted)));
+        }
+        let bold = Style::new().fg(p.text).add_modifier(Modifier::BOLD);
+        left.extend(highlight(t.name, &[], room, false, bold, bold));
+        f.render_widget(Line::from(left), line);
+        f.render_widget(Line::from(right).right_aligned(), line);
+        if t.msg.is_empty() || msg_area.height == 0 {
+            return;
+        }
+        let style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle });
+        let width = (msg_area.width as usize).saturating_sub(2).max(1);
+        let mut wrapped = preview::wrap(t.msg, width);
+        let max = msg_area.height as usize;
+        if wrapped.len() > max {
+            wrapped.truncate(max);
+            if let Some(last) = wrapped.last_mut() {
+                let keep: String = last.chars().take(width.saturating_sub(1)).collect();
+                *last = format!("{keep}…");
+            }
+        }
+        let lines: Vec<Line> = wrapped.into_iter().map(|l| Line::styled(format!("  {l}"), style)).collect();
+        f.render_widget(Paragraph::new(lines), msg_area);
+    }
+
+    /// The other views, and All without room for the sidebar: the search
+    /// over the list, with All's preview and reply box under it.
+    fn draw_stacked(&mut self, f: &mut Frame, area: Rect) {
+        let [search, rule, _, body] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
         ])
-        .areas(inner);
+        .areas(area);
         self.draw_search(f, search);
         draw::rule(f, &self.p, rule);
         // The reply box keeps the bottom of All, under the preview, with
@@ -1398,7 +1555,6 @@ impl App {
         if let Some((card, rows)) = reply_card {
             self.draw_reply(f, card, rows);
         }
-        self.draw_footer(f, footer);
     }
 
     /// All's list and the preview under it, when there is room for both:
@@ -1445,11 +1601,23 @@ impl App {
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
         spans.push(Span::styled("─".repeat((head.width as usize).saturating_sub(used)), Style::new().fg(p.overlay)));
         f.render_widget(Line::from(spans), head);
+        self.draw_transcript(f, body);
+    }
+
+    /// The highlighted agent's transcript, scrolled to its end until John
+    /// scrolls back.
+    fn draw_transcript(&mut self, f: &mut Frame, screen: Rect) {
+        let p = self.p;
+        let p = &p;
         let muted = |text: &str| vec![Line::styled(text.to_string(), Style::new().fg(p.muted))];
-        let Some(pane) = want else {
-            return draw::centered(f, body, muted("Highlight an agent to see what it has been saying"));
+        let Some(pane) = self.preview_want() else {
+            let why = match self.selected_item() {
+                Some(i) if self.is_plain_tab(i) => "No agent in this tab: Enter goes to it",
+                Some(Item::Task(_)) => "This task has no tab listed",
+                _ => "Highlight an agent to see what it has been saying",
+            };
+            return draw::centered(f, screen, muted(why));
         };
-        let screen = body;
         // A new agent starts at the end of its transcript.
         if self.scroll.1.as_ref() != Some(&pane) {
             self.scroll = (0, Some(pane.clone()));
@@ -1649,6 +1817,7 @@ impl App {
         let p = &self.p;
         let typing = !self.query.is_empty();
         let placeholder = match self.view {
+            View::All if self.sidebar => "Search",
             View::All => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
@@ -1659,11 +1828,16 @@ impl App {
         let mut right = Vec::new();
         let spin = SPINNER[tick(self.started) % SPINNER.len()];
         match self.tasks_load {
+            Tasks::Waiting | Tasks::Live if self.sidebar => {
+                right.push(Span::styled(format!("{spin}  "), Style::new().fg(p.muted)))
+            }
             Tasks::Waiting => right.push(Span::styled(format!("{spin} loading tasks  "), Style::new().fg(p.muted))),
             Tasks::Live => right.push(Span::styled(format!("{spin} checking worktrees  "), Style::new().fg(p.muted))),
             _ => {}
         }
-        if self.view == View::All {
+        // The sidebar is too narrow for the counts by status; its
+        // headings say them.
+        if self.view == View::All && !self.sidebar {
             // Counts by what needs attention, the snoozed aside.
             let count = |st: &str| {
                 self.rows
@@ -1705,6 +1879,9 @@ impl App {
         if self.rows.is_empty() {
             self.draw_empty(f, area);
             return;
+        }
+        if self.sidebar {
+            return self.draw_side_list(f, area);
         }
         if let Some(sel) = self.selected {
             // Keep the group header in view when scrolling back to its
@@ -1942,21 +2119,10 @@ impl App {
         right
     }
 
-    /// A flat row. A tab with no agent shows its folder on the right rather
-    /// than a host and status.
-    fn draw_flat_row(
-        &self,
-        f: &mut Frame,
-        r: Rect,
-        item: Item,
-        selected: bool,
-        tick: usize,
-        cols: (usize, usize),
-    ) {
+    /// A row's status glyph, its colour, and the word for it: how an ended
+    /// task ended, else its agent's state; a plain tab's dot.
+    fn status_of(&self, t: &Flat, item: Item, tick: usize) -> (&'static str, Color, &'static str) {
         let p = &self.p;
-        let t = self.flat(item);
-        let (bg, edge) = self.row_style(selected);
-        f.buffer_mut().set_style(r, Style::new().bg(bg));
         let (glyph, color, verb) = match (t.ended, t.state) {
             // Closed without an archive: the worktree is still there.
             (Some(_), _) if t.left => ("▢", p.gold, "closed"),
@@ -1972,9 +2138,149 @@ impl App {
             (None, "idle") => ("·", p.muted, "idle"),
             (None, _) => ("?", p.muted, "no status"),
         };
-        let plain = self.is_plain_tab(item);
-        let (glyph, color) = if plain { ("·", p.muted) } else { (glyph, color) };
+        let (glyph, color) = if self.is_plain_tab(item) { ("·", p.muted) } else { (glyph, color) };
         let verb = if t.wake > 0 { "snoozed" } else { verb };
+        (glyph, color, verb)
+    }
+
+    /// The project a row is in, named the same way for every row: its
+    /// task's project, else its tab's folder (the repository a worktree
+    /// under `.worktrees` belongs to), and whether that is the task's (which
+    /// search highlights).
+    fn project_of(&self, item: Item) -> (String, bool) {
+        let tab = match item {
+            Item::Tab(t) => &self.tabs[t],
+            Item::Task(k) => return (self.tasks[k].project.clone(), true),
+            _ => return (String::new(), false),
+        };
+        if let Some(k) = tab.task {
+            return (self.tasks[k].project.clone(), true);
+        }
+        (folder_project(&tab.dir), false)
+    }
+
+    /// Lines a sidebar row takes: two for a tab or task, one for a heading.
+    fn side_height(item: &Item) -> usize {
+        if selectable(item) { SIDE_ROW_LINES } else { 1 }
+    }
+
+    /// All's list as the sidebar: each tab or task on two lines (see
+    /// draw_side_row) under the one-line status headings, scrolled to keep
+    /// the highlighted row, and the heading over it, in view.
+    fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
+        let h = area.height as usize;
+        let heights: Vec<usize> = self.rows.iter().map(Self::side_height).collect();
+        if let Some(sel) = self.selected {
+            let header_above = sel > 0 && !selectable(&self.rows[sel - 1]);
+            let first = if header_above { sel - 1 } else { sel };
+            if first < self.offset {
+                self.offset = first;
+            }
+            while self.offset < sel && heights[self.offset..=sel].iter().sum::<usize>() > h {
+                self.offset += 1;
+            }
+        }
+        self.offset = self.offset.min(self.rows.len().saturating_sub(1));
+        let total: usize = heights.iter().sum();
+        let overflow = total > h && h > 0;
+        let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
+        let tick = tick(self.started);
+        let mut y = 0;
+        for (i, row) in self.rows.iter().enumerate().skip(self.offset) {
+            if y >= h {
+                break;
+            }
+            let rows = heights[i].min(h - y) as u16;
+            let r = Rect { y: area.y + y as u16, height: rows, ..list };
+            match row {
+                Item::Status(state) => self.draw_status_header(f, r, state),
+                _ => self.draw_side_row(f, r, *row, self.selected == Some(i), tick),
+            }
+            y += heights[i];
+        }
+        if overflow {
+            let above: usize = heights[..self.offset].iter().sum();
+            draw::scrollbar(f, &self.p, area, above, total);
+        }
+    }
+
+    /// A sidebar row on two lines: status, name, and how long it has been
+    /// in that state (until it wakes, snoozed); then, under the name, its
+    /// project and status message, with its uncommitted files on the right.
+    /// A plain tab shows its folder there. The right side shows the rest.
+    fn draw_side_row(&self, f: &mut Frame, r: Rect, item: Item, selected: bool, tick: usize) {
+        let p = &self.p;
+        let t = self.flat(item);
+        let (bg, edge) = self.row_style(selected);
+        f.buffer_mut().set_style(r, Style::new().bg(bg));
+        let (glyph, color, _) = self.status_of(&t, item, tick);
+        let hits = self.hits.get(&item).cloned().unwrap_or_default();
+        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let muted = Style::new().fg(p.muted).bg(bg);
+        let width = r.width as usize;
+        // The first line: status, name, age.
+        let when = match (t.wake, t.since) {
+            (wake, _) if wake > 0 => format!("{} ", age(wake.saturating_sub(self.now))),
+            (_, since) if since > 0 => format!("{} ", age(self.now.saturating_sub(since))),
+            _ => String::new(),
+        };
+        let room = width.saturating_sub(3 + str_width(&when) + 1);
+        let name_style = Style::new().fg(p.text).bg(bg);
+        let name_style = if selected { name_style.add_modifier(Modifier::BOLD) } else { name_style };
+        let mut left = vec![edge.clone(), Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg))];
+        left.extend(highlight(t.name, &hits.name, room, false, name_style, hl));
+        let line = Rect { height: 1, ..r };
+        f.render_widget(Line::from(left), line);
+        // A span, not a styled Line: a Line's style colours its whole row.
+        f.render_widget(Line::from(Span::styled(when, muted)).right_aligned(), line);
+        if r.height < 2 {
+            return;
+        }
+        // The second line, under the name: project · message, or a plain
+        // tab's folder.
+        let line = Rect { y: r.y + 1, height: 1, ..r };
+        let dirty = if t.dirty > 0 { format!("✎{} ", t.dirty) } else { String::new() };
+        let mut room = width.saturating_sub(3 + str_width(&dirty) + 1);
+        let mut left = vec![edge, Span::styled("  ", Style::new().bg(bg))];
+        let push = |left: &mut Vec<Span<'static>>, spans: Vec<Span<'static>>, room: &mut usize| {
+            *room = room.saturating_sub(spans.iter().map(|s| str_width(&s.content)).sum());
+            left.extend(spans);
+        };
+        let (project, own) = self.project_of(item);
+        if !project.is_empty() {
+            let style = Style::new().fg(p.iris).bg(bg);
+            let hits = if own { hits.second.as_slice() } else { &[] };
+            push(&mut left, highlight(&project, hits, room, false, style, hl), &mut room);
+            if !t.msg.is_empty() && room > 6 {
+                push(&mut left, vec![Span::styled(" · ", muted)], &mut room);
+            }
+        }
+        if !t.msg.is_empty() && room > 3 {
+            let style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.muted }).bg(bg);
+            let msg = t.msg.lines().next().unwrap_or("");
+            push(&mut left, highlight(msg, &[], room, false, style, style), &mut room);
+        }
+        f.render_widget(Line::from(left), line);
+        f.render_widget(Line::from(Span::styled(dirty, Style::new().fg(p.gold).bg(bg))).right_aligned(), line);
+    }
+
+    /// A flat row. A tab with no agent shows its folder on the right rather
+    /// than a host and status.
+    fn draw_flat_row(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        item: Item,
+        selected: bool,
+        tick: usize,
+        cols: (usize, usize),
+    ) {
+        let p = &self.p;
+        let t = self.flat(item);
+        let (bg, edge) = self.row_style(selected);
+        f.buffer_mut().set_style(r, Style::new().bg(bg));
+        let (glyph, color, verb) = self.status_of(&t, item, tick);
+        let plain = self.is_plain_tab(item);
         // Right side first, so the columns and message get what is left; a
         // plain tab's folder gets what its columns leave.
         let (right, right_w) = if plain { (Vec::new(), 0) } else { self.right_spans(&t, bg, verb, r.width) };
@@ -2132,7 +2438,12 @@ impl App {
             View::Usage => {}
             View::All => {
                 keys.push(("⌥↑↓", "group"));
-                if self.expanded {
+                if self.sidebar {
+                    keys.push(("⌃E", if self.expanded { "show sidebar" } else { "hide sidebar" }));
+                    if self.preview_want().is_some() {
+                        keys.push((if self.expanded { "↑↓" } else { "⇧↑↓" }, "scroll"));
+                    }
+                } else if self.expanded {
                     keys.push(("⌃E", "list"));
                     keys.push(("↑↓", "scroll"));
                 } else if self.preview_want().is_some() {
@@ -3009,9 +3320,113 @@ mod tests {
         let shown = row.matches('x').count();
         assert!(row.contains('…') && row.contains("~/dev/src/project") && (24..=34).contains(&shown), "{row}");
     }
+    #[test]
+    fn wide_all_shows_a_collapsible_sidebar_beside_the_highlighted_agent() {
+        let mut app = inbox_with_lifecycle();
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        let screen = |app: &mut App, w: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let buf = terminal.backend().buffer();
+            (0..30).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>()
+        };
+        // The list on the left, the agent's name, transcript and reply box
+        // on the right, on the same rows.
+        let rows = screen(&mut app, 140);
+        assert!(app.sidebar);
+        let row = rows.iter().find(|r| r.contains("Search")).unwrap();
+        assert!(row.contains('│') && row.contains("woke") && row.contains("done"), "{row}");
+        assert!(rows.iter().any(|r| r.contains("pinned") && r.contains('│')), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("Tab to type a message") && r.contains('│')), "{rows:#?}");
+        // ctrl-e collapses the sidebar; typing to search brings it back.
+        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        let rows = screen(&mut app, 140);
+        assert!(!rows.iter().any(|r| r.contains("Search") || r.contains("pinned")), "{rows:#?}");
+        assert!(rows.iter().any(|r| r.contains("show sidebar")));
+        app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+        assert!(!app.expanded && app.query == "w");
+        // Too narrow, All stacks the list over the reply box as before.
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        let rows = screen(&mut app, 80);
+        assert!(!app.sidebar);
+        assert!(rows.iter().any(|r| r.contains("Search tabs, agents, and work items")), "{rows:#?}");
+    }
+
+    #[test]
+    fn sidebar_rows_take_two_lines_and_scroll_to_the_highlight() {
+        let mut app = App::new((String::new(), String::new()), View::All);
+        app.follow = false;
+        app.now = 1000;
+        let mut rows = String::from("S\t-\tlocal\ts\tdemo\n");
+        let mut tasks = Vec::new();
+        for i in 0..12 {
+            rows.push_str(&format!("T\tw{i}\tworking\tt{i}\n"));
+            tasks.push(serde_json::json!({"session_id":"s", "window_id":format!("w{i}"), "name":format!("task-{i:02}"),
+                "project":"proj", "status":"working", "status_msg":format!("step {i}"), "status_at":900}));
+        }
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(&rows);
+            app.tasks = parse_tasks(&serde_json::Value::from(tasks).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        let screen = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let buf = terminal.backend().buffer();
+            (0..20).map(|y| (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>()
+        };
+        // Every project is the same colour, edits or not; only the pencil
+        // is gold, and the name keeps the text colour beside the age.
+        app.tasks[1].dirty = 3;
+        let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let find = |text: &str| {
+            (0..20u16).find_map(|y| {
+                let row: String = (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                row.find(text).map(|i| (row[..i].chars().count() as u16, y))
+            }).unwrap()
+        };
+        for (x, y) in [find("proj · step 0"), find("proj · step 1")] {
+            assert_eq!(buf[(x, y)].fg, app.p.iris);
+        }
+        let (x, y) = find("✎3");
+        assert_eq!(buf[(x, y)].fg, app.p.gold);
+        let (x, y) = find("task-01");
+        assert_eq!(buf[(x, y)].fg, app.p.text);
+        let lines = screen(&mut app);
+        assert!(app.sidebar);
+        let at = lines.iter().position(|l| l.contains("task-00")).unwrap();
+        assert!(lines[at].contains("1m") && lines[at + 1].contains("proj · step 0"), "{lines:#?}");
+        // The last row scrolls into view with both its lines.
+        app.edge(true);
+        let lines = screen(&mut app);
+        let at = lines.iter().position(|l| l.contains("task-11")).unwrap();
+        assert!(lines[at + 1].contains("step 11") && !lines.iter().any(|l| l.contains("task-00")), "{lines:#?}");
+    }
+
+    #[test]
+    fn plain_tabs_name_their_project_like_tasks_do() {
+        assert_eq!(folder_project("~/dev/src/amfaro"), "amfaro");
+        assert_eq!(folder_project("~/dev/src/playground/switchyard/.worktrees/more-t3-code-like/crates"), "switchyard");
+        assert_eq!(folder_project("~"), "~");
+        assert_eq!(folder_project("/"), "/");
+    }
 }
 
 // ---------------------------------------------------------------- main
+
+/// The project a folder is in: the repository a `.worktrees` worktree
+/// belongs to, else the folder's own name (`~` for home).
+fn folder_project(dir: &str) -> String {
+    let dir = match dir.trim_end_matches('/') {
+        "" => return dir.to_string(),
+        d => d,
+    };
+    let dir = dir.split_once("/.worktrees/").map_or(dir, |(repo, _)| repo);
+    dir.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(dir).to_string()
+}
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
