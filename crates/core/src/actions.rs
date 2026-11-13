@@ -46,8 +46,9 @@ use std::time::Duration;
 
 use crate::hosts::catalog;
 use crate::launch::launch;
-use crate::prompts::{discard_prompt, fetch_prompt};
-use crate::rex::{host_bash, now, rex, rex_json, sh_quote};
+use crate::images::carry;
+use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
+use crate::rex::{host_bash, local_label, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
 use crate::tasks::{MERGED_SH, in_window, load_tasks, save_record, update_tasks};
 
@@ -218,7 +219,14 @@ const PASTE_SETTLE: Duration = Duration::from_millis(150);
 /// turn at its next chance (Claude after the running tool call, Pi as a
 /// steering message). An agent waiting on a prompt (`blocked`) is refused,
 /// since the keys would answer the prompt instead.
+///
+/// Files pasted into the text (see `images`) are taken from this machine.
 pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
+    message_from(&local_label(), host, session, window, text)
+}
+
+/// `message` with pasted files taken from host `from`.
+fn message_from(from: &str, host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("nothing to send".into());
@@ -234,6 +242,7 @@ pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<St
     if pane["state"].as_str() == Some("blocked") {
         return Err(format!("{label} is waiting on a prompt; answer it in its tab"));
     }
+    let text = &carry(from, host, text)?;
     let event = serde_json::json!({
         "session_id": session,
         "block_id": block,
@@ -250,7 +259,8 @@ pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<St
 /// which is removed once sent.
 pub fn message_ref(host: &str, session: &str, window: &str, prompt_ref: &str) -> Result<String, String> {
     let text = fetch_prompt(prompt_ref)?;
-    let sent = message(host, session, window, &text)?;
+    let (from, _) = parse_prompt_ref(prompt_ref)?;
+    let sent = message_from(from, host, session, window, &text)?;
     discard_prompt(prompt_ref);
     Ok(sent)
 }

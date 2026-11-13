@@ -5,8 +5,9 @@ use crate::autoname::name_work;
 use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
-use crate::prompts::{discard_prompt, fetch_prompt};
-use crate::rex::{host_bash, host_home, log, now, rex_json, sh_quote};
+use crate::images::carry;
+use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
+use crate::rex::{host_bash, host_home, local_label, log, now, rex_json, sh_quote};
 use crate::sessions::new_session_id;
 use crate::tasks::record_task;
 
@@ -173,6 +174,10 @@ fn launch_with(
         host.to_string()
     };
     let host = host.as_str();
+    // Images pasted into the prompt are files on the prompt's host; give
+    // the agent copies on its own.
+    let from = prompt_ref.and_then(|r| parse_prompt_ref(r).ok()).map_or_else(local_label, |(label, _)| label.to_string());
+    let typed = carry(&from, host, &typed)?;
 
     // Start the session and tab in the project so their processes, and
     // splits taken from them, sit there rather than in ~. Rex doesn't expand
