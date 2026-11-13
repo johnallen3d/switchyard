@@ -112,9 +112,9 @@ pub fn parse(body: &str) -> Option<Preview> {
     Some(Preview { pane, entries, drawn: None })
 }
 
-/// The entries as lines `width` wide: John's messages after `›`, the
-/// agent's after `●`, both drawn from markdown, its tool calls dim, one
-/// line each, and questions for John in gold. A blank line goes between
+/// The entries as lines `width` wide: John's messages after `›` on a
+/// full-width band, the agent's after `●`, both drawn from markdown, its
+/// tool calls dim, one line each, and questions for John in gold. A blank line goes between
 /// turns, not between tool calls; blank lines within a turn keep the
 /// gutter, so scrollback's `{`/`}` stop only between turns.
 ///
@@ -126,7 +126,7 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
     let room = width.saturating_sub(2).max(1);
     for (e, (kind, text)) in entries.iter().enumerate() {
         let (mark, mark_style, style) = match kind.as_str() {
-            "user" => ("› ", Style::new().fg(p.iris).add_modifier(Modifier::BOLD), Style::new().fg(p.text)),
+            "user" => ("› ", Style::new().fg(p.iris).add_modifier(Modifier::BOLD), Style::new().fg(p.iris)),
             "ask" => ("? ", Style::new().fg(p.gold).add_modifier(Modifier::BOLD), Style::new().fg(p.gold)),
             "tool" => ("· ", Style::new().fg(p.muted), Style::new().fg(p.subtle)),
             _ => ("● ", Style::new().fg(p.pine), Style::new().fg(p.text)),
@@ -146,7 +146,15 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
             first = false;
             let row_style = style.patch(row.style);
             let body = row.spans.into_iter().map(|s| Span::styled(s.content, row_style.patch(s.style)));
-            out.push(Line::from(std::iter::once(lead).chain(body).collect::<Vec<_>>()), from.map(|r| (e, r)));
+            let mut line = Line::from(std::iter::once(lead).chain(body).collect::<Vec<_>>());
+            if kind == "user" {
+                // A full-width band; on the line, so the scrollback cursor
+                // and selection, which replace the line's style, still show.
+                let pad = width.saturating_sub(line.width());
+                line.spans.push(Span::raw(" ".repeat(pad)));
+                line = line.style(Style::new().bg(p.overlay));
+            }
+            out.push(line, from.map(|r| (e, r)));
         }
     }
     out
@@ -500,7 +508,7 @@ mod tests {
         let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
         let p = Palette::load();
         let lines: Vec<String> = pv.lines(14, &p).unwrap().iter().map(text).collect();
-        assert_eq!(lines, ["› Fix it", "", "· Bash: Run t…", "· Read: /a/ve…", "", "● Done and", "  tested"]);
+        assert_eq!(lines, ["› Fix it      ", "", "· Bash: Run t…", "· Read: /a/ve…", "", "● Done and", "  tested"]);
     }
 
     fn agent(md: &str, width: u16) -> Vec<Line<'static>> {
@@ -546,9 +554,13 @@ mod tests {
     fn johns_messages_are_markdown_too() {
         let json = serde_json::json!({ "entries": [{ "kind": "user", "text": "one\n*two*" }] });
         let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
-        let lines = pv.lines(20, &Palette::load()).unwrap();
-        assert_eq!(lines.iter().map(text).collect::<Vec<_>>(), ["› one two"]);
+        let p = Palette::load();
+        let lines = pv.lines(20, &p).unwrap();
+        assert_eq!(lines.iter().map(text).collect::<Vec<_>>(), ["› one two           "]);
         assert!(lines[0].spans.iter().any(|s| s.content == "two" && s.style.add_modifier.contains(Modifier::ITALIC)));
+        // On a full-width band, in their own colour.
+        assert_eq!(lines[0].style.bg, Some(p.overlay));
+        assert!(lines[0].spans.iter().any(|s| s.content == "one" && s.style.fg == Some(p.iris)));
     }
 
     #[test]
