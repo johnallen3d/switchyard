@@ -3,11 +3,13 @@
 //! lists, F1 from anywhere (the reply box, snooze prompt and scrollback
 //! take `?` as text or a search).
 //!
-//! `/` filters the bindings by key, action or group (Backspace edits,
+//! `/` fuzzy-filters the bindings by key, action or group (Backspace edits,
 //! ctrl-u clears, Enter or Escape stops typing); `j`/`k`, the arrows and
 //! the page keys scroll; Escape clears the filter, then closes, as do `q`,
 //! `?` and F1.
 
+use nucleo_matcher::Matcher;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -16,6 +18,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Frame;
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, str_width};
+use switchyard_ui::fuzzy::score_fields;
 
 /// A group of bindings: its title and (keys, what they do).
 pub struct Section {
@@ -35,6 +38,7 @@ pub struct Help {
     /// The filter has the keys (after `/`).
     pub typing: bool,
     offset: usize,
+    matcher: Matcher,
 }
 
 /// What a key did to the float.
@@ -139,11 +143,12 @@ impl Help {
 
     /// The bindings the filter matches, as drawn: a title over each group
     /// with any, keys in one column.
-    fn lines(&self, p: &Palette, sections: &[Section]) -> Vec<Line<'static>> {
+    fn lines(&mut self, p: &Palette, sections: &[Section]) -> Vec<Line<'static>> {
+        let pattern = Pattern::parse(&self.filter, CaseMatching::Smart, Normalization::Smart);
         let col = sections.iter().flat_map(|s| &s.keys).map(|(k, _)| str_width(k)).max().unwrap_or(0);
         let mut out = Vec::new();
         for s in sections {
-            let keys: Vec<_> = s.keys.iter().filter(|(k, d)| self.matches(s.title, k, d)).collect();
+            let keys: Vec<_> = s.keys.iter().filter(|(k, d)| self.matches(&pattern, s.title, k, d)).collect();
             if keys.is_empty() {
                 continue;
             }
@@ -164,9 +169,10 @@ impl Help {
         out
     }
 
-    fn matches(&self, title: &str, key: &str, does: &str) -> bool {
-        let q = self.filter.to_lowercase();
-        q.is_empty() || [title, key, does].iter().any(|s| s.to_lowercase().contains(&q))
+    /// Whether the filter fuzzily matches a binding's group, keys and
+    /// action, taken together so words can match across them.
+    fn matches(&mut self, pattern: &Pattern, title: &str, key: &str, does: &str) -> bool {
+        self.filter.is_empty() || score_fields(&mut self.matcher, pattern, &[title, key, does]).is_some()
     }
 }
 
@@ -194,6 +200,10 @@ mod tests {
         let text: Vec<String> = h.lines(&p, &sections).iter().map(|l| l.to_string()).collect();
         assert_eq!(text.len(), 2, "{text:?}");
         assert!(text[0].contains("Scrollback") && text[1].contains("copy"));
+        // It matches fuzzily, across the key and its action.
+        h.filter = "⌃x arcv".into();
+        let text: Vec<String> = h.lines(&p, &sections).iter().map(|l| l.to_string()).collect();
+        assert!(text.len() == 2 && text[1].contains("archive"), "{text:?}");
         // A group's name matches all of it.
         h.filter = "picker".into();
         assert_eq!(h.lines(&p, &sections).len(), 3);

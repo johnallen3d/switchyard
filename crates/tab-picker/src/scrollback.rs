@@ -16,6 +16,8 @@
 //! - Escape drops the selection, then the search, then leaves; `q`, ctrl-c
 //!   and ctrl-v again leave.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -274,23 +276,7 @@ pub fn mark(line: Line<'static>, ranges: &[(usize, usize)], style: Style) -> Lin
 
 /// Text for the clipboard, as an OSC 52 escape.
 pub fn osc52(text: &str) -> String {
-    format!("\x1b]52;c;{}\x07", base64(text.as_bytes()))
-}
-
-fn base64(bytes: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    format!("\x1b]52;c;{}\x07", STANDARD.encode(text))
 }
 
 #[cfg(test)]
@@ -393,9 +379,8 @@ mod tests {
     }
 
     #[test]
-    fn encodes_base64() {
-        assert_eq!(base64(b"hi"), "aGk=");
-        assert_eq!(base64(b"hey"), "aGV5");
-        assert_eq!(base64(b"h"), "aA==");
+    fn copies_by_osc52() {
+        assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x07");
+        assert_eq!(osc52("hey"), "\x1b]52;c;aGV5\x07");
     }
 }

@@ -21,6 +21,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+base64 = "0.23"
 switchyard-core = { path = "crates/core" }
 switchyard-ui = { path = "crates/ui" }
 switchyard-server = { path = "crates/server" }
