@@ -64,6 +64,13 @@ do
         end
         local pwd = server.block.call(terminal, "pwd", args)
         dir = ((pwd and pwd.pwd) or ""):gsub("^file://[^/]*", "")
+        -- A program that never reports a folder (an agent, say) leaves pwd
+        -- empty, so take its foreground process's working directory instead.
+        if dir == "" then
+          local proc = server.block.call(terminal, "process", args) or {}
+          local fg = proc.foreground or proc.child or {}
+          dir = fg.cwd or ""
+        end
         if home ~= "" and dir:sub(1, #home) == home then
           dir = "~" .. dir:sub(#home + 1)
         end
