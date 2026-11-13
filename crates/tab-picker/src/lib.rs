@@ -1448,7 +1448,10 @@ impl App {
         match sb.key(k, &lines, h) {
             scrollback::Outcome::Stay => sb.sync(lines.len(), h),
             scrollback::Outcome::Exit => self.leave_scrollback(),
-            scrollback::Outcome::Copy(text) => {
+            scrollback::Outcome::Copy(a, b) => {
+                let Some(text) = self.preview.as_ref().and_then(|pv| pv.source(a, b)) else {
+                    return self.leave_scrollback();
+                };
                 let n = text.lines().count();
                 self.note = Some((format!("copied {n} line{}", if n == 1 { "" } else { "s" }), false));
                 self.copied = Some(text);

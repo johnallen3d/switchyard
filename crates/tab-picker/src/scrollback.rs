@@ -12,7 +12,8 @@
 //! - `/` searches forward and `?` back, ignoring case unless the query has
 //!   a capital; `n` repeats it, `N` the other way.
 //! - `v`, `V` or Space starts a selection at the cursor (again: drops it);
-//!   `y` or Enter copies it (or the cursor's line) and leaves.
+//!   `y` or Enter copies the markdown it was drawn from (or the cursor
+//!   line's) and leaves.
 //! - Escape drops the selection, then the search, then leaves; `q`, ctrl-c
 //!   and ctrl-v again leave.
 
@@ -29,8 +30,9 @@ use crate::preview::Pane;
 pub enum Outcome {
     Stay,
     Exit,
-    /// Copy this text and leave.
-    Copy(String),
+    /// Copy these lines (an inclusive range) and leave; the picker copies
+    /// the markdown they were drawn from (see `Preview::source`).
+    Copy(usize, usize),
 }
 
 /// A search query being typed after `/` or `?`.
@@ -148,10 +150,7 @@ impl Scrollback {
             KeyCode::Char('y') | KeyCode::Enter => {
                 let (a, b) = self.selection().unwrap_or((self.cursor, self.cursor));
                 self.anchor = None;
-                return match lines.get(a..=b.min(last)) {
-                    Some(sel) if !sel.is_empty() => Outcome::Copy(copy_text(sel)),
-                    _ => Outcome::Exit,
-                };
+                return if lines.is_empty() { Outcome::Exit } else { Outcome::Copy(a.min(last), b.min(last)) };
             }
             KeyCode::Esc if self.anchor.is_some() => self.anchor = None,
             KeyCode::Esc if self.found.is_some() => self.found = None,
@@ -237,12 +236,6 @@ pub fn matches(text: &str, query: &str) -> Vec<(usize, usize)> {
 /// A drawn line as text.
 pub fn line_text(line: &Line) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
-/// Lines as copied: without the two-column gutter of turn marks.
-fn copy_text(lines: &[String]) -> String {
-    let body: Vec<String> = lines.iter().map(|l| l.chars().skip(2).collect::<String>().trim_end().to_string()).collect();
-    body.join("\n")
 }
 
 /// `line` with `style` patched over the chars in `ranges`.
@@ -356,13 +349,13 @@ mod tests {
     }
 
     #[test]
-    fn copies_the_selection_without_the_gutter() {
+    fn copies_the_selected_lines() {
         let l = lines();
         let mut s = Scrollback::new(pane(), l.len(), 4);
         s.cursor = 2;
         s.key(key('v'), &l, 4);
         s.key(key('j'), &l, 4);
-        assert_eq!(s.key(key('y'), &l, 4), Outcome::Copy("first answer\ngoes on".into()));
+        assert_eq!(s.key(key('y'), &l, 4), Outcome::Copy(2, 3));
         // Escape drops the selection before it leaves.
         s.key(key('v'), &l, 4);
         assert_eq!(s.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &l, 4), Outcome::Stay);
