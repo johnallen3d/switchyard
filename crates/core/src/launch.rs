@@ -95,6 +95,39 @@ pub fn launch(
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
+    launch_with(host, path, name, harness, Prompt::Ref(prompt_ref), work_item, resume)
+}
+
+/// `launch` with the prompt's text itself rather than a prompt file, for
+/// callers that have it in hand (switchyard-server's MCP tools).
+pub fn launch_text(
+    host: &str,
+    path: &str,
+    name: &str,
+    harness: &str,
+    prompt: &str,
+    work_item: Option<&str>,
+) -> Result<(String, String, String), String> {
+    launch_with(host, path, name, harness, Prompt::Text(prompt), work_item, None)
+}
+
+/// Where a launch's prompt comes from.
+enum Prompt<'a> {
+    /// A prompt file (see `prompts`), or none; the file is removed once the
+    /// tab holds it.
+    Ref(Option<&'a str>),
+    Text(&'a str),
+}
+
+fn launch_with(
+    host: &str,
+    path: &str,
+    name: &str,
+    harness: &str,
+    prompt: Prompt,
+    work_item: Option<&str>,
+    resume: Option<(&str, &str)>,
+) -> Result<(String, String, String), String> {
     let projects = catalog()?;
     let mut project = match projects.iter().find(|p| p.path == path) {
         Some(project) => project.clone(),
@@ -114,7 +147,10 @@ pub fn launch(
         return Err(format!("{}: {problem}", work_item.unwrap_or_default()));
     }
     // Fetch the prompt first: without it the agent would start on nothing.
-    let typed = prompt_ref.map(fetch_prompt).transpose()?.unwrap_or_default();
+    let (typed, prompt_ref) = match prompt {
+        Prompt::Ref(r) => (r.map(fetch_prompt).transpose()?.unwrap_or_default(), r),
+        Prompt::Text(text) => (text.to_string(), None),
+    };
     let (branch, slug) = branch_and_slug(name);
     let host = if host == AUTO {
         let (chosen, why) = choose_host(&project)?;

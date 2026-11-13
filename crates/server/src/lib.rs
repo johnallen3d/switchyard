@@ -17,11 +17,16 @@
 //! the path, protocol and client side) and fall back to the direct path
 //! when no server answers.
 //!
+//! It also serves agents on the tailnet an MCP endpoint for the task
+//! operations (see `mcp`), since only this host can spawn and nothing else
+//! reaches it. `[mcp]` in the config turns it off or moves its port.
+//!
 //! Modes: bare (or `serve`) runs the server in the foreground; `snapshot`
 //! prints the running server's snapshot as JSON; `subscribe` prints one
 //! line per change until interrupted.
 
 mod hostinfo;
+mod mcp;
 mod socket;
 mod state;
 mod tasks;
@@ -114,6 +119,10 @@ fn serve() -> Result<(), String> {
     let (wake, wakes) = mpsc::channel();
     let events = Events { closed: closed.clone(), hosts };
     let asks = socket::Asks { refresh: closed.clone(), folders: wake };
+    let mcp = switchyard_core::config::read().map(|c| c.mcp).unwrap_or_default();
+    if mcp.enabled {
+        mcp::start(mcp::Endpoint { shared: shared.clone(), refresh: closed.clone() }, mcp.port);
+    }
     {
         let shared = shared.clone();
         thread::spawn(move || tasks::run(shared, triggers));

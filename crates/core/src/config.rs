@@ -24,6 +24,27 @@ pub struct Config {
     pub projects: Vec<ProjectEntry>,
     /// Read-only quota caches, session roots and optional API-equivalent prices.
     pub usage: crate::usage::Settings,
+    /// switchyard-server's MCP endpoint for agents on the tailnet.
+    pub mcp: Mcp,
+}
+
+/// `[mcp]`: switchyard-server's MCP endpoint (see the server's `mcp`).
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct Mcp {
+    /// Serve it. On by default on the Mac, the only host that can spawn.
+    pub enabled: bool,
+    /// The TCP port, on loopback and the Tailscale address.
+    pub port: u16,
+}
+
+impl Default for Mcp {
+    fn default() -> Self {
+        Mcp {
+            enabled: cfg!(target_os = "macos"),
+            port: 7391,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -116,4 +116,30 @@ launchctl kickstart -k "gui/$(id -u)/org.nix-community.home.switchyard-server"
 - Logs: `~/Library/Logs/switchyard-server.log` on macOS;
   `journalctl --user -u switchyard-server` on Linux.
 
+### MCP endpoint
+
+Only the Mac can spawn tasks, and nothing else can reach it, so the server
+also gives agents on the tailnet an MCP endpoint (Streamable HTTP, plain
+JSON replies). It listens on loopback and the Mac's Tailscale address, port
+7391, and answers only loopback and tailnet peers. There is no token: the
+tailnet is the boundary. Requests from browsers (with an `Origin` header)
+are refused.
+
+| Tool           | Does                                                    |
+| -------------- | ------------------------------------------------------- |
+| `list_tasks`   | Open tasks with live agent status                       |
+| `spawn_task`   | Start a task: catalog project, name, prompt, harness    |
+| `read_task`    | Status and the last transcript entries                  |
+| `message_task` | Type text into the agent's tab (not while it's blocked) |
+| `stop_task`    | Archive (refused with uncommitted changes)              |
+
+Tasks are named `PROJECT/NAME`. To add it to Claude Code on another host:
+
+```bash
+claude mcp add --transport http switchyard \
+  http://johns-macbook-pro.taila14c2.ts.net:7391/mcp
+```
+
+`[mcp]` in the config sets `enabled` (default: on macOS only) and `port`.
+
 Development conventions and the source map are in [AGENTS.md](AGENTS.md).

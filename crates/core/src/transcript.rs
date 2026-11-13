@@ -89,6 +89,11 @@ pub fn fetch(target: &str, session: &str, window: &str) -> Value {
     fetch_inner(&host, session, window).unwrap_or_else(|e| json!({ "error": e }))
 }
 
+/// `fetch` for a tab on the host with Rex label `host`.
+pub fn fetch_on(host: &str, session: &str, window: &str) -> Value {
+    fetch_inner(host, session, window).unwrap_or_else(|e| json!({ "error": e }))
+}
+
 fn unhex(s: &str) -> String {
     let bytes: Vec<u8> = (0..s.len() / 2).filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect();
     String::from_utf8_lossy(&bytes).into_owned()
