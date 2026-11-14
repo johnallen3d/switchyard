@@ -177,6 +177,21 @@ pub fn find_cards<'a>(tasks: impl IntoIterator<Item = &'a Value>) -> HashMap<Str
     found
 }
 
+/// Drop the cached lookup of one card, after an action changed it (closed
+/// it), so the next refresh asks Fizzy again rather than showing its
+/// column and state from before for up to `CARD_TTL_SECS`.
+pub fn forget(account: &str, number: &str) {
+    let mut cache = load_cache();
+    if forget_in(&mut cache, account, number) {
+        save_cache(&cache);
+    }
+}
+
+/// `forget` on a cache; whether it dropped an entry.
+fn forget_in(cache: &mut Value, account: &str, number: &str) -> bool {
+    cache["cards"].as_object_mut().is_some_and(|cards| cards.remove(&format!("{account}\t{number}")).is_some())
+}
+
 /// Add each card link's live state from `cards` (not saved).
 pub fn add_live(task: &mut Value, cards: &HashMap<String, Card>) {
     let Some(links) = task["links"].as_array_mut() else { return };
@@ -203,6 +218,16 @@ fn all_closed(task: &Value, cache: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forgetting_a_card_drops_only_its_entry() {
+        let mut cache = json!({"cards": {"6284043\t1041": {"at": 1, "card": {"closed": false}},
+            "6284043\t1042": {"at": 1, "card": {"closed": false}}}});
+        assert!(forget_in(&mut cache, "6284043", "1041"));
+        assert!(!forget_in(&mut cache, "6284043", "1041"), "already gone");
+        assert!(cache["cards"].get("6284043\t1041").is_none());
+        assert!(cache["cards"].get("6284043\t1042").is_some());
+    }
 
     #[test]
     fn parse_card_reads_state_column_and_assignees() {

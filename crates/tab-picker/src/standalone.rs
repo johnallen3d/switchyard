@@ -328,13 +328,17 @@ pub fn open_url(url: &str) -> Result<(), String> {
 }
 
 /// Run a work item action from the ctrl-r float (see core's
-/// `item_actions`); after it, refresh the task's links: forget a changed
-/// PR's cached state and have switchyard-server check again.
+/// `item_actions`); after it, forget the item's cached state (a marked PR,
+/// a closed card) and have switchyard-server check again.
 pub fn item_action(action: Action, item: &Item, body: &str, profile: &str, url: &str) -> Result<String, String> {
     let r = logged(action.verb(), item_actions::run(action, item, body, profile));
     if r.is_ok() {
-        if action == Action::Ready {
-            switchyard_core::links::forget_pr(url);
+        match (action, item) {
+            (Action::Ready, _) => switchyard_core::links::forget_pr(url),
+            // A closed card's column and state are cached for a few minutes
+            // (see core's cards); the next refresh should ask Fizzy at once.
+            (Action::Close, Item::Card { account, number }) => switchyard_core::cards::forget(account, number),
+            _ => {}
         }
         server::refresh();
     }

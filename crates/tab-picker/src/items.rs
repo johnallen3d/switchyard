@@ -231,7 +231,7 @@ impl Items {
             .iter()
             .map(|e| {
                 let (short, state, acts, url) = row_text(e);
-                str_width(&short) + state.map_or(0, |(s, _)| str_width(s) + 1) + str_width(&acts) + str_width(&url) + 8
+                str_width(&short) + state.as_ref().map_or(0, |(s, _)| str_width(s) + 1) + str_width(&acts) + str_width(&url) + 8
             })
             .chain([str_width(&title) + 4, self.question().map_or(0, |q| str_width(&q) + 16), 56])
             .max()
