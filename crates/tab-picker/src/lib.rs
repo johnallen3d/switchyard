@@ -68,6 +68,10 @@
 //! empty prompt wakes a snoozed one. ctrl-b opens the highlighted task's
 //! work item; task rows show their links as badges grouped by kind. With
 //! several it opens a chooser over them (PRs, cards, then issues).
+//! ctrl-r opens the work items float on the highlighted task's links, even
+//! one: open each, comment on or close a card, mark a draft PR ready, each
+//! mutation behind its own key and a confirmation naming the item (see
+//! items.rs).
 //!
 //! Inbox keeps a reply box at its bottom, under the preview (or the
 //! transcript), expanded or not:
@@ -87,6 +91,7 @@
 //! other (cmd+w).
 
 mod help;
+mod items;
 mod model;
 mod preview;
 mod scrollback;
@@ -397,6 +402,8 @@ struct App {
     armed: Armed,
     /// The open ctrl-b link chooser; Enter opens its pick, Escape closes it.
     chooser: Option<Chooser>,
+    /// The open ctrl-r work items float (see items.rs).
+    items: Option<items::Items>,
     /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
     /// The reply box while Tab has moved into it; Enter sends, Escape
@@ -492,6 +499,7 @@ impl App {
             offset: 0,
             armed: Armed::No,
             chooser: None,
+            items: None,
             snooze: None,
             reply: None,
             idle: PromptBox::new(),
@@ -578,14 +586,14 @@ impl App {
     fn set_current(&mut self, current: &str) {
         let current = current.trim();
         if current.is_empty() {
-            if self.chooser.is_none() && self.snooze.is_none() && self.reply.is_none() {
+            if self.chooser.is_none() && self.items.is_none() && self.snooze.is_none() && self.reply.is_none() {
                 self.clear_search();
             }
             return;
         }
         let (s, w) = current.split_once('/').unwrap_or((current, ""));
         self.current = (s.to_string(), w.to_string());
-        if self.chooser.is_some() || self.snooze.is_some() || self.reply.is_some() {
+        if self.chooser.is_some() || self.items.is_some() || self.snooze.is_some() || self.reply.is_some() {
             return;
         }
         self.follow = true;
@@ -630,6 +638,10 @@ impl App {
         // The snooze prompt goes with its task.
         if self.snooze.as_ref().is_some_and(|z| self.selected_key().as_ref() != Some(&z.key)) {
             self.snooze = None;
+        }
+        // As does the work items float.
+        if self.items.as_ref().is_some_and(|i| self.selected_key().as_ref() != Some(&i.key)) {
+            self.items = None;
         }
         // The reply box stays on its agent, closing only when it's gone.
         if let Some(key) = self.reply.as_ref().map(|r| r.key.clone())
@@ -1226,6 +1238,7 @@ impl App {
     fn set_view(&mut self, view: View) {
         self.armed = Armed::No;
         self.chooser = None;
+        self.items = None;
         self.snooze = None;
         self.close_reply();
         self.view = view;
@@ -1278,6 +1291,51 @@ impl App {
         self.armed = Armed::No;
         self.chooser = Some(Chooser { links, selected: 0 });
         true
+    }
+
+    /// Open the work items float (ctrl-r) on the highlighted task's links,
+    /// even just one; the footer says why when there are none.
+    fn open_items(&mut self) {
+        if self.view == View::Usage {
+            return;
+        }
+        let Some(t) = self.selected_task() else {
+            self.note = Some(("highlight a task to act on its work items".into(), true));
+            return;
+        };
+        let (label, profile, links) = (t.label(), t.profile.clone(), chooser_links(&t.links));
+        let Some(key) = self.selected_key() else { return };
+        match items::Items::new(key, label.clone(), profile, links) {
+            Some(i) => {
+                self.armed = Armed::No;
+                self.moved();
+                self.items = Some(i);
+            }
+            None => self.note = Some((format!("{label} has no linked work items"), true)),
+        }
+    }
+
+    /// A key for the work items float: what it does to the float here, and
+    /// what it asks the picker to run (opening or an action), if anything.
+    fn items_key(&mut self, k: KeyEvent) -> Option<items::Outcome> {
+        let i = self.items.as_mut()?;
+        self.note = None;
+        match i.key(k) {
+            items::Outcome::Stay => None,
+            items::Outcome::Close => {
+                self.items = None;
+                None
+            }
+            items::Outcome::Help => {
+                self.help = Some(help::Help::default());
+                None
+            }
+            items::Outcome::Refuse(why) => {
+                self.note = Some((why, true));
+                None
+            }
+            run => Some(run),
+        }
     }
 
     /// Pin or unpin the highlighted open task here; whether it could.
@@ -1520,6 +1578,11 @@ impl App {
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
+        // standalone_key runs what the float asks for before it gets here.
+        if self.items.is_some() {
+            self.items_key(k);
+            return;
+        }
         if self.snooze.is_some() {
             return self.snooze_key(k);
         }
@@ -1580,6 +1643,7 @@ impl App {
         match k.code {
             // standalone_key acts on ctrl-b and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
+            KeyCode::Char('r') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::Inbox => self.expanded = !self.expanded,
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
@@ -1798,6 +1862,7 @@ impl App {
             self.draw_reply(f, card, card_h - prompt_box::CHROME_ROWS);
         }
         self.draw_chooser(f, main);
+        self.draw_items(f, main);
         self.draw_snooze(f, main);
     }
 
@@ -1924,6 +1989,7 @@ impl App {
             self.draw_list(f, body);
         }
         self.draw_chooser(f, body);
+        self.draw_items(f, body);
         self.draw_snooze(f, body);
         if let Some((card, rows)) = reply_card {
             self.draw_reply(f, card, rows);
@@ -2227,6 +2293,13 @@ impl App {
             }
             spans.push(Span::styled(format!("  {url}"), Style::new().fg(p.muted).bg(bg)));
             f.render_widget(Line::from(spans), row);
+        }
+    }
+
+    /// The ctrl-r work items float, when open (see items.rs).
+    fn draw_items(&self, f: &mut Frame, area: Rect) {
+        if let Some(i) = &self.items {
+            i.draw(f, area, &self.p);
         }
     }
 
@@ -2827,6 +2900,9 @@ impl App {
                 [link] => row.push(("⌃B", if link.kind == "pr" { "open PR" } else { "open link" })),
                 _ => row.push(("⌃B", "choose a link to open")),
             }
+            if !links.is_empty() {
+                row.push(("⌃R", "work items: open, comment, close, mark ready"));
+            }
             if self.can_pin() {
                 row.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
             }
@@ -2897,6 +2973,18 @@ impl App {
         sections.push(Section::new("Snooze prompt", &[("⏎", "snooze (empty: wake)"), ("⌃U", "clear"), ("esc", "cancel")]));
         sections.push(Section::new("Link chooser", &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")]));
         sections.push(Section::new(
+            "Work items",
+            &[
+                ("⏎ o", "open in the browser"),
+                ("c", "comment on a card (asks first)"),
+                ("x", "close a card (asks first)"),
+                ("r", "mark a draft PR ready (asks first)"),
+                ("⏎ y", "confirm; other keys go back"),
+                ("↑↓ j k", "move"),
+                ("esc ⌃R", "close"),
+            ],
+        ));
+        sections.push(Section::new(
             "This float",
             &[("/", "filter"), ("⌃U", "clear the filter"), ("j k ↑↓", "scroll"), ("esc q", "close")],
         ));
@@ -2909,6 +2997,8 @@ impl App {
             Some("Snooze prompt")
         } else if self.chooser.is_some() {
             Some("Link chooser")
+        } else if self.items.is_some() {
+            Some("Work items")
         } else {
             None
         };
@@ -3012,6 +3102,12 @@ impl App {
                 _ => "snooze",
             };
             let (spans, _) = draw::hints(p, &[("⏎", enter, p.subtle), ("F1", "keys", p.subtle)], area.width as usize);
+            f.render_widget(Line::from(spans), area);
+            return;
+        }
+        if let Some(i) = &self.items {
+            let hints: Vec<(&str, &str, Color)> = i.hints().into_iter().map(|(k, d)| (k, d, p.subtle)).collect();
+            let (spans, _) = draw::hints(p, &hints, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
         }
@@ -3151,6 +3247,38 @@ impl App {
         // The keys float and scrollback have every key while they last.
         if self.help.is_some() || self.scrollback.is_some() {
             return false;
+        }
+        // The work items float has every key while it lasts; this runs
+        // what it asks for (see items.rs).
+        if self.items.is_some() {
+            match self.items_key(k) {
+                Some(items::Outcome::Open(url)) => {
+                    self.note = Some(match standalone::open_url(&url) {
+                        Ok(()) => (format!("opened {url}"), false),
+                        Err(e) => (e, true),
+                    });
+                }
+                Some(items::Outcome::Run { action, item, body }) => {
+                    let profile = self.items.as_ref().map(|i| i.profile.clone()).unwrap_or_default();
+                    let url = self.items.as_ref().map(|i| i.entries[i.selected].link.url.clone()).unwrap_or_default();
+                    self.busy(term, format!("{} {}…", action.verb(), item.name()));
+                    match standalone::item_action(action, &item, &body, &profile, &url) {
+                        Ok(msg) => {
+                            self.items = None;
+                            self.note = Some((msg, false));
+                            self.refetch();
+                        }
+                        Err(e) => {
+                            if let Some(i) = &mut self.items {
+                                i.failed(action, body);
+                            }
+                            self.note = Some((e, true));
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return true;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
@@ -3938,6 +4066,48 @@ mod tests {
         terminal.draw(|f| app.draw_detail(f, f.area())).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(text.contains("  card 1041  Work item titles"), "{text}");
+    }
+
+    #[test]
+    fn ctrl_r_opens_work_items_even_for_one_link_and_asks_before_closing() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"one", "status":"idle", "links":[
+                    {"kind":"card","system":"fizzy","ref":"1042","url":"https://app.fizzy.do/6284043/cards/1042"}]},
+                {"session_id":"s", "window_id":"b", "name":"none", "status":"idle"}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
+        app.key(ctrl_r);
+        assert!(app.items.is_none());
+        assert_eq!(app.note.as_ref().map(|n| n.0.as_str()), Some("/none has no linked work items"));
+        app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
+        assert!(help_text(&app).contains("⌃R work items"));
+        app.key(ctrl_r);
+        assert!(app.items.is_some());
+        // Its letters don't search, and x asks first, naming the card.
+        app.key(plain(KeyCode::Char('x')));
+        assert!(app.query.is_empty());
+        assert_eq!(app.items.as_ref().and_then(|i| i.question()).as_deref(), Some("Close card 1042?"));
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("Work items") && text.contains("Close card 1042?") && text.contains("yes"), "{text}");
+        assert!(help_text(&app).starts_with("Work items"));
+        // Escape backs out of the confirmation, then closes the float.
+        app.key(plain(KeyCode::Esc));
+        assert!(app.items.as_ref().is_some_and(|i| i.question().is_none()));
+        app.key(plain(KeyCode::Esc));
+        assert!(app.items.is_none());
+        // ctrl-r again closes it too.
+        app.key(ctrl_r);
+        app.key(ctrl_r);
+        assert!(app.items.is_none());
     }
 
     /// The keys float's bindings as text: each group's title, then a line

@@ -613,6 +613,18 @@ pub fn set_agent_links(task: &mut Value, refs: &[String], t: &Tracker) -> bool {
     task["links"] != before
 }
 
+/// Drop the cached lookup of the PR at `url`, after an action changed it
+/// (marked it ready), so the next worktree check asks GitHub again.
+pub fn forget_pr(url: &str) {
+    let mut cache = load_cache();
+    let Some(prs) = cache["prs"].as_object_mut() else { return };
+    let before = prs.len();
+    prs.retain(|_, entry| entry["pr"]["url"].as_str() != Some(url));
+    if prs.len() != before {
+        save_cache(&cache);
+    }
+}
+
 /// Whether GitHub last reported one of the task's PRs as merged (from the
 /// lookup cache, however old: a merged PR stays merged).
 pub fn pr_merged(task: &Value) -> bool {

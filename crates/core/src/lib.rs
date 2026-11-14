@@ -12,6 +12,7 @@ pub mod config;
 pub mod folders;
 pub mod hosts;
 pub mod images;
+pub mod item_actions;
 pub mod launch;
 pub mod links;
 pub mod naming;

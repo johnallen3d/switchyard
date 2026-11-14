@@ -7,7 +7,8 @@
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
 //! for the preview (see preview.rs). It acts on Enter, ctrl-b (open the
-//! task's work item), ctrl-t (pin), the snooze prompt's Enter and the
+//! task's work item), ctrl-r's work item actions (see items.rs), ctrl-t
+//! (pin), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
 //! stays open, showing the outcome and the data after
 //! it; closing its tab quits it. The registry is on the Mac; elsewhere it
@@ -21,6 +22,7 @@ use std::time::Duration;
 
 use switchyard_core::rex::{local_label, log, select};
 use switchyard_core::tasks::{live_tasks, reconcile_tasks};
+use switchyard_core::item_actions::{self, Action, Item};
 use switchyard_core::{actions, server};
 use switchyard_ui::protocol::{DATA, unhex};
 
@@ -323,6 +325,20 @@ pub fn open_url(url: &str) -> Result<(), String> {
         return Err(format!("{opener} {url} failed ({status})"));
     }
     Ok(())
+}
+
+/// Run a work item action from the ctrl-r float (see core's
+/// `item_actions`); after it, refresh the task's links: forget a changed
+/// PR's cached state and have switchyard-server check again.
+pub fn item_action(action: Action, item: &Item, body: &str, profile: &str, url: &str) -> Result<String, String> {
+    let r = logged(action.verb(), item_actions::run(action, item, body, profile));
+    if r.is_ok() {
+        if action == Action::Ready {
+            switchyard_core::links::forget_pr(url);
+        }
+        server::refresh();
+    }
+    r
 }
 
 /// Log an action's outcome to the state log, as `switchyard task act` does.
