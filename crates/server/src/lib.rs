@@ -109,6 +109,9 @@ fn serve() -> Result<(), String> {
         // SAFETY: installs a handler that only makes async-signal-safe calls.
         unsafe { libc::signal(sig, stop as *const () as libc::sighandler_t) };
     }
+    // Core's background lookup failures go to this log (see core's
+    // `rex::diagnose`).
+    switchyard_core::rex::set_diagnostics(log);
     let path = server::socket_path().ok_or("no private runtime directory for the socket")?;
     let listener = socket::listen(&path)?;
     log(&format!("listening on {}", path.display()));

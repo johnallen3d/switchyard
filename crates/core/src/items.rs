@@ -14,6 +14,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::hosts::Project;
+use crate::item_actions::run_bounded;
 use crate::links::{FIZZY_BOARD_SH, Tracker, bounded_output, gh, tracker_or_fizzy};
 use crate::rex::{home, sh_quote};
 
@@ -52,7 +53,9 @@ pub fn list_open(project: &Project) -> Result<OpenItems, String> {
         if let Some(account) = &tracker.fizzy_account {
             cmd.env("FIZZY_PROFILE", account);
         }
-        let out = bounded_output(&mut cmd, None, LIST_TIMEOUT).ok_or("fizzy card list failed")?;
+        // Why it failed (not on PATH, its error, a timeout) goes to the
+        // picker's log.
+        let out = run_bounded(&mut cmd, "fizzy", LIST_TIMEOUT)?;
         return Ok(OpenItems { noun: "cards", items: parse(&out)? });
     }
     let repo = tracker.github.as_deref().ok_or("no GitHub repo or Fizzy board to list")?;

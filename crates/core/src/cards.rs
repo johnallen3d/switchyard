@@ -8,10 +8,17 @@
 //! profiles are named after their accounts), giving up after
 //! `FIZZY_TIMEOUT`. Answers, failures included, are cached in
 //! `$XDG_STATE_HOME/rex/switchyard-cards.json` for `CARD_TTL_SECS`, so a
-//! missing, logged-out or slow fizzy costs the inbox's refreshes nothing
-//! more and says nothing. Only `reconcile_tasks` looks cards up. A task
-//! whose linked cards are all closed counts as merged for archive-safety,
-//! as one with a merged PR does.
+//! missing, logged-out or slow fizzy isn't asked again on every refresh.
+//! Only `reconcile_tasks` looks cards up.
+//!
+//! A cache entry is `{at, seen, card, error}`: `at` when Fizzy was last
+//! asked, `seen` when it last answered with `card`, and `error` why the
+//! last ask failed. A failure keeps the last answer and its `seen` but is
+//! never presented as current: the card's state is unknown, so its badge
+//! shows just its number, and the failure's reason goes to the
+//! diagnostics log (see `rex::diagnose`). A task whose linked cards Fizzy
+//! last answered are all closed counts as merged for archive-safety, as one
+//! with a merged PR does; a card whose state is unknown blocks it.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -20,8 +27,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::links::bounded_output;
-use crate::rex::{home, now};
+use crate::item_actions::run_bounded;
+use crate::rex::{diagnose, home, now};
 
 /// How long a card lookup stays fresh.
 const CARD_TTL_SECS: u64 = 120;
@@ -116,64 +123,109 @@ fn card_from_json(v: &Value) -> Option<Card> {
     })
 }
 
-/// Ask Fizzy for a card; None when fizzy is missing, fails or is slow.
-fn show(account: &str, number: &str) -> Option<Card> {
+/// Ask Fizzy for a card; Err says why it couldn't: fizzy not on PATH, a
+/// non-zero exit (with its message), a timeout, or output with no card.
+fn show(account: &str, number: &str) -> Result<Card, String> {
     let mut cmd = Command::new("fizzy");
     cmd.args(["card", "show", number, "--json"]);
     if !account.is_empty() {
         cmd.env("FIZZY_PROFILE", account);
     }
-    parse_card(&bounded_output(&mut cmd, None, FIZZY_TIMEOUT)?)
+    let out = run_bounded(&mut cmd, "fizzy", FIZZY_TIMEOUT)?;
+    parse_card(&out).ok_or_else(|| "fizzy: no card in its output".to_string())
+}
+
+/// The card a cache entry holds as current: Fizzy's answer, unless the
+/// latest ask failed. (An entry without `seen` predates failures being
+/// told apart, so may hold a failure's leftover; it isn't trusted either.)
+fn current(entry: &Value) -> Option<Card> {
+    if entry["error"].is_string() || !entry["seen"].is_u64() {
+        return None;
+    }
+    card_from_json(&entry["card"])
 }
 
 /// The live state of every card linked to `tasks`, keyed by account and
-/// number; a card Fizzy couldn't tell about is absent. Fresh cache entries
-/// are used as they are; the rest are asked of Fizzy at once.
+/// number; a card whose state is unknown (never looked up, or the latest
+/// lookup failed) is absent. Fresh cache entries are used as they are; the
+/// rest are asked of Fizzy at once, and failures logged.
 pub fn find_cards<'a>(tasks: impl IntoIterator<Item = &'a Value>) -> HashMap<String, Card> {
     let stamp = now();
     let mut cache = load_cache();
+    let (mut found, due) = from_cache(&cache, tasks, stamp);
+    if due.is_empty() {
+        return found;
+    }
+    let asks: Vec<_> = due
+        .into_iter()
+        .map(|(k, account, number)| std::thread::spawn(move || (k, show(&account, &number))))
+        .collect();
+    let answers: Vec<(String, Result<Card, String>)> = asks.into_iter().filter_map(|h| h.join().ok()).collect();
+    for (k, answer) in &answers {
+        if let Err(why) = answer {
+            diagnose(&format!("card {} lookup failed: {why}", k.replace('\t', "/")));
+        }
+    }
+    found.extend(record(&mut cache, answers, stamp));
+    save_cache(&cache);
+    found
+}
+
+/// The cards `tasks` link that the cache answers fresh (at `stamp`), and
+/// the rest to ask Fizzy about: key, account and number, once each. A fresh
+/// failure is neither: it waits out `CARD_TTL_SECS` unknown.
+#[allow(clippy::type_complexity)]
+fn from_cache<'a>(
+    cache: &Value,
+    tasks: impl IntoIterator<Item = &'a Value>,
+    stamp: u64,
+) -> (HashMap<String, Card>, Vec<(String, String, String)>) {
     let mut found = HashMap::new();
-    let mut stale: Vec<(String, String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut due = Vec::new();
     for link in tasks.into_iter().filter_map(|t| t["links"].as_array()).flatten().filter(|l| is_card(l)) {
         let k = key(link);
-        if found.contains_key(&k) || stale.iter().any(|(s, _, _)| *s == k) {
+        if !seen.insert(k.clone()) {
             continue;
         }
         let entry = &cache["cards"][&k];
         if entry["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < CARD_TTL_SECS) {
-            if let Some(card) = card_from_json(&entry["card"]) {
+            if let Some(card) = current(entry) {
                 found.insert(k, card);
             }
         } else {
-            stale.push((k, account(link), link["ref"].as_str().unwrap_or("").to_string()));
+            due.push((k, account(link), link["ref"].as_str().unwrap_or("").to_string()));
         }
     }
-    if stale.is_empty() {
-        return found;
-    }
-    let asks: Vec<_> = stale
-        .into_iter()
-        .map(|(k, account, number)| std::thread::spawn(move || (k, show(&account, &number))))
-        .collect();
+    (found, due)
+}
+
+/// Record Fizzy's `answers` at `stamp` in the cache, dropping long-unasked
+/// entries; the cards it answered. A failure is remembered, so fizzy isn't
+/// asked again until it goes stale, keeping the card's last answer and when
+/// that was (`seen`) but marked with the failure, so it isn't shown or
+/// trusted as current.
+fn record(cache: &mut Value, answers: Vec<(String, Result<Card, String>)>, stamp: u64) -> HashMap<String, Card> {
     if !cache["cards"].is_object() {
         cache["cards"] = json!({});
     }
-    for handle in asks {
-        let Ok((k, card)) = handle.join() else { continue };
-        // A failure is remembered too, so fizzy isn't asked again until
-        // the entry goes stale, keeping the card's last answer (shown, and
-        // used for archive-safety) when it had one.
-        let previous = cache["cards"][&k]["card"].clone();
-        let saved = card.as_ref().map(card_to_json).unwrap_or(previous);
-        if let Some(card) = card_from_json(&saved) {
-            found.insert(k.clone(), card);
-        }
-        cache["cards"][&k] = json!({"at": stamp, "card": saved});
+    let mut found = HashMap::new();
+    for (k, answer) in answers {
+        cache["cards"][&k] = match answer {
+            Ok(card) => {
+                let entry = json!({"at": stamp, "seen": stamp, "card": card_to_json(&card)});
+                found.insert(k.clone(), card);
+                entry
+            }
+            Err(why) => {
+                let previous = &cache["cards"][&k];
+                json!({"at": stamp, "seen": previous["seen"], "card": previous["card"], "error": why})
+            }
+        };
     }
     if let Some(cards) = cache["cards"].as_object_mut() {
         cards.retain(|_, e| e["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < KEEP_SECS));
     }
-    save_cache(&cache);
     found
 }
 
@@ -203,16 +255,17 @@ pub fn add_live(task: &mut Value, cards: &HashMap<String, Card>) {
     }
 }
 
-/// Whether the task has cards and Fizzy last reported every one of them
-/// closed (from the lookup cache, however old). One open or unknown card
-/// means work remains.
+/// Whether the task has cards and Fizzy's latest answer for every one of
+/// them was closed (from the lookup cache, however old). One open card, or
+/// one whose state is unknown (never looked up, or its latest lookup
+/// failed), means work may remain.
 pub fn cards_closed(task: &Value) -> bool {
     all_closed(task, &load_cache())
 }
 
 fn all_closed(task: &Value, cache: &Value) -> bool {
     let cards: Vec<&Value> = task["links"].as_array().into_iter().flatten().filter(|l| is_card(l)).collect();
-    !cards.is_empty() && cards.iter().all(|l| cache["cards"][&key(l)]["card"]["closed"].as_bool() == Some(true))
+    !cards.is_empty() && cards.iter().all(|l| current(&cache["cards"][&key(l)]).is_some_and(|c| c.closed))
 }
 
 #[cfg(test)]
@@ -246,13 +299,17 @@ mod tests {
     fn archive_safety_needs_every_card_closed() {
         let card = |n: &str| json!({"kind":"card","system":"fizzy","ref":n,"url":format!("https://app.fizzy.do/9/cards/{n}")});
         let cache = json!({"cards": {
-            "9\t1": {"at": 0, "card": {"closed": true}},
-            "9\t2": {"at": 0, "card": {"closed": false}},
-            "9\t3": {"at": 0, "card": null},
+            "9\t1": {"at": 0, "seen": 0, "card": {"closed": true}},
+            "9\t2": {"at": 0, "seen": 0, "card": {"closed": false}},
+            "9\t3": {"at": 0, "card": null, "error": "fizzy: not found on PATH"},
+            "9\t5": {"at": 9, "seen": 0, "card": {"closed": true}, "error": "fizzy took longer than 10s; gave up"},
+            "9\t6": {"at": 0, "card": {"closed": true}},
         }});
         assert!(all_closed(&json!({"links": [card("1")]}), &cache));
         assert!(!all_closed(&json!({"links": [card("1"), card("2")]}), &cache), "one open card");
         assert!(!all_closed(&json!({"links": [card("1"), card("3")]}), &cache), "one unknown card");
+        assert!(!all_closed(&json!({"links": [card("5")]}), &cache), "closed only before a failed lookup");
+        assert!(!all_closed(&json!({"links": [card("6")]}), &cache), "an entry from before failures were marked");
         assert!(!all_closed(&json!({"links": [card("1"), card("4")]}), &cache), "one never looked up");
         assert!(!all_closed(&json!({"links": []}), &cache));
         assert!(!all_closed(&json!({}), &cache));
@@ -276,5 +333,69 @@ mod tests {
         assert_eq!((l[1]["state"].as_str(), l[1]["assignee"].as_str()), (Some("open"), Some("John")));
         assert!(l[2]["state"].is_null(), "another account's card 5");
         assert!(l[3]["state"].is_null());
+    }
+
+    fn task(n: &str) -> Value {
+        json!({"links": [{"kind":"card","system":"fizzy","ref":n,"url":format!("https://app.fizzy.do/9/cards/{n}")}]})
+    }
+
+    fn open_card() -> Card {
+        Card { closed: false, column: "Maybe?".into(), assignee: String::new() }
+    }
+
+    #[test]
+    fn a_failed_lookup_is_not_shown_or_trusted_as_current() {
+        let mut cache = json!({});
+        let found = record(&mut cache, vec![("9\t1156".into(), Ok(open_card()))], 100);
+        assert_eq!(found.get("9\t1156"), Some(&open_card()));
+
+        // Fizzy can't run: the old answer stays, with when it was seen, but
+        // nothing is found and the failure is kept with its reason.
+        let found = record(&mut cache, vec![("9\t1156".into(), Err("fizzy: not found on PATH".into()))], 300);
+        assert!(found.is_empty());
+        let entry = &cache["cards"]["9\t1156"];
+        assert_eq!((entry["at"].as_u64(), entry["seen"].as_u64()), (Some(300), Some(100)));
+        assert_eq!(entry["error"], "fizzy: not found on PATH");
+        assert_eq!(entry["card"]["column"], "Maybe?");
+
+        // While fresh, the failure isn't asked again, nor shown as open.
+        let (found, due) = from_cache(&cache, [&task("1156")], 300 + CARD_TTL_SECS - 1);
+        assert!(found.is_empty() && due.is_empty());
+        let mut t = task("1156");
+        add_live(&mut t, &found);
+        assert!(t["links"][0]["state"].is_null(), "just the number");
+        // Once stale it is asked again.
+        let (_, due) = from_cache(&cache, [&task("1156")], 300 + CARD_TTL_SECS);
+        assert_eq!(due, [("9\t1156".to_string(), "9".to_string(), "1156".to_string())]);
+
+        // A later answer clears the failure.
+        let closed = Card { closed: true, column: "Done".into(), assignee: String::new() };
+        record(&mut cache, vec![("9\t1156".into(), Ok(closed.clone()))], 500);
+        assert!(cache["cards"]["9\t1156"]["error"].is_null());
+        let (found, due) = from_cache(&cache, [&task("1156")], 501);
+        assert_eq!((found.get("9\t1156"), due.len()), (Some(&closed), 0));
+        assert!(all_closed(&task("1156"), &cache));
+    }
+
+    #[test]
+    fn a_closed_card_whose_lookup_then_fails_blocks_archive() {
+        let mut cache = json!({});
+        let closed = Card { closed: true, column: "Done".into(), assignee: String::new() };
+        record(&mut cache, vec![("9\t7".into(), Ok(closed))], 0);
+        assert!(all_closed(&task("7"), &cache));
+        record(&mut cache, vec![("9\t7".into(), Err("fizzy: unauthorized".into()))], CARD_TTL_SECS);
+        assert!(!all_closed(&task("7"), &cache), "unknown blocks");
+    }
+
+    #[test]
+    fn a_first_lookup_that_fails_leaves_the_card_unknown() {
+        let mut cache = json!({});
+        assert!(record(&mut cache, vec![("9\t8".into(), Err("fizzy took longer than 10s; gave up".into()))], 50).is_empty());
+        let entry = &cache["cards"]["9\t8"];
+        assert!(entry["seen"].is_null() && entry["card"].is_null());
+        assert!(!all_closed(&task("8"), &cache));
+        // Each card is asked about once however many tasks link it.
+        let (_, due) = from_cache(&json!({}), [&task("8"), &task("8")], 50);
+        assert_eq!(due.len(), 1);
     }
 }

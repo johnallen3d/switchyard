@@ -9,9 +9,10 @@
 //! The cache is `$XDG_STATE_HOME/rex/switchyard-titles.json`. A title stays
 //! fresh for `TITLE_TTL_SECS`, since titles rarely change, and an old one is
 //! still shown until it is looked up again. A lookup that fails (no CLI, no
-//! auth, a timeout, a ref no tracker places) leaves the title blank and is
-//! not retried for `MISS_TTL_SECS`, so a slow tracker doesn't hold up every
-//! check.
+//! auth, a timeout, a ref no tracker places) keeps the title it had (a
+//! title, unlike a card's state, says nothing about whether work remains),
+//! is logged (see `rex::diagnose`), and is not retried for `MISS_TTL_SECS`,
+//! so a slow tracker doesn't hold up every check.
 
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::autoname::link_title;
 use crate::links::Tracker;
-use crate::rex::{home, now};
+use crate::rex::{diagnose, home, now};
 
 /// How long a title stays fresh.
 const TITLE_TTL_SECS: u64 = 7 * 24 * 60 * 60;
@@ -86,7 +87,15 @@ fn stale(entry: &Value, stamp: u64) -> bool {
 /// at once, and save them. Failures are cached as blank.
 pub fn refresh(asks: Vec<Ask>) {
     let mut cache = load_cache();
-    if refresh_cache(&mut cache, asks, now(), |a| link_title(&a.profile, &a.link, &a.tracker)) {
+    let lookup = |a: &Ask| {
+        let title = link_title(&a.profile, &a.link, &a.tracker);
+        if title.is_none() {
+            let id = key(&a.link).unwrap_or_default().replace('\t', " ");
+            diagnose(&format!("title lookup failed for {id}"));
+        }
+        title
+    };
+    if refresh_cache(&mut cache, asks, now(), lookup) {
         save_cache(&cache);
     }
 }

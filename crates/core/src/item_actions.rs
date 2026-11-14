@@ -142,10 +142,13 @@ pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<Str
 
 /// Run `cmd` with stdin closed, giving up after `timeout`. Its stdout, or
 /// on failure the reason: a Fizzy JSON error's message, else the last line
-/// of stderr (or stdout).
-fn run_bounded(cmd: &mut Command, program: &str, timeout: Duration) -> Result<String, String> {
+/// of stderr (or stdout), or that the program isn't on PATH.
+pub(crate) fn run_bounded(cmd: &mut Command, program: &str, timeout: Duration) -> Result<String, String> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => format!("{program}: not found on PATH"),
+        _ => format!("{program}: {e}"),
+    })?;
     let read = |pipe: Option<Box<dyn Read + Send>>| {
         std::thread::spawn(move || {
             let mut s = String::new();
@@ -258,5 +261,7 @@ mod tests {
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 5"]);
         assert!(run_bounded(&mut slow, "fizzy", Duration::from_millis(200)).unwrap_err().contains("gave up"));
+        let mut missing = Command::new("switchyard-no-such-program");
+        assert_eq!(run_bounded(&mut missing, "fizzy", TIMEOUT).unwrap_err(), "fizzy: not found on PATH");
     }
 }

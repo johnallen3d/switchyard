@@ -118,6 +118,25 @@ pub fn log(line: &str) {
     }
 }
 
+/// Where `diagnose` sends its lines; unset, `log`'s state log.
+static DIAGNOSTICS: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+/// Send `diagnose`'s lines to `sink` instead of the state log: the server
+/// sends them to its own log. Only the first call counts.
+pub fn set_diagnostics(sink: fn(&str)) {
+    let _ = DIAGNOSTICS.set(sink);
+}
+
+/// Report a background failure (a tracker lookup that couldn't run, say),
+/// so a missing or broken CLI is diagnosable: to the server's log in the
+/// server, else to the state log (never to stderr, which a picker draws on).
+pub fn diagnose(line: &str) {
+    match DIAGNOSTICS.get() {
+        Some(sink) => sink(line),
+        None => log(line),
+    }
+}
+
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
