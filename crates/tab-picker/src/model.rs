@@ -442,6 +442,16 @@ pub fn in_folders(dir: &str, folders: &[PathBuf]) -> bool {
     }
 }
 
+/// Whether a remote tab's folder (home-relative, as the rows give it) is
+/// one of the raw `[inbox] exclude` entries or under one, compared as
+/// text: the config host can't resolve another host's paths.
+pub fn in_raw_folders(dir: &str, list: &[String]) -> bool {
+    list.iter()
+        .map(|f| f.trim_end_matches('/'))
+        .filter(|f| !f.is_empty())
+        .any(|f| dir.strip_prefix(f).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
+}
+
 /// `path` with `~` expanded to home, and symlinks followed when it exists,
 /// so a folder compares the same however the shell reached it.
 fn resolve_path(path: &str) -> PathBuf {
