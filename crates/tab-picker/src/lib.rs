@@ -69,7 +69,8 @@
 //! work item; task rows show their links as badges grouped by kind. With
 //! several it opens a chooser over them (PRs, cards, then issues).
 //! ctrl-r opens the work items float on the highlighted task's links, even
-//! one: open each, comment on or close a card, mark a draft PR ready, each
+//! one: open each, read its description and comments in place, comment
+//! on or close a card, mark a draft PR ready, each
 //! mutation behind its own key and a confirmation naming the item (see
 //! items.rs).
 //!
@@ -479,6 +480,8 @@ fn help_float_sections() -> Vec<help::Section> {
             "Work items",
             &[
                 ("⏎ o", "open in the browser"),
+                ("v", "read description and comments here"),
+                ("j k ␣ b g G", "scroll the reader; esc q back"),
                 ("c", "comment on a card (asks first)"),
                 ("x", "close a card (asks first)"),
                 ("r", "mark a draft PR ready (asks first)"),
@@ -3707,7 +3710,7 @@ impl App {
             _ => row.push(("⌃B", "choose a link to open")),
         }
         if !links.is_empty() {
-            row.push(("⌃R", "work items: open, comment, close, mark ready"));
+            row.push(("⌃R", "work items: open, read, comment, close, mark ready"));
         }
         if self.can_pin() {
             row.push((
@@ -4239,6 +4242,25 @@ impl App {
                     Ok(()) => (format!("opened {url}"), false),
                     Err(e) => (e, true),
                 });
+            }
+            Some(items::Outcome::Read) => {
+                let Some((link, profile)) = self
+                    .items
+                    .as_ref()
+                    .map(|i| (i.entries[i.selected].link.clone(), i.profile.clone()))
+                else {
+                    return;
+                };
+                self.busy(term, format!("Reading {}…", link.short()));
+                match standalone::item_thread(&link, &profile) {
+                    Ok(thread) => {
+                        self.note = None;
+                        if let Some(i) = &mut self.items {
+                            i.show(thread);
+                        }
+                    }
+                    Err(e) => self.note = Some((e, true)),
+                }
             }
             Some(items::Outcome::Run { action, item, body }) => {
                 let profile = self

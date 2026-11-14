@@ -3,11 +3,14 @@
 //! from ctrl-b's chooser, which only opens links, and opens even for a
 //! task with one link.
 //!
-//! On the highlighted item: Enter or `o` opens it in the browser; `c`
+//! On the highlighted item: Enter or `o` opens it in the browser; `v`
+//! reads its description and comments here, in a scrolling reader over
+//! the float (a card, issue or PR; see core's `item_view`); `c`
 //! types a one-line comment for a card; `x` closes a card; `r` marks a
 //! draft PR ready for review. Nothing mutates without its explicit key and
 //! then a confirmation naming the item (Enter or `y` runs it, anything
-//! else goes back). Escape, ctrl-c or ctrl-r again close the float.
+//! else goes back). Escape, ctrl-c or ctrl-r again close the float; in
+//! the reader, Escape or `q` goes back to the list.
 //!
 //! This holds the float's state and keys; `standalone_key` runs what they
 //! ask for (see `Outcome`) and shows the outcome in the footer.
@@ -17,8 +20,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::cell::Cell;
+
 use ratatui::widgets::{Block, Borders, Clear};
 use switchyard_core::item_actions::{Action, Item};
+use switchyard_core::item_view::{Comment, Thread};
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{delete_word, str_width};
 
@@ -53,6 +59,11 @@ pub enum Mode {
         action: Action,
         body: String,
     },
+    /// Reading the highlighted item's thread, scrolled `scroll` rows down.
+    Read {
+        thread: Box<Thread>,
+        scroll: usize,
+    },
 }
 
 pub struct Items {
@@ -64,6 +75,8 @@ pub struct Items {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub mode: Mode,
+    /// The reader's last drawn height and furthest scroll, for its keys.
+    page: Cell<(usize, usize)>,
 }
 
 /// What a key asks of the picker.
@@ -74,6 +87,8 @@ pub enum Outcome {
     Help,
     /// Open the URL in the browser here.
     Open(String),
+    /// Fetch the highlighted item's thread to read here (then `show`).
+    Read,
     /// Run the confirmed action on the item.
     Run {
         action: Action,
@@ -122,6 +137,7 @@ impl Items {
             entries,
             selected: 0,
             mode: Mode::List,
+            page: Cell::new((0, 0)),
         })
     }
 
@@ -158,6 +174,7 @@ impl Items {
                 self.mode = Mode::Comment(text);
                 Outcome::Stay
             }
+            Mode::Read { thread, scroll } => self.read_key(k, ctrl, thread, scroll),
             Mode::Confirm { action, body } => match k.code {
                 KeyCode::Enter | KeyCode::Char('y') if !ctrl => match self.entry().item.clone() {
                     Some(item) => Outcome::Run { action, item, body },
@@ -213,11 +230,79 @@ impl Items {
                 "" => Outcome::Refuse(format!("{} has no URL to open", self.entry().name())),
                 url => Outcome::Open(url.to_string()),
             },
+            KeyCode::Char('v') if !ctrl => self.read(),
             KeyCode::Char('c') => want(Action::Comment, self),
             KeyCode::Char('x') if !ctrl => want(Action::Close, self),
             KeyCode::Char('r') => want(Action::Ready, self),
             _ => Outcome::Stay,
         }
+    }
+
+    /// Ask to read the highlighted item, when it's one that can be read.
+    fn read(&self) -> Outcome {
+        let e = self.entry();
+        let readable = matches!(
+            (e.link.kind.as_str(), e.link.system.as_str()),
+            ("card", "fizzy") | ("issue" | "pr", "github")
+        );
+        if readable {
+            Outcome::Read
+        } else {
+            Outcome::Refuse(format!(
+                "{}: v reads Fizzy cards and GitHub issues and PRs",
+                e.name()
+            ))
+        }
+    }
+
+    /// Show a fetched thread for the highlighted item, from its top.
+    pub fn show(&mut self, thread: Thread) {
+        self.mode = Mode::Read {
+            thread: Box::new(thread),
+            scroll: 0,
+        };
+    }
+
+    /// A key in the reader: scroll, open, comment, or go back.
+    fn read_key(&mut self, k: KeyEvent, ctrl: bool, thread: Box<Thread>, scroll: usize) -> Outcome {
+        let (page, max) = self.page.get();
+        let half = (page / 2).max(1);
+        let page = page.saturating_sub(1).max(1);
+        let to = match k.code {
+            KeyCode::Esc | KeyCode::Char('q') => return Outcome::Stay,
+            KeyCode::Char('c' | 'r') if ctrl => return Outcome::Close,
+            KeyCode::Char('?') => {
+                self.mode = Mode::Read { thread, scroll };
+                return Outcome::Help;
+            }
+            KeyCode::Char('o') | KeyCode::Enter => {
+                self.mode = Mode::Read { thread, scroll };
+                return match self.entry().link.url.as_str() {
+                    "" => Outcome::Refuse(format!("{} has no URL to open", self.entry().name())),
+                    url => Outcome::Open(url.to_string()),
+                };
+            }
+            KeyCode::Char('c') if self.entry().actions().contains(&Action::Comment) => {
+                self.mode = Mode::Comment(String::new());
+                return Outcome::Stay;
+            }
+            KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
+            KeyCode::Char('p') if ctrl => scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => scroll + 1,
+            KeyCode::Char('n') if ctrl => scroll + 1,
+            KeyCode::Char('u') if ctrl => scroll.saturating_sub(half),
+            KeyCode::Char('d') if ctrl => scroll + half,
+            KeyCode::PageUp | KeyCode::Char('b') => scroll.saturating_sub(page),
+            KeyCode::PageDown | KeyCode::Char(' ') => scroll + page,
+            KeyCode::Home | KeyCode::Char('g') => 0,
+            KeyCode::End | KeyCode::Char('G') => max,
+            _ => scroll,
+        };
+        self.mode = Mode::Read {
+            thread,
+            scroll: to.min(max),
+        };
+        Outcome::Stay
     }
 
     fn step(&mut self, to: usize) -> Outcome {
@@ -239,13 +324,21 @@ impl Items {
     pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
         match &self.mode {
             Mode::List => {
-                let mut h = vec![("⏎", "open")];
+                let mut h = vec![("⏎", "open"), ("v", "read")];
                 h.extend(self.entry().actions().into_iter().map(action_key));
                 h.extend([("esc", "close"), ("?", "keys")]);
                 h
             }
             Mode::Comment(_) => vec![("⏎", "review"), ("esc", "back"), ("F1", "keys")],
             Mode::Confirm { .. } => vec![("⏎ y", "yes"), ("esc", "no")],
+            Mode::Read { .. } => {
+                let mut h = vec![("↑↓ j k", "scroll"), ("o", "open")];
+                if self.entry().actions().contains(&Action::Comment) {
+                    h.push(("c", "comment"));
+                }
+                h.extend([("esc", "back"), ("?", "keys")]);
+                h
+            }
         }
     }
 
@@ -266,6 +359,10 @@ impl Items {
     /// A small box over the list: one item a line with its state, the
     /// actions it takes and its URL, then a line for the mode.
     pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
+        if let Mode::Read { thread, scroll } = &self.mode {
+            self.draw_reader(f, area, p, thread, *scroll);
+            return;
+        }
         let row_text = |e: &Entry| {
             let acts: Vec<&str> = e.actions().into_iter().map(|a| action_key(a).0).collect();
             (
@@ -395,6 +492,7 @@ impl Items {
                 ),
                 Span::styled("▏", Style::new().fg(p.iris)),
             ]),
+            Mode::Read { .. } => Line::default(),
             Mode::Confirm { .. } => Line::from(vec![
                 Span::styled(
                     format!(" {} ", self.question().unwrap_or_default()),
@@ -407,6 +505,155 @@ impl Items {
             ]),
         }
     }
+    /// The reader: a large box over the picker with the item's title,
+    /// state and opening post, then each comment under a header naming
+    /// its author and time, wrapped to the box and scrolled.
+    fn draw_reader(&self, f: &mut Frame, area: Rect, p: &Palette, thread: &Thread, scroll: usize) {
+        let width = area.width.saturating_sub(4).min(100);
+        let height = area.height.saturating_sub(2);
+        let r = crate::centered(area, width, height);
+        f.render_widget(Clear, r);
+        let title = format!(" {} · {} ", self.entry().name(), self.label);
+        let block = Block::new()
+            .borders(Borders::ALL)
+            .border_style(Style::new().fg(p.iris))
+            .style(Style::new().bg(p.base))
+            .title(Span::styled(title, Style::new().fg(p.text)));
+        let inner = block.inner(r);
+        f.render_widget(block, r);
+        if inner.height < 2 || inner.width < 4 {
+            return;
+        }
+        // A column each side, and the bottom row for keys.
+        let text = Rect {
+            x: inner.x + 1,
+            width: inner.width - 2,
+            height: inner.height - 1,
+            ..inner
+        };
+        let lines = reader_lines(thread, text.width as usize, p);
+        let rows = text.height as usize;
+        let max = lines.len().saturating_sub(rows);
+        self.page.set((rows, max));
+        let scroll = scroll.min(max);
+        for (i, line) in lines.into_iter().skip(scroll).take(rows).enumerate() {
+            let row = Rect {
+                y: text.y + crate::cells(i),
+                height: 1,
+                ..text
+            };
+            f.render_widget(line, row);
+        }
+        let bottom = Rect {
+            y: inner.bottom() - 1,
+            height: 1,
+            ..inner
+        };
+        let key = |k: &str| {
+            Span::styled(
+                k.to_string(),
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+            )
+        };
+        let muted = |s: &str| Span::styled(s.to_string(), Style::new().fg(p.muted));
+        let mut spans = vec![Span::raw(" ")];
+        for (i, (k, d)) in self
+            .hints()
+            .into_iter()
+            .filter(|(k, _)| *k != "?")
+            .enumerate()
+        {
+            if i > 0 {
+                spans.push(muted(" · "));
+            }
+            spans.extend([key(k), muted(&format!(" {d}"))]);
+        }
+        if let Some(pct) = (scroll * 100).checked_div(max) {
+            spans.push(muted(&format!("   {pct}%")));
+        }
+        f.render_widget(Line::from(spans), bottom);
+    }
+}
+
+/// When a comment was made, as `2026-11-14 19:27` (UTC, as the trackers
+/// give it), or as given when it isn't ISO 8601.
+fn when(at: &str) -> String {
+    match at.get(..16) {
+        Some(day_time) if at.as_bytes().get(10) == Some(&b'T') => day_time.replacen('T', " ", 1),
+        _ => at.to_string(),
+    }
+}
+
+/// A thread as wrapped lines `width` columns wide.
+fn reader_lines(thread: &Thread, width: usize, p: &Palette) -> Vec<Line<'static>> {
+    let wrap = |line: Line<'static>| crate::preview::wrap_line(line, width);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let title = if thread.title.is_empty() {
+        "(untitled)".to_string()
+    } else {
+        thread.title.clone()
+    };
+    out.extend(wrap(Line::styled(
+        title,
+        Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+    )));
+    let mut meta: Vec<String> = Vec::new();
+    if !thread.state.is_empty() {
+        meta.push(thread.state.clone());
+    }
+    if !thread.post.author.is_empty() {
+        meta.push(format!("by {}", thread.post.author));
+    }
+    if !thread.post.at.is_empty() {
+        meta.push(when(&thread.post.at));
+    }
+    let n = thread.comments.len();
+    meta.push(match n {
+        1 => "1 comment".into(),
+        n => format!("{n} comments"),
+    });
+    out.extend(wrap(Line::styled(
+        meta.join(" · "),
+        Style::new().fg(p.muted),
+    )));
+    out.push(Line::default());
+    let body = |out: &mut Vec<Line<'static>>, c: &Comment, empty: &str| {
+        if c.body.is_empty() {
+            out.push(Line::styled(empty.to_string(), Style::new().fg(p.muted)));
+            return;
+        }
+        for l in c.body.lines() {
+            out.extend(wrap(Line::styled(
+                l.trim_end().to_string(),
+                Style::new().fg(p.text),
+            )));
+        }
+    };
+    body(&mut out, &thread.post, "(no description)");
+    for c in &thread.comments {
+        out.push(Line::default());
+        let who = if c.author.is_empty() {
+            "someone"
+        } else {
+            c.author.as_str()
+        };
+        let mut head = vec![
+            Span::styled("── ", Style::new().fg(p.muted)),
+            Span::styled(
+                who.to_string(),
+                Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        if !c.at.is_empty() {
+            head.push(Span::styled(
+                format!(" · {}", when(&c.at)),
+                Style::new().fg(p.muted),
+            ));
+        }
+        out.extend(wrap(Line::from(head)));
+        body(&mut out, c, "(empty)");
+    }
+    out
 }
 
 #[cfg(test)]
@@ -541,7 +788,7 @@ mod tests {
     fn close_card_confirms_naming_the_card() {
         let mut i = items();
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[1..3], [("c", "comment"), ("x", "close card")]);
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close card")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close card 1041?");
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
@@ -588,5 +835,87 @@ mod tests {
         press(&mut i, KeyCode::Esc);
         assert_eq!(i.mode, Mode::List);
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Close);
+    }
+
+    #[test]
+    fn v_reads_the_item_in_place_and_esc_goes_back() {
+        let mut i = items();
+        assert_eq!(i.hints()[..2], [("⏎", "open"), ("v", "read")]);
+        // The PR, then the card, can be read; the float fetches, then shows.
+        assert_eq!(press(&mut i, KeyCode::Char('v')), Outcome::Read);
+        press(&mut i, KeyCode::Down);
+        assert_eq!(press(&mut i, KeyCode::Char('v')), Outcome::Read);
+        i.show(Thread {
+            title: "t".into(),
+            ..Thread::default()
+        });
+        assert!(matches!(i.mode, Mode::Read { scroll: 0, .. }));
+        assert!(i.hints().contains(&("c", "comment")));
+        // Scrolling stops at what was last drawn as the end.
+        i.page.set((10, 3));
+        press(&mut i, KeyCode::Char('j'));
+        assert!(matches!(i.mode, Mode::Read { scroll: 1, .. }));
+        press(&mut i, KeyCode::Char(' '));
+        assert!(matches!(i.mode, Mode::Read { scroll: 3, .. }));
+        press(&mut i, KeyCode::Char('g'));
+        assert!(matches!(i.mode, Mode::Read { scroll: 0, .. }));
+        // o opens it and stays in the reader; c starts a comment.
+        assert_eq!(
+            press(&mut i, KeyCode::Char('o')),
+            Outcome::Open("https://app.fizzy.do/6284043/cards/1041".into())
+        );
+        assert!(matches!(i.mode, Mode::Read { .. }));
+        press(&mut i, KeyCode::Char('c'));
+        assert_eq!(i.mode, Mode::Comment(String::new()));
+        press(&mut i, KeyCode::Esc);
+        i.show(Thread::default());
+        // Esc goes back to the list, not out of the float.
+        assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
+        assert_eq!(i.mode, Mode::List);
+        let mut other = Items::new(
+            ("s".into(), "w".into()),
+            "t".into(),
+            "p".into(),
+            vec![link("commit", "github", "abc", "u", "")],
+        )
+        .unwrap();
+        assert!(
+            matches!(press(&mut other, KeyCode::Char('v')), Outcome::Refuse(w) if w.contains("v reads"))
+        );
+    }
+
+    #[test]
+    fn the_reader_lays_out_post_then_comments() {
+        let t = Thread {
+            title: "Fix it".into(),
+            state: "Doing".into(),
+            post: Comment {
+                author: "a".into(),
+                at: "2026-11-14T19:27:49.362Z".into(),
+                body: "line one\nline two".into(),
+            },
+            comments: vec![Comment {
+                author: "b".into(),
+                at: "2026-11-15T08:00:00Z".into(),
+                body: String::new(),
+            }],
+        };
+        let text: Vec<String> = reader_lines(&t, 80, &Palette::load())
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "Fix it",
+                "Doing · by a · 2026-11-14 19:27 · 1 comment",
+                "",
+                "line one",
+                "line two",
+                "",
+                "── b · 2026-11-15 08:00",
+                "(empty)",
+            ]
+        );
     }
 }

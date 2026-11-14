@@ -360,6 +360,25 @@ pub fn open_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetch a linked item's description and comments to read in place
+/// (see core's `item_view`), logging a failure.
+pub fn item_thread(
+    link: &crate::model::Link,
+    profile: &str,
+) -> Result<switchyard_core::item_view::Thread, String> {
+    let r = switchyard_core::item_view::fetch(
+        &link.kind,
+        &link.system,
+        &link.reference,
+        &link.url,
+        profile,
+    );
+    if let Err(e) = &r {
+        log(&format!("read failed: {e}"));
+    }
+    r
+}
+
 /// Run a work item action from the ctrl-r float (see core's
 /// `item_actions`); after it, forget the item's cached state (a marked PR,
 /// a closed card) and have switchyard-server check again.

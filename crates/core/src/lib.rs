@@ -13,6 +13,7 @@ pub mod folders;
 pub mod hosts;
 pub mod images;
 pub mod item_actions;
+pub mod item_view;
 pub mod items;
 pub mod launch;
 pub mod links;
