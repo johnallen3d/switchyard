@@ -17,8 +17,10 @@
 //! - Pi: the newest session for the directory, which follows /new.
 //!
 //! It reads only the end of the log and returns its last messages, tool
-//! calls and questions as `{harness, entries: [{kind, text}]}`, where kind
-//! is `user`, `assistant`, `tool` or `ask`; or `{error}`. `fetch` adds
+//! calls and questions as `{harness, entries: [{kind, text}], tokens}`,
+//! where kind is `user`, `assistant`, `tool` or `ask` and tokens is the
+//! context the agent's last turn used (absent when the log doesn't say);
+//! or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them.
 
 use std::fs::File;
@@ -166,10 +168,16 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
         return json!({ "error": format!("no {harness} session log for {dir}") });
     };
     match read(&path, harness) {
-        Ok(entries) => json!({
-            "harness": harness,
-            "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
-        }),
+        Ok((entries, tokens)) => {
+            let mut v = json!({
+                "harness": harness,
+                "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
+            });
+            if let Some(t) = tokens {
+                v["tokens"] = json!(t);
+            }
+            v
+        }
         Err(e) => json!({ "error": format!("{}: {e}", path.display()) }),
     }
 }
@@ -215,8 +223,8 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
-/// The last entries of a log, oldest first.
-fn read(path: &Path, harness: &str) -> std::io::Result<Vec<(&'static str, String)>> {
+/// The last entries of a log, oldest first, and the context its last turn used.
+fn read(path: &Path, harness: &str) -> std::io::Result<(Vec<(&'static str, String)>, Option<u64>)> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL);
@@ -226,7 +234,37 @@ fn read(path: &Path, harness: &str) -> std::io::Result<Vec<(&'static str, String
     let text = String::from_utf8_lossy(&bytes);
     // A cut mid-line: start at the next whole one.
     let text = if start > 0 { text.split_once('\n').map_or("", |(_, rest)| rest) } else { &text };
-    Ok(entries(text, harness))
+    Ok((entries(text, harness), tokens(text, harness)))
+}
+
+/// The context the last turn in a log used: its input, cached and written
+/// cache tokens and its output, as the agent's own context meter counts.
+/// None when no turn in the log reports usage.
+pub fn tokens(log: &str, harness: &str) -> Option<u64> {
+    log.lines().rev().find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        let n = |u: &Value, k: &str| u[k].as_u64().unwrap_or(0);
+        if harness == "pi" {
+            let m = &v["message"];
+            if v["type"] != "message" || m["role"] != "assistant" {
+                return None;
+            }
+            let u = m["usage"].as_object().map(|_| &m["usage"])?;
+            let sum = n(u, "input") + n(u, "output") + n(u, "cacheRead") + n(u, "cacheWrite");
+            (sum > 0).then_some(sum)
+        } else {
+            // Sidechains are subagents, with contexts of their own.
+            if v["type"] != "assistant" || v["isSidechain"] == true {
+                return None;
+            }
+            let u = v["message"]["usage"].as_object().map(|_| &v["message"]["usage"])?;
+            let sum = n(u, "input_tokens")
+                + n(u, "output_tokens")
+                + n(u, "cache_read_input_tokens")
+                + n(u, "cache_creation_input_tokens");
+            (sum > 0).then_some(sum)
+        }
+    })
 }
 
 /// A log's entries (JSON lines), oldest first, the last ENTRIES of them.
@@ -367,6 +405,25 @@ mod tests {
                 ("ask", "Which?\n  - A: first\n  - B".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn the_last_turn_gives_the_context_used() {
+        let claude = [
+            json!({"type":"assistant","message":{"usage":{"input_tokens":1,"output_tokens":1}}}),
+            json!({"type":"assistant","message":{"usage":{
+                "input_tokens":10,"output_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}}),
+            json!({"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":99}}}),
+            json!({"type":"user","message":{"content":"next"}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        assert_eq!(tokens(&claude, "claude"), Some(1215));
+        let pi = json!({"type":"message","message":{"role":"assistant","usage":{
+            "input":3,"output":4,"cacheRead":50,"cacheWrite":6,"totalTokens":63}}})
+        .to_string();
+        assert_eq!(tokens(&pi, "pi"), Some(63));
+        assert_eq!(tokens("{\"type\":\"user\"}", "claude"), None);
     }
 
     #[test]

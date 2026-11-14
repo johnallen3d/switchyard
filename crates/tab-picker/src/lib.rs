@@ -1808,6 +1808,14 @@ impl App {
         self.draw_transcript(f, body);
     }
 
+    /// The highlighted agent's context size, for the foot of the reply
+    /// box, once its transcript has come and says.
+    fn tokens_label(&self) -> Option<String> {
+        let want = self.preview_want()?;
+        let pv = self.preview.as_ref().filter(|pv| pv.pane == want)?;
+        pv.tokens.map(preview::tokens_label)
+    }
+
     /// The highlighted agent's transcript, scrolled to its end until John
     /// scrolls back.
     fn draw_transcript(&mut self, f: &mut Frame, screen: Rect) {
@@ -1900,6 +1908,7 @@ impl App {
                 })
             }
         };
+        let tokens = self.tokens_label();
         let (prompt, label, focused) = match (&mut self.reply, unfocused) {
             (Some(r), _) => {
                 r.prompt.set_placeholder(&format!("Message {}", r.label));
@@ -1926,6 +1935,9 @@ impl App {
         }
         if !prompt.saved_ok {
             right.push(Span::styled("not saved ", Style::new().fg(p.love).bg(fill)));
+        }
+        if let Some(t) = tokens {
+            right.push(Span::styled(format!("{t} "), Style::new().fg(p.muted).bg(fill)));
         }
         let left_w: usize = left.iter().map(|s| str_width(&s.content)).sum();
         let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();

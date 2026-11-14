@@ -55,6 +55,8 @@ pub struct Preview {
     /// Where the agent runs, when the transcript says (for the reply box's
     /// slash commands).
     pub agent: Option<Agent>,
+    /// The context the agent's last turn used, in tokens, when its log says.
+    pub tokens: Option<u64>,
     entries: Result<Vec<(String, String)>, String>,
     drawn: Option<(u16, Drawn)>,
 }
@@ -115,6 +117,7 @@ pub fn parse(body: &str) -> Option<Preview> {
         let f = |k: &str| a[k].as_str().map(String::from);
         Some(Agent { host: f("host")?, profile: f("profile")?, harness: f("harness")?, dir: f("dir")? })
     });
+    let tokens = v.as_ref().ok().and_then(|v| v["tokens"].as_u64());
     let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -127,7 +130,17 @@ pub fn parse(body: &str) -> Option<Preview> {
         },
         Err(_) => Err("unreadable transcript".to_string()),
     };
-    Some(Preview { pane, agent, entries, drawn: None })
+    Some(Preview { pane, agent, tokens, entries, drawn: None })
+}
+
+/// A token count as the preview's rule shows it: `850 tokens`, `12.3k
+/// tokens`, `1.2M tokens`.
+pub fn tokens_label(n: u64) -> String {
+    match n {
+        0..1_000 => format!("{n} tokens"),
+        1_000..1_000_000 => format!("{:.1}k tokens", n as f64 / 1e3),
+        _ => format!("{:.1}M tokens", n as f64 / 1e6),
+    }
 }
 
 /// The entries as lines `width` wide: John's messages after `›` on a
@@ -527,6 +540,15 @@ mod tests {
         let p = Palette::load();
         let lines: Vec<String> = pv.lines(14, &p).unwrap().iter().map(text).collect();
         assert_eq!(lines, ["› Fix it      ", "", "· Bash: Run t…", "· Read: /a/ve…", "", "● Done and", "  tested"]);
+    }
+
+    #[test]
+    fn token_counts_read_short() {
+        assert_eq!(tokens_label(850), "850 tokens");
+        assert_eq!(tokens_label(12_345), "12.3k tokens");
+        assert_eq!(tokens_label(1_234_567), "1.2M tokens");
+        let pv = parse("-/s/w\n{\"entries\":[],\"tokens\":4200}").unwrap();
+        assert_eq!(pv.tokens, Some(4200));
     }
 
     #[test]
