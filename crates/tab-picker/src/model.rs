@@ -44,13 +44,16 @@ impl State {
     }
 }
 
-/// Sort key for an agent status: what needs John first.
+/// Sort key for an agent status: what needs John first. A `scheduled`
+/// agent (its timer will resume it; see switchyard-server's `wakes`) needs
+/// him less than a working one and more than an idle one.
 pub fn urgency(state: &str) -> u8 {
     match state {
-        "blocked" => 5,
-        "error" => 4,
-        "done" => 3,
-        "working" => 2,
+        "blocked" => 6,
+        "error" => 5,
+        "done" => 4,
+        "working" => 3,
+        "scheduled" => 2,
         "idle" => 1,
         _ => 0,
     }
@@ -352,6 +355,9 @@ pub struct Task {
     pub pinned: bool,
     /// Snoozed in the inbox until then (Unix seconds); 0 for not snoozed.
     pub snoozed_until: u64,
+    /// When a `scheduled` agent resumes (Unix seconds): its timer, or the
+    /// background `sleep` it waits on; 0 when unknown or not scheduled.
+    pub wake_at: u64,
     /// The listed tab it runs in, if open and listed.
     pub tab: Option<usize>,
     /// The Rex window of the agent that spawned it (`parent_window`), or
@@ -453,6 +459,7 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             merged: s(t, "branch_merged"),
             pinned: t["pinned"].as_bool().unwrap_or(false),
             snoozed_until: t["snoozed_until"].as_u64().unwrap_or(0),
+            wake_at: t["wake_at"].as_u64().unwrap_or(0),
             tab: None,
             parent_window: s(t, "parent_window"),
         })

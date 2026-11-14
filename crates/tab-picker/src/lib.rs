@@ -168,8 +168,17 @@ pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
 /// no known status), the tabs with no agent (quick float only), then Snoozed.
-const SECTIONS: [&str; 9] = [
-    "pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed",
+const SECTIONS: [&str; 10] = [
+    "pinned",
+    "blocked",
+    "error",
+    "done",
+    "working",
+    "scheduled",
+    "idle",
+    "",
+    "tabs",
+    "snoozed",
 ];
 
 /// How long a pin or snooze made here holds over deliveries that don't
@@ -306,6 +315,8 @@ struct Flat<'a> {
     merged: &'a str,
     /// When a snoozed task wakes; 0 when not snoozed.
     wake: u64,
+    /// When a scheduled agent resumes; 0 when unknown (a background job).
+    alarm: u64,
 }
 
 type Key = (String, String);
@@ -913,6 +924,7 @@ impl App {
             "error" => "error",
             "done" => "done",
             "working" => "working",
+            "scheduled" => "scheduled",
             "idle" => "idle",
             _ => "",
         }
@@ -1065,6 +1077,9 @@ impl App {
         }
         let at = match f.state {
             "working" | "idle" => 0,
+            // The one to resume soonest first, unknown times last.
+            "scheduled" if f.alarm > 0 => f.alarm,
+            "scheduled" => u64::MAX,
             _ if f.since == 0 => u64::MAX,
             _ => f.since,
         };
@@ -1093,10 +1108,12 @@ impl App {
                         name: &t.name,
                         msg: &t.msg,
                         host: &t.host,
-                        state: if tab.state == State::Idle {
-                            &t.state
-                        } else {
-                            tab.state.name()
+                        // The tab's own status is newer, but an idle or
+                        // done agent with a timer pending is scheduled.
+                        state: match tab.state {
+                            State::Ready | State::Done if t.state == "scheduled" => &t.state,
+                            State::Idle => &t.state,
+                            s => s.name(),
                         },
                         ended: None,
                         left: false,
@@ -1110,6 +1127,7 @@ impl App {
                         } else {
                             0
                         },
+                        alarm: t.wake_at,
                     },
                     None => Flat {
                         project: &session.label,
@@ -1125,6 +1143,7 @@ impl App {
                         links: &[],
                         merged: "",
                         wake: 0,
+                        alarm: 0,
                     },
                 }
             }
@@ -1143,6 +1162,7 @@ impl App {
                 links: &[],
                 merged: "",
                 wake: 0,
+                alarm: 0,
             },
             Item::Task(k) => {
                 let t = &self.tasks[k];
@@ -1164,6 +1184,7 @@ impl App {
                     } else {
                         0
                     },
+                    alarm: t.wake_at,
                 }
             }
         }
@@ -2907,6 +2928,7 @@ impl App {
                 (count("error"), "failed", p.love),
                 (count("done"), "done", p.pine),
                 (count("working"), "working", p.foam),
+                (count("scheduled"), "scheduled", p.iris),
             ] {
                 if n > 0 {
                     right.push(Span::styled(
@@ -3026,6 +3048,7 @@ impl App {
             "error" => ("✗", "Failed", p.love),
             "done" => ("✓", "Done", p.pine),
             "working" => ("●", "Working", p.foam),
+            "scheduled" => ("◷", "Scheduled", p.iris),
             "idle" => ("·", "Idle", p.muted),
             "pinned" => (ICON_PIN, "Pinned", p.iris),
             "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
@@ -3203,11 +3226,9 @@ impl App {
             p.surface,
             bg,
         ));
-        // A snoozed task: how long until it wakes.
-        let when = match (t.wake, t.since) {
-            (wake, _) if wake > 0 => format!(" {}", age(wake.saturating_sub(self.now))),
-            (_, since) if since > 0 => format!(" {}", age(self.now.saturating_sub(since))),
-            _ => String::new(),
+        let when = match self.when(t) {
+            text if text.is_empty() => text,
+            text => format!(" {text}"),
         };
         right.push(Span::styled(
             format!("  {verb:>9}{when:>4} "),
@@ -3215,6 +3236,19 @@ impl App {
         ));
         let w = right.iter().map(|s| str_width(&s.content)).sum();
         (right, w)
+    }
+
+    /// A row's time: how long until a snoozed task wakes, or a scheduled
+    /// agent resumes (nothing once due, or when unknown), else how long its
+    /// status has held.
+    fn when(&self, t: &Flat) -> String {
+        match (t.wake, t.since) {
+            (wake, _) if wake > 0 => age(wake.saturating_sub(self.now)),
+            _ if t.state == "scheduled" && t.alarm > self.now => age(t.alarm - self.now),
+            _ if t.state == "scheduled" => String::new(),
+            (_, since) if since > 0 => age(self.now.saturating_sub(since)),
+            _ => String::new(),
+        }
     }
 
     /// A tab with no agent's right side: whether it is the current tab,
@@ -3270,6 +3304,9 @@ impl App {
             (Some("worktree removed"), _) => ("▢", p.muted, "removed"),
             (Some(_), _) => ("▢", p.muted, "ended"),
             (None, "working") => (SPINNER[tick % SPINNER.len()], p.foam, "working"),
+            (None, "scheduled") if t.alarm > self.now => ("◷", p.iris, "wakes in"),
+            (None, "scheduled") if t.alarm == 0 => ("◷", p.iris, "bg job"),
+            (None, "scheduled") => ("◷", p.iris, "waking"),
             (None, "blocked") => ("●", p.gold, "waiting"),
             (None, "done") => ("✓", p.pine, "done"),
             (None, "error") => ("✗", p.love, "failed"),
@@ -3396,11 +3433,12 @@ impl App {
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         let muted = Style::new().fg(p.muted).bg(bg);
         let width = r.width as usize;
-        // The first line: status, name, age.
-        let when = match (t.wake, t.since) {
-            (wake, _) if wake > 0 => format!("{} ", age(wake.saturating_sub(self.now))),
-            (_, since) if since > 0 => format!("{} ", age(self.now.saturating_sub(since))),
-            _ => String::new(),
+        // The first line: status, name, age; a scheduled agent's countdown
+        // says "in", which the wider rows' verb says.
+        let when = match self.when(&t) {
+            text if text.is_empty() => text,
+            text if t.state == "scheduled" && t.wake == 0 => format!("in {text} "),
+            text => format!("{text} "),
         };
         // A row an agent spawned hangs off its spawner's (see `nest`).
         let guide = self.tree.get(&item);
@@ -4657,6 +4695,58 @@ mod tests {
             ]
         );
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
+    }
+
+    #[test]
+    fn agents_with_a_timer_pending_are_scheduled_soonest_first() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.now = 1000;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\tlate\tidle\tlate\n",
+                "T\tsoon\tdone\tsoon\n",
+                "T\tawake\tworking\tawake\n",
+                "T\tplain\tidle\tplain\n",
+                "T\tjob\tidle\tjob\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"job", "name":"job", "status":"scheduled"},
+                {"session_id":"s", "window_id":"late", "name":"late", "status":"scheduled", "wake_at":1600},
+                {"session_id":"s", "window_id":"soon", "name":"soon", "status":"scheduled", "wake_at":1120},
+                // The tab has moved on since the server last looked.
+                {"session_id":"s", "window_id":"awake", "name":"awake", "status":"scheduled", "wake_at":1100}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("working"),
+                Item::Tab(2),
+                Item::Status("scheduled"),
+                Item::Tab(1),
+                Item::Tab(0),
+                Item::Tab(4),
+                Item::Status("idle"),
+                Item::Tab(3),
+            ]
+        );
+        assert_eq!(
+            app.status_of(&app.flat(Item::Tab(4)), Item::Tab(4), 0).2,
+            "bg job"
+        );
+        let soon = app.flat(Item::Tab(1));
+        assert_eq!(app.status_of(&soon, Item::Tab(1), 0).2, "wakes in");
+        let (right, _) = app.right_spans(&soon, Color::Reset, "wakes in", 120);
+        assert!(right.last().unwrap().content.contains("wakes in  2m"));
+        app.now = 2000;
+        assert_eq!(
+            app.status_of(&app.flat(Item::Tab(1)), Item::Tab(1), 0).2,
+            "waking"
+        );
     }
 
     fn spawned() -> App {

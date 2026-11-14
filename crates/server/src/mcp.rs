@@ -54,7 +54,7 @@ const READ_MAX: usize = 150;
 
 const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claude or pi) in a Rex tab, \
 working in a Git worktree of a catalog project on one of John's hosts. Tasks are named PROJECT/NAME. \
-list_tasks shows the open ones with live status (working, idle, blocked on a prompt, ...). \
+list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
 spawn_task starts one with a first prompt; read_task shows what its agent has been saying; \
 message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes).";
 
@@ -554,6 +554,7 @@ fn summary(task: &Value) -> Value {
         "status",
         "status_msg",
         "status_at",
+        "wake_at",
         "created_at",
         "links",
     ] {

@@ -51,6 +51,7 @@ pub fn run(shared: &Arc<Shared>, triggers: &Receiver<&'static str>) {
             crate::log(&format!("tasks ({why}): {e}"));
         }
         shared.update(|s| s.set_tasks(got, true, Instant::now()));
+        shared.check_wakes();
         if started.elapsed() > Duration::from_secs(5) {
             crate::log(&format!(
                 "tasks ({why}): checking took {:.1} s",

@@ -12,7 +12,8 @@
 //!   last read; null before the first), `error` (the last failure, cleared
 //!   by the next rows; old rows stay) and `watching` (a watcher is running).
 //! - `tasks`: the registry as `switchyard task list` prints it, with each open
-//!   task's live agent status from the rows. Null when unreadable.
+//!   task's live agent status from the rows, and `scheduled` for one with a
+//!   timer pending (see `wakes`). Null when unreadable.
 //! - `tasks_checked`: whether the tasks have been checked against their
 //!   hosts (worktrees, ended tabs) yet: true is the picker's `tasks` paste,
 //!   false its `live` one.
@@ -24,12 +25,14 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use serde_json::{Value, json};
 use switchyard_core::hosts::Metrics;
 use switchyard_core::tasks::{TabStatus, apply_live, parse_window_status};
+
+use crate::wakes::{self, Wake};
 
 /// A duration in whole milliseconds for a client, saturating (never reached).
 fn millis(d: std::time::Duration) -> u64 {
@@ -166,6 +169,8 @@ pub struct State {
     hosts: Vec<Host>,
     tasks: Tasks,
     pub info: HostInfo,
+    /// What each open task's log said of a timer, by window (see `wakes`).
+    waits: HashMap<String, Wake>,
     seq: u64,
     subscribers: Vec<Sender<String>>,
 }
@@ -266,6 +271,36 @@ impl State {
         first.into_iter().map(|h| h.name.clone()).collect()
     }
 
+    /// Every host's live status, by window.
+    fn live(&self) -> HashMap<String, TabStatus> {
+        let mut live = HashMap::new();
+        for host in &self.hosts {
+            live.extend(host.rows.live.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        live
+    }
+
+    /// The logs to read for timers (see `wakes::due`).
+    pub fn due_wakes(&mut self) -> Vec<wakes::Job> {
+        let live = self.live();
+        match &self.tasks.list {
+            Some(list) => wakes::due(&mut self.waits, list, &live),
+            None => Vec::new(),
+        }
+    }
+
+    /// What a tab's log said of a timer for its status at `at`; whether a
+    /// client would see a difference.
+    pub fn set_wake(&mut self, window: &str, at: u64, wake: Option<(u64, String)>) -> bool {
+        match self.waits.get_mut(window) {
+            Some(w) if w.at == at && w.wake != wake => {
+                w.wake = wake;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The snapshot as clients get it.
     pub fn snapshot(&self, now: Instant) -> Value {
         let age = |at: Option<Instant>| at.map(|at| millis(now.saturating_duration_since(at)));
@@ -284,11 +319,8 @@ impl State {
             .collect();
         let tasks = self.tasks.list.as_ref().map(|list| {
             let mut list = list.clone();
-            let mut live = HashMap::new();
-            for host in &self.hosts {
-                live.extend(host.rows.live.iter().map(|(k, v)| (k.clone(), v.clone())));
-            }
-            apply_live(&mut list, &live);
+            apply_live(&mut list, &self.live());
+            wakes::apply(&mut list, &self.waits);
             list
         });
         json!({
@@ -399,6 +431,13 @@ impl Shared {
         if f(&mut state) {
             state.publish(Instant::now());
         }
+    }
+
+    /// Read the logs of tabs that have settled for timers, in the
+    /// background (see `wakes`): after new rows or tasks.
+    pub fn check_wakes(self: &Arc<Self>) {
+        let jobs = self.lock().due_wakes();
+        wakes::start(self, jobs);
     }
 }
 

@@ -20,7 +20,9 @@
 //! calls and questions as `{harness, entries: [{kind, text}], tokens, model}`,
 //! where kind is `user`, `assistant`, `tool` or `ask` and tokens is the
 //! context the agent's last turn used and model the model it ran on (each
-//! absent when the log doesn't say); or `{error}`. `fetch` adds
+//! absent when the log doesn't say), and `wake: {at, reason}` when a Claude
+//! agent is waiting on a timer or background job to resume it, `at` 0 when
+//! its time isn't known (see `wake`); or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them.
 
 use std::fmt::Write as _;
@@ -32,7 +34,7 @@ use serde_json::{Value, json};
 
 use crate::rex::{host_bash, local_label, rex_json, sh_quote};
 use crate::sessions::session_dir;
-use crate::tasks::{in_window, load_tasks};
+use crate::tasks::{in_window, load_tasks, rfc3339_secs};
 
 /// How much of the end of a log to read.
 const TAIL: u64 = 2 * 1024 * 1024;
@@ -198,8 +200,8 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
     let Some(path) = find(profile, harness, dir, agent_session, pid) else {
         return json!({ "error": format!("no {harness} session log for {dir}") });
     };
-    match read(&path, harness) {
-        Ok((entries, tokens, model)) => {
+    match read(&path, harness, started(profile, harness, dir, pid)) {
+        Ok((entries, tokens, model, wake)) => {
             let mut v = json!({
                 "harness": harness,
                 "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
@@ -210,10 +212,30 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
             if let Some(m) = model {
                 v["model"] = json!(m);
             }
+            if let Some((at, reason)) = wake {
+                v["wake"] = json!({ "at": at, "reason": reason });
+            }
             v
         }
         Err(e) => json!({ "error": format!("{}: {e}", path.display()) }),
     }
+}
+
+/// When the running Claude agent `pid` started (Unix seconds), from its
+/// `CONFIG/sessions/PID.json`; 0 when unknown.
+fn started(profile: &str, harness: &str, dir: &str, pid: u64) -> u64 {
+    if harness == "pi" || pid == 0 {
+        return 0;
+    }
+    let sessions = session_dir(profile, harness, dir);
+    let Some(config) = sessions.parent().and_then(Path::parent) else {
+        return 0;
+    };
+    std::fs::read_to_string(config.join("sessions").join(format!("{pid}.json")))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| v["startedAt"].as_u64())
+        .map_or(0, |ms| ms / 1000)
 }
 
 fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Option<PathBuf> {
@@ -261,11 +283,16 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
-/// The last entries of a log, oldest first, the context its last turn used
-/// and the model it ran on.
-type Tail = (Vec<(&'static str, String)>, Option<u64>, Option<String>);
+/// The last entries of a log, oldest first, the context its last turn used,
+/// the model it ran on and what it waits on to resume (see `wake`).
+type Tail = (
+    Vec<(&'static str, String)>,
+    Option<u64>,
+    Option<String>,
+    Option<(u64, String)>,
+);
 
-fn read(path: &Path, harness: &str) -> std::io::Result<Tail> {
+fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL);
@@ -283,6 +310,7 @@ fn read(path: &Path, harness: &str) -> std::io::Result<Tail> {
         entries(text, harness),
         tokens(text, harness),
         model(text, harness),
+        wake(text, harness, since),
     ))
 }
 
@@ -343,6 +371,184 @@ pub fn tokens(log: &str, harness: &str) -> Option<u64> {
             (sum > 0).then_some(sum)
         }
     })
+}
+
+/// The tool a Claude agent calls to resume itself later (`/loop`).
+const WAKEUP_TOOL: &str = "ScheduleWakeup";
+
+/// What a Claude agent that has ended its turn is waiting on to resume it:
+/// when that happens if known (Unix seconds, 0 when not) and why.
+///
+/// - A timer: its last `ScheduleWakeup` call, when nothing has prompted it
+///   since. The call's result says when Claude actually scheduled it
+///   ("Next wakeup scheduled for 14:15:00 (in 68s)"), which may be later
+///   than asked; failing that, the call's time plus its delay. A prompt
+///   (John's, or the timer's own when it fires) means it has gone off.
+/// - A background job (a Bash command or an agent run with
+///   `run_in_background`) with no `<task-notification>` for it yet: Claude
+///   resumes the agent when one arrives. Its time is known when the command
+///   is a `sleep`, the usual way to wait a while. Many at once give the one
+///   due first, else the first started.
+///
+/// Calls before `since` (the agent process's start; 0 when unknown) are
+/// ignored: a resumed session's old timers and jobs died with its process.
+/// None for Pi, which has neither.
+pub fn wake(log: &str, harness: &str, since: u64) -> Option<(u64, String)> {
+    if harness == "pi" {
+        return None;
+    }
+    let mut pending = Pending::default();
+    for line in log.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if v["isSidechain"] == true || v["isMeta"] == true {
+            continue;
+        }
+        let at = v["timestamp"].as_str().and_then(rfc3339_secs).unwrap_or(0);
+        let content = &v["message"]["content"];
+        match v["type"].as_str() {
+            // A notification is queued as soon as its job ends.
+            Some("queue-operation") => pending.notified(v["content"].as_str().unwrap_or("")),
+            Some("assistant") if at >= since => {
+                for call in content
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|p| p["type"] == "tool_use")
+                {
+                    pending.call(call, at);
+                }
+            }
+            Some("user") => match content {
+                Value::String(s) => pending.text(s),
+                Value::Array(parts) => parts.iter().for_each(|part| pending.part(part, at)),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    pending.next()
+}
+
+/// What `wake` has seen pending so far, reading a log forward.
+#[derive(Default)]
+struct Pending {
+    /// The timer's call id, time, input and scheduled time (from its result).
+    timer: Option<(String, u64, Value, Option<u64>)>,
+    /// Background jobs' call ids, when they're due (0 when unknown) and why.
+    jobs: Vec<(String, u64, String)>,
+}
+
+impl Pending {
+    /// A tool call at `at`: a timer, a background job, or neither.
+    fn call(&mut self, call: &Value, at: u64) {
+        let id = call["id"].as_str().unwrap_or("").to_string();
+        let input = &call["input"];
+        if call["name"] == WAKEUP_TOOL {
+            self.timer = Some((id, at, input.clone(), None));
+        } else if input["run_in_background"] == true {
+            let command = input["command"].as_str().unwrap_or("");
+            let when = sleep_secs(command).map_or(0, |s| at + s);
+            let reason = input["description"]
+                .as_str()
+                .or_else(|| command.lines().next())
+                .unwrap_or("");
+            self.jobs.push((id, when, reason.to_string()));
+        }
+    }
+
+    /// A part of a user message at `at`: a tool's result, else text.
+    fn part(&mut self, part: &Value, at: u64) {
+        if part["type"] != "tool_result" {
+            return self.text(part["text"].as_str().unwrap_or(""));
+        }
+        let id = part["tool_use_id"].as_str().unwrap_or("");
+        if part["is_error"] == true {
+            self.jobs.retain(|(j, _, _)| j != id);
+            self.timer.take_if(|t| t.0 == id);
+            return;
+        }
+        if let Some(t) = self.timer.as_mut().filter(|t| t.0 == id) {
+            let text: String = match &part["content"] {
+                Value::String(s) => s.clone(),
+                Value::Array(a) => a.iter().filter_map(|p| p["text"].as_str()).collect(),
+                _ => String::new(),
+            };
+            t.3 = seconds_in(&text).map(|s| at + s);
+        }
+    }
+
+    /// User text: a job's notification, else a prompt, which sets off the
+    /// timer (John's, or the timer's own).
+    fn text(&mut self, text: &str) {
+        if text.contains("<task-notification>") {
+            self.notified(text);
+        } else {
+            self.timer = None;
+        }
+    }
+
+    /// The jobs a notification names have ended.
+    fn notified(&mut self, text: &str) {
+        for id in text
+            .split("<tool-use-id>")
+            .skip(1)
+            .filter_map(|s| s.split_once("</tool-use-id>"))
+        {
+            self.jobs.retain(|(j, _, _)| j != id.0);
+        }
+    }
+
+    /// The timer if one is pending, else the job due first, else the first.
+    fn next(self) -> Option<(u64, String)> {
+        if let Some((_, at, input, scheduled)) = self.timer {
+            let asked = input["delaySeconds"]
+                .as_u64()
+                .filter(|_| at > 0)
+                .map(|d| at + d);
+            if let Some(when) = scheduled.or(asked) {
+                return Some((when, input["reason"].as_str().unwrap_or("").to_string()));
+            }
+        }
+        let jobs = &self.jobs;
+        let first = jobs
+            .iter()
+            .filter(|j| j.1 > 0)
+            .min_by_key(|j| j.1)
+            .or(jobs.first())?;
+        let reason = match jobs.len() {
+            1 => first.2.clone(),
+            n => format!("{} (+{} more)", first.2, n - 1),
+        };
+        Some((first.1, reason))
+    }
+}
+
+/// N from the "(in Ns)" of a `ScheduleWakeup` result.
+fn seconds_in(text: &str) -> Option<u64> {
+    let rest = &text[text.find("(in ")? + 4..];
+    let digits = &rest[..rest.find(|c: char| !c.is_ascii_digit())?];
+    rest[digits.len()..]
+        .starts_with("s)")
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// The seconds a command that waits with `sleep N` (N in seconds, or with
+/// an s, m or h suffix) sleeps first; None for any other command.
+fn sleep_secs(command: &str) -> Option<u64> {
+    let mut words = command.split(|c: char| c.is_whitespace() || c == ';' || c == '&' || c == '|');
+    words.find(|w| *w == "sleep")?;
+    let n = words.find(|w| !w.is_empty())?;
+    let (digits, unit) = n.split_at(n.find(|c: char| !c.is_ascii_digit()).unwrap_or(n.len()));
+    let n: u64 = digits.parse().ok()?;
+    match unit {
+        "" | "s" => Some(n),
+        "m" => Some(n * 60),
+        "h" => Some(n * 3600),
+        _ => None,
+    }
 }
 
 /// A log's entries (JSON lines), oldest first, the last ENTRIES of them.
@@ -546,6 +752,131 @@ mod tests {
         .join("\n");
         assert_eq!(model(&pi, "pi").as_deref(), Some("claude-opus-5-5"));
         assert_eq!(model("{\"type\":\"user\"}", "claude"), None);
+    }
+
+    #[test]
+    fn a_wakeup_with_no_prompt_since_is_pending() {
+        let call = |id: &str, ts: &str| {
+            json!({"type":"assistant","timestamp":ts,"message":{"content":[{"type":"tool_use","id":id,
+                "name":"ScheduleWakeup","input":{"delaySeconds":60,"reason":"CI is running"}}]}})
+        };
+        let result = |id: &str, ts: &str, text: &str| {
+            json!({"type":"user","timestamp":ts,"message":{"content":[
+                {"type":"tool_result","tool_use_id":id,"content":text}]}})
+        };
+        let text = json!({"type":"assistant","timestamp":"2026-11-14T20:00:05Z","message":{"content":[
+            {"type":"text","text":"I'll check back."}]}});
+        let log = |lines: &[Value]| {
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let at = rfc3339_secs("2026-11-14T20:00:00Z").unwrap();
+        // The result's time wins over the delay asked for.
+        let scheduled = log(&[
+            call("a", "2026-11-14T20:00:00Z"),
+            result(
+                "a",
+                "2026-11-14T20:00:01Z",
+                "Next wakeup scheduled for 20:01:09 (in 68s). Nothing more to do",
+            ),
+            text.clone(),
+        ]);
+        assert_eq!(
+            wake(&scheduled, "claude", 0),
+            Some((at + 1 + 68, "CI is running".into()))
+        );
+        // No result yet: the delay asked for.
+        assert_eq!(
+            wake(&log(&[call("a", "2026-11-14T20:00:00Z")]), "claude", 0),
+            Some((at + 60, "CI is running".into()))
+        );
+        // A prompt since (the timer's own, say) leaves nothing pending.
+        let prompted = log(&[
+            call("a", "2026-11-14T20:00:00Z"),
+            result("a", "2026-11-14T20:00:01Z", "(in 68s)"),
+            json!({"type":"user","timestamp":"2026-11-14T20:01:09Z","message":{"content":"check CI"}}),
+            text.clone(),
+        ]);
+        assert_eq!(wake(&prompted, "claude", 0), None);
+        // A failed call set nothing.
+        let failed = log(&[
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"a",
+            "is_error":true,"content":"no"}]}}),
+        ]);
+        assert_eq!(
+            wake(
+                &(log(&[call("a", "2026-11-14T20:00:00Z")]) + "\n" + &failed),
+                "claude",
+                0
+            ),
+            None
+        );
+        assert_eq!(wake(&log(std::slice::from_ref(&text)), "claude", 0), None);
+        assert_eq!(wake(&scheduled, "pi", 0), None);
+        // A timer set before this agent process started died with the last.
+        assert_eq!(wake(&scheduled, "claude", at + 1), None);
+    }
+
+    #[test]
+    fn a_background_job_with_no_notification_yet_is_pending() {
+        let job = |id: &str, ts: &str, command: &str, description: &str| {
+            json!({"type":"assistant","timestamp":ts,"message":{"content":[{"type":"tool_use","id":id,"name":"Bash",
+                "input":{"command":command,"description":description,"run_in_background":true}}]}})
+        };
+        let notified = |id: &str| {
+            json!({"type":"user","message":{"content":format!(
+                "<task-notification>\n<task-id>x</task-id>\n<tool-use-id>{id}</tool-use-id>\n<status>completed</status>")}})
+        };
+        let log = |lines: &[Value]| {
+            lines
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let at = rfc3339_secs("2026-11-14T20:00:00Z").unwrap();
+        let wait = job(
+            "a",
+            "2026-11-14T20:00:00Z",
+            "sleep 300 && gh pr checks",
+            "Wait five minutes",
+        );
+        let build = job("b", "2026-11-14T20:00:10Z", "cargo build", "Build");
+        // A sleep says when; the one due first wins.
+        assert_eq!(
+            wake(&log(&[build.clone(), wait.clone()]), "claude", 0),
+            Some((at + 300, "Wait five minutes (+1 more)".into()))
+        );
+        // Any other job has no time.
+        assert_eq!(
+            wake(
+                &log(&[wait.clone(), build.clone(), notified("a")]),
+                "claude",
+                0
+            ),
+            Some((0, "Build".into()))
+        );
+        // A notification, queued or delivered, ends it; a prompt from John doesn't.
+        let queued = json!({"type":"queue-operation","operation":"enqueue","content":"<tool-use-id>b</tool-use-id>"});
+        let prompt = json!({"type":"user","message":{"content":"how's it going?"}});
+        assert_eq!(
+            wake(
+                &log(&[wait.clone(), build.clone(), queued, prompt, notified("a")]),
+                "claude",
+                0
+            ),
+            None
+        );
+        assert_eq!(
+            wake(&log(std::slice::from_ref(&build)), "claude", at + 60),
+            None
+        );
+        assert_eq!(sleep_secs("sleep 5m"), Some(300));
+        assert_eq!(sleep_secs("cd x; sleep 2h"), Some(7200));
+        assert_eq!(sleep_secs("echo sleepy 3"), None);
     }
 
     #[test]

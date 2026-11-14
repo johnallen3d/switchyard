@@ -287,7 +287,7 @@ fn watch_child(child: &mut Child, heard: &Mutex<Instant>, stop: &AtomicBool) -> 
 
 fn read_lines(
     stdout: impl Read,
-    shared: &Shared,
+    shared: &Arc<Shared>,
     host: &str,
     events: &Events,
     heard: &Mutex<Instant>,
@@ -300,6 +300,7 @@ fn read_lines(
         match parse_line(&line) {
             Line::Rows(rows) => {
                 shared.update(|s| s.set_rows(host, split_rows(&rows), Instant::now()));
+                shared.check_wakes();
             }
             Line::Error(e) => shared.update(|s| s.set_error(host, e)),
             Line::Closed(_) => {

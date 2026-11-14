@@ -9,7 +9,8 @@
 //!   of `rex.servers()`) runs `host_rows.lua` whenever its events say the
 //!   rows changed, and on a slow timer (see `watch`).
 //! - Tasks: the registry, with live agent status from the rows, checked
-//!   against the hosts in the background (see `tasks`).
+//!   against the hosts in the background (see `tasks`), and the timers
+//!   agents have set from their logs (see `wakes`).
 //! - Host info for the spawn picker and `auto`: zoxide folders and load,
 //!   kept over SSH in the background (see `hostinfo`).
 //!
@@ -30,6 +31,7 @@ mod mcp;
 mod socket;
 mod state;
 mod tasks;
+mod wakes;
 mod watch;
 
 use std::collections::HashMap;
