@@ -16,6 +16,9 @@
   checkout path and commands to try the change before committing or pushing.
   Hand off changed paths, implementation attribution, checks actually run, and
   any local validation gaps.
+- After implementing a feature that is visible in the UI, build it and open
+  the new build in a new Rex tab for John to review before handing off. Use a
+  disposable task or state for anything the build acts on.
 
 ## Completion is not deployment
 
