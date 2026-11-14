@@ -17,10 +17,10 @@
 //! - Pi: the newest session for the directory, which follows /new.
 //!
 //! It reads only the end of the log and returns its last messages, tool
-//! calls and questions as `{harness, entries: [{kind, text}], tokens}`,
+//! calls and questions as `{harness, entries: [{kind, text}], tokens, model}`,
 //! where kind is `user`, `assistant`, `tool` or `ask` and tokens is the
-//! context the agent's last turn used (absent when the log doesn't say);
-//! or `{error}`. `fetch` adds
+//! context the agent's last turn used and model the model it ran on (each
+//! absent when the log doesn't say); or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them.
 
 use std::fs::File;
@@ -168,13 +168,16 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
         return json!({ "error": format!("no {harness} session log for {dir}") });
     };
     match read(&path, harness) {
-        Ok((entries, tokens)) => {
+        Ok((entries, tokens, model)) => {
             let mut v = json!({
                 "harness": harness,
                 "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
             });
             if let Some(t) = tokens {
                 v["tokens"] = json!(t);
+            }
+            if let Some(m) = model {
+                v["model"] = json!(m);
             }
             v
         }
@@ -223,8 +226,11 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
-/// The last entries of a log, oldest first, and the context its last turn used.
-fn read(path: &Path, harness: &str) -> std::io::Result<(Vec<(&'static str, String)>, Option<u64>)> {
+/// The last entries of a log, oldest first, the context its last turn used
+/// and the model it ran on.
+type Tail = (Vec<(&'static str, String)>, Option<u64>, Option<String>);
+
+fn read(path: &Path, harness: &str) -> std::io::Result<Tail> {
     let mut file = File::open(path)?;
     let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL);
@@ -234,7 +240,30 @@ fn read(path: &Path, harness: &str) -> std::io::Result<(Vec<(&'static str, Strin
     let text = String::from_utf8_lossy(&bytes);
     // A cut mid-line: start at the next whole one.
     let text = if start > 0 { text.split_once('\n').map_or("", |(_, rest)| rest) } else { &text };
-    Ok((entries(text, harness), tokens(text, harness)))
+    Ok((entries(text, harness), tokens(text, harness), model(text, harness)))
+}
+
+/// The model the agent's last turn ran on, or Pi's last switch to one since.
+/// None when the log doesn't say.
+pub fn model(log: &str, harness: &str) -> Option<String> {
+    log.lines().rev().find_map(|line| {
+        let v = serde_json::from_str::<Value>(line).ok()?;
+        let m = if harness == "pi" {
+            match v["type"].as_str()? {
+                "model_change" => &v["modelId"],
+                "message" if v["message"]["role"] == "assistant" => &v["message"]["model"],
+                _ => return None,
+            }
+        } else {
+            // Sidechains are subagents, which may run on other models.
+            if v["type"] != "assistant" || v["isSidechain"] == true {
+                return None;
+            }
+            &v["message"]["model"]
+        };
+        // Claude marks the turns it writes itself, such as API errors.
+        m.as_str().filter(|m| !m.is_empty() && *m != "<synthetic>").map(String::from)
+    })
 }
 
 /// The context the last turn in a log used: its input, cached and written
@@ -424,6 +453,27 @@ mod tests {
         .to_string();
         assert_eq!(tokens(&pi, "pi"), Some(63));
         assert_eq!(tokens("{\"type\":\"user\"}", "claude"), None);
+    }
+
+    #[test]
+    fn the_last_turn_gives_the_model() {
+        let claude = [
+            json!({"type":"assistant","message":{"model":"claude-sonnet-5-5"}}),
+            json!({"type":"assistant","message":{"model":"claude-opus-5-5"}}),
+            json!({"type":"assistant","isSidechain":true,"message":{"model":"claude-haiku-5-5"}}),
+            json!({"type":"assistant","message":{"model":"<synthetic>"}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        assert_eq!(model(&claude, "claude").as_deref(), Some("claude-opus-5-5"));
+        let pi = [
+            json!({"type":"message","message":{"role":"assistant","model":"gpt-6.1-sol"}}),
+            json!({"type":"model_change","modelId":"claude-opus-5-5"}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        assert_eq!(model(&pi, "pi").as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(model("{\"type\":\"user\"}", "claude"), None);
     }
 
     #[test]

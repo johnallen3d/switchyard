@@ -1815,12 +1815,17 @@ impl App {
         self.draw_transcript(f, body);
     }
 
-    /// The highlighted agent's context size, for the foot of the reply
-    /// box, once its transcript has come and says.
+    /// The highlighted agent's model and context size, for the foot of the
+    /// reply box, once its transcript has come and says.
     fn tokens_label(&self) -> Option<String> {
         let want = self.preview_want()?;
         let pv = self.preview.as_ref().filter(|pv| pv.pane == want)?;
-        pv.tokens.map(preview::tokens_label)
+        let model = pv.model.as_deref().map(preview::model_label);
+        match (model, pv.tokens.map(preview::tokens_label)) {
+            (Some(m), Some(t)) => Some(format!("{m} · {t}")),
+            (Some(m), None) => Some(m.to_string()),
+            (None, t) => t,
+        }
     }
 
     /// The highlighted agent's transcript, scrolled to its end until John
