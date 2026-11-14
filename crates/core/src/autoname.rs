@@ -5,7 +5,8 @@
 //! from macOS 27; its license must have been accepted once with
 //! `sudo fm license`). It runs where `launch` does, the config host (the
 //! Mac). No other model is tried: when `fm` is missing, fails, is slow or
-//! answers with something unusable, there is no name and the work must be
+//! answers with something unusable, a work item's title becomes the name as
+//! it is (slugged); without a title there is no name and the work must be
 //! named by hand.
 
 use std::process::Command;
@@ -51,7 +52,8 @@ const SCHEMA: &str = r#"{
 }"#;
 
 /// A name for work that has none: from `item`'s title when it can be
-/// looked up, otherwise from `prompt`. None when neither gives one.
+/// looked up (the model's name, or the title itself slugged), otherwise
+/// from `prompt`. None when neither gives one.
 #[must_use]
 pub fn name_work(
     profile: &str,
@@ -60,7 +62,7 @@ pub fn name_work(
     prompt: &str,
 ) -> Option<String> {
     item.and_then(|i| item_title(profile, i, tracker))
-        .and_then(|title| suggest(&title))
+        .and_then(|title| suggest(&title).or_else(|| title_name(&title)))
         .or_else(|| {
             Some(prompt.trim())
                 .filter(|p| !p.is_empty())
@@ -135,6 +137,11 @@ fn suggest(text: &str) -> Option<String> {
     let out = bounded_output(&mut cmd, Some(&text), FM_TIMEOUT);
     let _ = std::fs::remove_file(&schema);
     parse(&out?)
+}
+
+/// A work item's title as a feature name, for when the model can't name it.
+fn title_name(title: &str) -> Option<String> {
+    Some(slug(title)).filter(|s| !s.is_empty() && name_problem(s).is_none())
 }
 
 /// The work name in `fm`'s JSON answer, cleaned up: a known prefix
@@ -227,6 +234,15 @@ mod tests {
         assert_eq!(parse("not json"), None);
         assert_eq!(parse(r#"{"prefix": "fix"}"#), None);
         assert_eq!(parse(r#"{"prefix": "fix", "slug": "!!! ---"}"#), None);
+    }
+
+    #[test]
+    fn titles_name_work_the_model_cannot() {
+        assert_eq!(
+            title_name("Archive: crashes while a check runs!").as_deref(),
+            Some("archive-crashes-while-a-check-runs")
+        );
+        assert_eq!(title_name("!!!"), None);
     }
 
     #[test]

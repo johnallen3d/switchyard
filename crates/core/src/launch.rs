@@ -338,8 +338,8 @@ fn task_name(
         return Ok(name.to_string());
     }
     let named = name_work(&project.profile, work_item, tracker, typed).ok_or(
-        "couldn't name the work from its work item or prompt (macOS's fm model is unavailable \
-         or gave no usable name); name it yourself",
+        "couldn't name the work: no work item title could be looked up, and macOS's fm model \
+         is unavailable or gave no usable name for the prompt; name it yourself",
     )?;
     log(&format!(
         "named {}/{named} from its {}",
