@@ -57,13 +57,26 @@ fn fresh_remote_base(repo: &Path) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"])
+        .args([
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ])
         .output()
         .ok()?;
     let base = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let branch = base.strip_prefix("origin/").filter(|b| out.status.success() && !b.is_empty())?;
+    let branch = base
+        .strip_prefix("origin/")
+        .filter(|b| out.status.success() && !b.is_empty())?;
     status(&format!("Fetching {base}"));
-    match check(Command::new("git").arg("-C").arg(repo).args(["fetch", "--quiet", "origin", branch]), "git fetch") {
+    match check(
+        Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["fetch", "--quiet", "origin", branch]),
+        "git fetch",
+    ) {
         Ok(()) => Some(base),
         Err(e) => {
             eprintln!("\x1b[33mswitchyard: {e}; branching from local {branch}\x1b[0m");
@@ -85,8 +98,14 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
         if let Some(parent) = repo.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        check(Command::new("git").arg("clone").arg(expand(clone_url)).arg(&repo), "git clone")
-            .map_err(|e| (e, home()))?;
+        check(
+            Command::new("git")
+                .arg("clone")
+                .arg(expand(clone_url))
+                .arg(&repo),
+            "git clone",
+        )
+        .map_err(|e| (e, home()))?;
     }
     let fail = |e: String| (e, repo.clone());
     if let Some(existing) = worktree_for(&repo, &branch) {
@@ -96,16 +115,26 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
     let exists = Command::new("git")
         .arg("-C")
         .arg(&repo)
-        .args(["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
         .stdout(Stdio::null())
         .status()
         .is_ok_and(|s| s.success());
-    status(&format!("{} {branch} in .worktrees/{slug}", if exists { "Checking out" } else { "Creating" }));
+    status(&format!(
+        "{} {branch} in .worktrees/{slug}",
+        if exists { "Checking out" } else { "Creating" }
+    ));
     // Override the path template per call for the short-name convention;
     // the global Worktrunk config keeps its own.
     let template = format!("worktree-path = \"{{{{ repo_path }}}}/.worktrees/{slug}\"");
     let mut wt = Command::new("wt");
-    wt.arg("-C").arg(&repo).args(["--config-set", &template, "switch"]);
+    wt.arg("-C")
+        .arg(&repo)
+        .args(["--config-set", &template, "switch"]);
     if !exists {
         wt.arg("--create");
         if let Some(base) = fresh_remote_base(&repo) {
@@ -157,7 +186,9 @@ pub fn run(
             if let Some((id, mode)) = session {
                 let here = worktree.display().to_string();
                 if mode == "resume" && !session_exists_here(profile, harness, &here, id) {
-                    eprintln!("\x1b[33mswitchyard: agent session {id} is gone; starting a new one\x1b[0m");
+                    eprintln!(
+                        "\x1b[33mswitchyard: agent session {id} is gone; starting a new one\x1b[0m"
+                    );
                     agent.args(["--session-id", &new_session_id()]);
                 } else if mode == "resume" && harness == "claude" {
                     resuming = true;
@@ -174,7 +205,11 @@ pub fn run(
             // reads an argument starting with @ as a file even after `--`,
             // so a leading space keeps that one text too.
             if !prompt.is_empty() && !resuming {
-                let prompt = if harness == "pi" && prompt.starts_with('@') { format!(" {prompt}") } else { prompt.to_string() };
+                let prompt = if harness == "pi" && prompt.starts_with('@') {
+                    format!(" {prompt}")
+                } else {
+                    prompt.to_string()
+                };
                 agent.arg("--").arg(prompt);
             }
             // The agent replaces this process, so quitting it closes the tab.
@@ -189,7 +224,10 @@ pub fn run(
     };
     // Only reached on failure: keep a shell so the error stays readable.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-    let err = Command::new(&shell).current_dir(&dir).env("PWD", &dir).exec();
+    let err = Command::new(&shell)
+        .current_dir(&dir)
+        .env("PWD", &dir)
+        .exec();
     eprintln!("switchyard: {shell}: {err}");
     std::process::exit(1);
 }

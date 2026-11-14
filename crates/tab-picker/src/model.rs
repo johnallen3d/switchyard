@@ -143,7 +143,10 @@ pub struct Link {
 impl Link {
     /// The short form a badge shows: `#42`, `PR #57`, `card 123`, `a1b2c3d`.
     pub fn short(&self) -> String {
-        let number = self.reference.rsplit_once('#').map_or(self.reference.as_str(), |(_, n)| n);
+        let number = self
+            .reference
+            .rsplit_once('#')
+            .map_or(self.reference.as_str(), |(_, n)| n);
         match self.kind.as_str() {
             "pr" => format!("PR #{number}"),
             "issue" if self.system == "github" => format!("#{number}"),
@@ -156,7 +159,10 @@ impl Link {
     /// The ref a grouped badge shows after its kind's label: `#57` for
     /// `PR #57`, `1041` for `card 1041`.
     fn badge_ref(&self) -> String {
-        let number = self.reference.rsplit_once('#').map_or(self.reference.as_str(), |(_, n)| n);
+        let number = self
+            .reference
+            .rsplit_once('#')
+            .map_or(self.reference.as_str(), |(_, n)| n);
         match self.kind.as_str() {
             "pr" => format!("#{number}"),
             "issue" if self.system == "github" => format!("#{number}"),
@@ -187,7 +193,11 @@ impl Link {
     fn card_state(&self) -> Option<(String, Tone)> {
         match self.state.as_str() {
             "closed" => {
-                let column = if self.column.is_empty() { "closed" } else { &self.column };
+                let column = if self.column.is_empty() {
+                    "closed"
+                } else {
+                    &self.column
+                };
                 Some((format!("✓ {column}"), Tone::Merged))
             }
             "open" => {
@@ -227,7 +237,11 @@ fn kind_label(kind: &str, plural: bool) -> String {
         "pr" => "PR",
         other => other,
     };
-    if plural { format!("{one}s") } else { one.to_string() }
+    if plural {
+        format!("{one}s")
+    } else {
+        one.to_string()
+    }
 }
 
 /// A row's links as compact badges, grouped by kind with the label once:
@@ -278,7 +292,10 @@ pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
             return pieces;
         }
         // The group showing the most refs gives one up (the later on a tie).
-        if let Some(i) = (0..shown.len()).filter(|&i| shown[i] > 1).max_by_key(|&i| shown[i]) {
+        if let Some(i) = (0..shown.len())
+            .filter(|&i| shown[i] > 1)
+            .max_by_key(|&i| shown[i])
+        {
             shown[i] -= 1;
         } else if let Some(i) = shown.iter().rposition(|&n| n > 0).filter(|&i| i > 0) {
             shown[i] = 0;
@@ -291,8 +308,17 @@ pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
 /// The links the ctrl-b chooser offers, most likely first: those with a
 /// URL, PRs, then cards, issues and commits.
 pub fn chooser_links(links: &[Link]) -> Vec<Link> {
-    let rank = |k: &str| ["pr", "card", "issue", "commit"].iter().position(|x| *x == k).unwrap_or(4);
-    let mut out: Vec<Link> = links.iter().filter(|l| !l.url.is_empty()).cloned().collect();
+    let rank = |k: &str| {
+        ["pr", "card", "issue", "commit"]
+            .iter()
+            .position(|x| *x == k)
+            .unwrap_or(4)
+    };
+    let mut out: Vec<Link> = links
+        .iter()
+        .filter(|l| !l.url.is_empty())
+        .cloned()
+        .collect();
     out.sort_by_key(|l| rank(&l.kind));
     out
 }
@@ -345,7 +371,10 @@ impl Task {
     /// Ended by an archive (or a discard, its old name) rather than by its
     /// tab closing or worktree going away.
     pub fn archived(&self) -> bool {
-        matches!(self.ended.as_deref(), Some("archived" | "force-archived" | "merged" | "discarded" | "force-discarded"))
+        matches!(
+            self.ended.as_deref(),
+            Some("archived" | "force-archived" | "merged" | "discarded" | "force-discarded")
+        )
     }
 
     /// Safe to archive: open (or ended with its worktree left), nothing
@@ -357,7 +386,12 @@ impl Task {
         let cards_closed = cards.peek().is_some() && cards.all(Link::card_closed);
         (self.ended.is_none() || self.left)
             && self.dirty == 0
-            && (self.merged == "merged" || cards_closed || self.links.iter().any(|l| l.kind == "pr" && l.state == "merged"))
+            && (self.merged == "merged"
+                || cards_closed
+                || self
+                    .links
+                    .iter()
+                    .any(|l| l.kind == "pr" && l.state == "merged"))
     }
 
     /// Open and pinned.
@@ -372,13 +406,18 @@ impl Task {
 
     /// The links as search text: their short forms and refs.
     pub fn links_text(&self) -> String {
-        self.links.iter().map(|l| format!("{} {}", l.short(), l.reference)).collect::<Vec<_>>().join(" ")
+        self.links
+            .iter()
+            .map(|l| format!("{} {}", l.short(), l.reference))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
 /// Every task from `switchyard task list` output, open and ended.
 pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
-    let all: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| format!("tasks: {e}"))?;
+    let all: Vec<serde_json::Value> =
+        serde_json::from_str(json).map_err(|e| format!("tasks: {e}"))?;
     let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
     Ok(all
         .iter()
@@ -392,7 +431,11 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             dirty: t["dirty_count"].as_u64().unwrap_or(0),
             dirty_files: t["dirty_files"]
                 .as_array()
-                .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|f| f.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             state: s(t, "status"),
             msg: s(t, "status_msg"),
@@ -437,7 +480,12 @@ fn parse_links(v: &serde_json::Value) -> Vec<Link> {
                 .collect()
         })
         .unwrap_or_default();
-    let rank = |k: &str| ["pr", "issue", "card", "commit"].iter().position(|x| *x == k).unwrap_or(4);
+    let rank = |k: &str| {
+        ["pr", "issue", "card", "commit"]
+            .iter()
+            .position(|x| *x == k)
+            .unwrap_or(4)
+    };
     links.sort_by_key(|l| rank(&l.kind));
     links
 }
@@ -452,9 +500,9 @@ pub fn link(tabs: &mut [Tab], sessions: &[Session], tasks: &mut [Task]) {
         if task.ended.is_some() {
             continue;
         }
-        let found = tabs
-            .iter()
-            .position(|t| t.window_id == task.window_id && sessions[t.session].id == task.session_id);
+        let found = tabs.iter().position(|t| {
+            t.window_id == task.window_id && sessions[t.session].id == task.session_id
+        });
         if let Some(t) = found {
             tabs[t].task = Some(k);
             task.tab = Some(t);
@@ -466,7 +514,10 @@ pub fn link(tabs: &mut [Tab], sessions: &[Session], tasks: &mut [Task]) {
 fn home_relative(dir: &str) -> String {
     for root in ["/home/", "/Users/"] {
         if let Some(rest) = dir.strip_prefix(root) {
-            let rest = rest.split_once('/').map(|(_, r)| format!("/{r}")).unwrap_or_default();
+            let rest = rest
+                .split_once('/')
+                .map(|(_, r)| format!("/{r}"))
+                .unwrap_or_default();
             return format!("~{rest}");
         }
     }
@@ -495,7 +546,10 @@ pub fn in_raw_folders(dir: &str, list: &[String]) -> bool {
     list.iter()
         .map(|f| f.trim_end_matches('/'))
         .filter(|f| !f.is_empty())
-        .any(|f| dir.strip_prefix(f).is_some_and(|rest| rest.is_empty() || rest.starts_with('/')))
+        .any(|f| {
+            dir.strip_prefix(f)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
 }
 
 /// `path` with `~` expanded to home, and symlinks followed when it exists,
@@ -503,7 +557,9 @@ pub fn in_raw_folders(dir: &str, list: &[String]) -> bool {
 fn resolve_path(path: &str) -> PathBuf {
     let home = switchyard_core::rex::home();
     let expanded = match path.strip_prefix('~') {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => home.join(rest.trim_start_matches('/')),
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            home.join(rest.trim_start_matches('/'))
+        }
         _ => PathBuf::from(path),
     };
     std::fs::canonicalize(&expanded).unwrap_or(expanded)
@@ -516,7 +572,10 @@ pub fn work_dir(dir: &str) -> bool {
 }
 
 pub fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn age(secs: u64) -> String {
@@ -546,11 +605,28 @@ mod tests {
 
     #[test]
     fn card_badges_show_column_and_assignee_or_done() {
-        let open = Link { column: "In Progress".into(), assignee: "John".into(), ..link("card", "1156", "open") };
-        let closed = Link { column: "Done".into(), assignee: "John".into(), ..link("card", "1155", "closed") };
-        let triage = Link { column: "Maybe?".into(), ..link("card", "1157", "open") };
-        assert_eq!(text(&badges(std::slice::from_ref(&open), usize::MAX)), "card 1156 In Progress @John");
-        assert_eq!(text(&badges(&[closed.clone(), triage], usize::MAX)), "cards 1155 ✓ Done 1157 Maybe?");
+        let open = Link {
+            column: "In Progress".into(),
+            assignee: "John".into(),
+            ..link("card", "1156", "open")
+        };
+        let closed = Link {
+            column: "Done".into(),
+            assignee: "John".into(),
+            ..link("card", "1155", "closed")
+        };
+        let triage = Link {
+            column: "Maybe?".into(),
+            ..link("card", "1157", "open")
+        };
+        assert_eq!(
+            text(&badges(std::slice::from_ref(&open), usize::MAX)),
+            "card 1156 In Progress @John"
+        );
+        assert_eq!(
+            text(&badges(&[closed.clone(), triage], usize::MAX)),
+            "cards 1155 ✓ Done 1157 Maybe?"
+        );
         assert_eq!(closed.badge_state().unwrap().1, Tone::Merged);
         // Without a lookup a card shows just its number.
         assert_eq!(link("card", "9", "").badge_state(), None);
@@ -562,7 +638,9 @@ mod tests {
     }
 
     fn cards(n: usize) -> Vec<Link> {
-        (0..n).map(|i| link("card", &(1041 + i).to_string(), "")).collect()
+        (0..n)
+            .map(|i| link("card", &(1041 + i).to_string(), ""))
+            .collect()
     }
 
     #[test]
@@ -570,22 +648,37 @@ mod tests {
         let mut links = vec![link("pr", "o/r#57", "merged")];
         links.extend(cards(3));
         links.push(link("issue", "o/r#42", ""));
-        assert_eq!(text(&badges(&links, usize::MAX)), "PR #57 ✓ merged · cards 1041 1042 1043 · issue #42");
+        assert_eq!(
+            text(&badges(&links, usize::MAX)),
+            "PR #57 ✓ merged · cards 1041 1042 1043 · issue #42"
+        );
         assert_eq!(text(&badges(&cards(1), usize::MAX)), "card 1041");
-        let prs = [link("pr", "o/r#57", "merged"), link("pr", "o/r#58", "draft")];
-        assert_eq!(text(&badges(&prs, usize::MAX)), "PRs #57 ✓ merged #58 draft");
+        let prs = [
+            link("pr", "o/r#57", "merged"),
+            link("pr", "o/r#58", "draft"),
+        ];
+        assert_eq!(
+            text(&badges(&prs, usize::MAX)),
+            "PRs #57 ✓ merged #58 draft"
+        );
         assert!(badges(&[], 10).is_empty());
     }
 
     #[test]
     fn badges_truncate_to_the_first_few_and_a_count() {
         let links = cards(5);
-        assert_eq!(text(&badges(&links, usize::MAX)), "cards 1041 1042 1043 1044 1045");
+        assert_eq!(
+            text(&badges(&links, usize::MAX)),
+            "cards 1041 1042 1043 1044 1045"
+        );
         assert_eq!(text(&badges(&links, 20)), "cards 1041 1042 +3");
         // The biggest group gives way first; the PR keeps its state.
         let mut mixed = vec![link("pr", "o/r#57", "merged")];
         mixed.extend(cards(5));
-        assert_eq!(text(&badges(&mixed, 36)), "PR #57 ✓ merged · cards 1041 1042 +3");
+        assert_eq!(
+            text(&badges(&mixed, 36)),
+            "PR #57 ✓ merged · cards 1041 1042 +3"
+        );
         // Then whole groups go, counted at the end; the first ref stays.
         assert_eq!(text(&badges(&mixed, 20)), "PR #57 ✓ merged +5");
         assert_eq!(text(&badges(&mixed, 3)), "PR #57 ✓ merged +5");
@@ -593,10 +686,16 @@ mod tests {
 
     #[test]
     fn chooser_lists_prs_then_cards_then_issues_with_urls() {
-        let mut links = vec![link("issue", "o/r#42", ""), link("commit", "abcdef0123", "")];
+        let mut links = vec![
+            link("issue", "o/r#42", ""),
+            link("commit", "abcdef0123", ""),
+        ];
         links.extend(cards(2));
         links.push(link("pr", "o/r#57", ""));
-        links.push(Link { url: String::new(), ..link("card", "9", "") });
+        links.push(Link {
+            url: String::new(),
+            ..link("card", "9", "")
+        });
         let refs: Vec<String> = chooser_links(&links).iter().map(Link::short).collect();
         assert_eq!(refs, ["PR #57", "card 1041", "card 1042", "#42", "abcdef0"]);
     }

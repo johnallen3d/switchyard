@@ -102,7 +102,8 @@ impl Scrollback {
 
     /// The selected lines, if any, as an inclusive range.
     pub fn selection(&self) -> Option<(usize, usize)> {
-        self.anchor.map(|a| (a.min(self.cursor), a.max(self.cursor)))
+        self.anchor
+            .map(|a| (a.min(self.cursor), a.max(self.cursor)))
     }
 
     /// The query whose matches are lit: the one being typed, else the last.
@@ -138,19 +139,46 @@ impl Scrollback {
             KeyCode::Char('k') | KeyCode::Up => self.go(-1, last),
             KeyCode::Char('g') | KeyCode::Home => self.cursor = 0,
             KeyCode::Char('G') | KeyCode::End => self.cursor = last,
-            KeyCode::Char('}') => self.cursor = (self.cursor + 1..=last).find(|&i| lines[i].is_empty()).unwrap_or(last),
-            KeyCode::Char('{') => self.cursor = (0..self.cursor).rev().find(|&i| lines[i].is_empty()).unwrap_or(0),
-            KeyCode::Char('/') => self.typing = Some(Typing { forward: true, query: String::new() }),
-            KeyCode::Char('?') => self.typing = Some(Typing { forward: false, query: String::new() }),
+            KeyCode::Char('}') => {
+                self.cursor = (self.cursor + 1..=last)
+                    .find(|&i| lines[i].is_empty())
+                    .unwrap_or(last)
+            }
+            KeyCode::Char('{') => {
+                self.cursor = (0..self.cursor)
+                    .rev()
+                    .find(|&i| lines[i].is_empty())
+                    .unwrap_or(0)
+            }
+            KeyCode::Char('/') => {
+                self.typing = Some(Typing {
+                    forward: true,
+                    query: String::new(),
+                })
+            }
+            KeyCode::Char('?') => {
+                self.typing = Some(Typing {
+                    forward: false,
+                    query: String::new(),
+                })
+            }
             KeyCode::Char('n') => self.repeat(lines, false),
             KeyCode::Char('N') => self.repeat(lines, true),
             KeyCode::Char('v' | 'V' | ' ') => {
-                self.anchor = if self.anchor.is_some() { None } else { Some(self.cursor) };
+                self.anchor = if self.anchor.is_some() {
+                    None
+                } else {
+                    Some(self.cursor)
+                };
             }
             KeyCode::Char('y') | KeyCode::Enter => {
                 let (a, b) = self.selection().unwrap_or((self.cursor, self.cursor));
                 self.anchor = None;
-                return if lines.is_empty() { Outcome::Exit } else { Outcome::Copy(a.min(last), b.min(last)) };
+                return if lines.is_empty() {
+                    Outcome::Exit
+                } else {
+                    Outcome::Copy(a.min(last), b.min(last))
+                };
             }
             KeyCode::Esc if self.anchor.is_some() => self.anchor = None,
             KeyCode::Esc if self.found.is_some() => self.found = None,
@@ -197,7 +225,9 @@ impl Scrollback {
     /// Move to the next match of the last search, the other way if
     /// `reverse`, wrapping around.
     fn repeat(&mut self, lines: &[String], reverse: bool) {
-        let Some((query, forward)) = &self.found else { return };
+        let Some((query, forward)) = &self.found else {
+            return;
+        };
         match find(lines, query, self.cursor, *forward != reverse) {
             Some(i) => self.cursor = i,
             None => self.note = Some(format!("not found: {query}")),
@@ -209,7 +239,13 @@ impl Scrollback {
 fn find(lines: &[String], query: &str, from: usize, forward: bool) -> Option<usize> {
     let n = lines.len();
     (1..=n)
-        .map(|step| if forward { (from + step) % n } else { (from + n * 2 - step % n) % n })
+        .map(|step| {
+            if forward {
+                (from + step) % n
+            } else {
+                (from + n * 2 - step % n) % n
+            }
+        })
         .find(|&i| !matches(&lines[i], query).is_empty())
 }
 
@@ -224,7 +260,13 @@ pub fn matches(text: &str, query: &str) -> Vec<(usize, usize)> {
         return Vec::new();
     }
     let fold = fold(query);
-    let norm = |c: char| if fold { c.to_lowercase().next().unwrap_or(c) } else { c };
+    let norm = |c: char| {
+        if fold {
+            c.to_lowercase().next().unwrap_or(c)
+        } else {
+            c
+        }
+    };
     let hay: Vec<char> = text.chars().map(norm).collect();
     let needle: Vec<char> = query.chars().map(norm).collect();
     let mut out = Vec::new();
@@ -259,7 +301,11 @@ pub fn mark(line: Line<'static>, ranges: &[(usize, usize)], style: Style) -> Lin
         for c in span.content.chars() {
             let l = lit(at);
             if run_lit.is_some_and(|r| r != l) {
-                let s = if run_lit == Some(true) { span.style.patch(style) } else { span.style };
+                let s = if run_lit == Some(true) {
+                    span.style.patch(style)
+                } else {
+                    span.style
+                };
                 spans.push(Span::styled(std::mem::take(&mut run), s));
             }
             run_lit = Some(l);
@@ -267,7 +313,11 @@ pub fn mark(line: Line<'static>, ranges: &[(usize, usize)], style: Style) -> Lin
             at += 1;
         }
         if !run.is_empty() {
-            let s = if run_lit == Some(true) { span.style.patch(style) } else { span.style };
+            let s = if run_lit == Some(true) {
+                span.style.patch(style)
+            } else {
+                span.style
+            };
             spans.push(Span::styled(run, s));
         }
     }
@@ -284,7 +334,11 @@ mod tests {
     use super::*;
 
     fn pane() -> Pane {
-        Pane { target: "-".into(), session: "s".into(), window: "w".into() }
+        Pane {
+            target: "-".into(),
+            session: "s".into(),
+            window: "w".into(),
+        }
     }
 
     fn key(c: char) -> KeyEvent {
@@ -292,10 +346,19 @@ mod tests {
     }
 
     fn lines() -> Vec<String> {
-        ["› hello", "", "● first answer", "  goes on", "", "› Again", "", "● second"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
+        [
+            "› hello",
+            "",
+            "● first answer",
+            "  goes on",
+            "",
+            "› Again",
+            "",
+            "● second",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
     }
 
     #[test]
@@ -379,8 +442,14 @@ mod tests {
         assert_eq!(s.key(key('y'), &l, 4), Outcome::Copy(2, 3));
         // Escape drops the selection before it leaves.
         s.key(key('v'), &l, 4);
-        assert_eq!(s.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &l, 4), Outcome::Stay);
-        assert_eq!(s.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &l, 4), Outcome::Exit);
+        assert_eq!(
+            s.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &l, 4),
+            Outcome::Stay
+        );
+        assert_eq!(
+            s.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &l, 4),
+            Outcome::Exit
+        );
     }
 
     #[test]
@@ -388,8 +457,20 @@ mod tests {
         let line = Line::from(vec![Span::raw("ab"), Span::raw("cd")]);
         let style = Style::new().add_modifier(ratatui::style::Modifier::REVERSED);
         let out = mark(line, &matches("abcd", "bc"), style);
-        let parts: Vec<_> = out.spans.iter().map(|s| (s.content.to_string(), s.style == style)).collect();
-        assert_eq!(parts, [("a".into(), false), ("b".into(), true), ("c".into(), true), ("d".into(), false)]);
+        let parts: Vec<_> = out
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style == style))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("a".into(), false),
+                ("b".into(), true),
+                ("c".into(), true),
+                ("d".into(), false)
+            ]
+        );
     }
 
     #[test]

@@ -95,7 +95,10 @@ struct Slot(Option<&'static AtomicI32>);
 impl Slot {
     fn take(pid: u32) -> Slot {
         let pid = pid as i32;
-        Slot(PIDS.iter().find(|p| p.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst).is_ok()))
+        Slot(PIDS.iter().find(|p| {
+            p.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        }))
     }
 }
 
@@ -149,7 +152,11 @@ pub fn parse_line(line: &str) -> Line {
 pub fn backoff(last: Duration, ran: Duration) -> Duration {
     const MIN: Duration = Duration::from_secs(1);
     const MAX: Duration = Duration::from_secs(60);
-    if ran >= MAX { MIN } else { (last * 2).clamp(MIN, MAX) }
+    if ran >= MAX {
+        MIN
+    } else {
+        (last * 2).clamp(MIN, MAX)
+    }
 }
 
 /// Where a watcher's events go besides the state.
@@ -185,7 +192,13 @@ pub fn supervise(shared: Arc<Shared>, host: String, events: Events, stop: Arc<At
 }
 
 /// Run one watcher until it exits (Err with why) or `stop` is set (Ok).
-fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &AtomicBool) -> Result<(), String> {
+fn run(
+    shared: &Arc<Shared>,
+    host: &str,
+    script: &str,
+    events: &Events,
+    stop: &AtomicBool,
+) -> Result<(), String> {
     let mut cmd = Command::new("rex");
     // Never start a server: a missing one (as a temporary XDG_RUNTIME_DIR
     // points at) is unreachable, not empty.
@@ -194,7 +207,14 @@ fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &A
         cmd.args(["-S", host]);
     }
     let mut child = cmd
-        .args(["do", "--all", "-e", script, &format!("host={host}"), "status=yes"])
+        .args([
+            "do",
+            "--all",
+            "-e",
+            script,
+            &format!("host={host}"),
+            "status=yes",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -205,7 +225,12 @@ fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &A
     let heard = Arc::new(Mutex::new(Instant::now()));
     let stdout = child.stdout.take().expect("piped stdout");
     let reader = {
-        let (shared, host, events, heard) = (shared.clone(), host.to_string(), events.clone(), heard.clone());
+        let (shared, host, events, heard) = (
+            shared.clone(),
+            host.to_string(),
+            events.clone(),
+            heard.clone(),
+        );
         thread::spawn(move || read_lines(stdout, &shared, &host, &events, &heard))
     };
     // The last thing rex said on stderr explains an exit.
@@ -213,7 +238,12 @@ fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &A
     let complaint = thread::spawn(move || {
         let mut text = String::new();
         let _ = stderr.read_to_string(&mut text);
-        text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string()
+        text.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string()
     });
     let outcome = watch_child(&mut child, &heard, stop);
     // Reaped: its PID can be reused now.
@@ -222,7 +252,10 @@ fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &A
     let complaint = complaint.join().unwrap_or_default();
     match outcome {
         Exit::Stopped => Ok(()),
-        Exit::Quiet => Err(format!("no word from the Rex server for {} s", QUIET.as_secs())),
+        Exit::Quiet => Err(format!(
+            "no word from the Rex server for {} s",
+            QUIET.as_secs()
+        )),
         Exit::Exited(status) if complaint.is_empty() => Err(format!("watcher exited ({status})")),
         Exit::Exited(_) => Err(complaint),
     }
@@ -249,14 +282,22 @@ fn watch_child(child: &mut Child, heard: &Mutex<Instant>, stop: &AtomicBool) -> 
     }
 }
 
-fn read_lines(stdout: impl Read, shared: &Shared, host: &str, events: &Events, heard: &Mutex<Instant>) {
+fn read_lines(
+    stdout: impl Read,
+    shared: &Shared,
+    host: &str,
+    events: &Events,
+    heard: &Mutex<Instant>,
+) {
     for line in BufReader::new(stdout).lines() {
         let Ok(line) = line else { break };
         if let Ok(mut at) = heard.lock() {
             *at = Instant::now();
         }
         match parse_line(&line) {
-            Line::Rows(rows) => shared.update(|s| s.set_rows(host, split_rows(&rows), Instant::now())),
+            Line::Rows(rows) => {
+                shared.update(|s| s.set_rows(host, split_rows(&rows), Instant::now()))
+            }
             Line::Error(e) => shared.update(|s| s.set_error(host, e)),
             Line::Closed(_) => {
                 let _ = events.closed.send("close");
@@ -275,11 +316,23 @@ mod tests {
 
     #[test]
     fn parses_watcher_lines() {
-        assert_eq!(parse_line("switchyard\trows\t\"S\\tx\\n\""), Line::Rows("S\tx\n".into()));
-        assert_eq!(parse_line("switchyard\terror\t\"miller: gone\""), Line::Error("miller: gone".into()));
-        assert_eq!(parse_line("switchyard\tclosed\t\"window_closed\""), Line::Closed("window_closed".into()));
+        assert_eq!(
+            parse_line("switchyard\trows\t\"S\\tx\\n\""),
+            Line::Rows("S\tx\n".into())
+        );
+        assert_eq!(
+            parse_line("switchyard\terror\t\"miller: gone\""),
+            Line::Error("miller: gone".into())
+        );
+        assert_eq!(
+            parse_line("switchyard\tclosed\t\"window_closed\""),
+            Line::Closed("window_closed".into())
+        );
         assert_eq!(parse_line("switchyard\thosts\t\"\""), Line::Hosts);
-        assert_eq!(parse_line("listening: 12 handlers, every session; Ctrl-C to stop"), Line::Other);
+        assert_eq!(
+            parse_line("listening: 12 handlers, every session; Ctrl-C to stop"),
+            Line::Other
+        );
         assert_eq!(parse_line("switchyard\tnew-kind\t\"\""), Line::Other);
     }
 
@@ -298,7 +351,11 @@ mod tests {
         assert!(s.starts_with("local function host_rows()\n"));
         assert!(s.contains("rex.every(30, refresh)"));
         // host_rows.lua's final return ends the function, not the script.
-        assert!(HOST_ROWS.trim_end().ends_with(r#"return table.concat(lines, "\n") .. "\n""#));
+        assert!(
+            HOST_ROWS
+                .trim_end()
+                .ends_with(r#"return table.concat(lines, "\n") .. "\n""#)
+        );
         assert!(s.contains(&format!("{HOST_ROWS}\nend\n")));
     }
 }

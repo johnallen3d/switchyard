@@ -51,7 +51,11 @@ pub struct Card {
 /// The card in `fizzy card show --json` output (the envelope or bare data).
 pub fn parse_card(json: &str) -> Option<Card> {
     let v: Value = serde_json::from_str(json.trim()).ok()?;
-    let card = if v["data"].is_object() { &v["data"] } else { &v };
+    let card = if v["data"].is_object() {
+        &v["data"]
+    } else {
+        &v
+    };
     card["number"].as_u64()?;
     let names: Vec<&str> = card["assignees"]
         .as_array()
@@ -65,19 +69,28 @@ pub fn parse_card(json: &str) -> Option<Card> {
     }
     Some(Card {
         closed: card["closed"].as_bool().unwrap_or(false),
-        column: card["column"]["name"].as_str().unwrap_or("").trim().to_string(),
+        column: card["column"]["name"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
         assignee,
     })
 }
 
 /// The account a card link's URL names, or empty when it has none.
 fn account(link: &Value) -> String {
-    let rest = link["url"].as_str().and_then(|u| u.strip_prefix("https://app.fizzy.do/")).unwrap_or("");
+    let rest = link["url"]
+        .as_str()
+        .and_then(|u| u.strip_prefix("https://app.fizzy.do/"))
+        .unwrap_or("");
     rest.split('/').next().unwrap_or("").to_string()
 }
 
 fn is_card(link: &Value) -> bool {
-    link["kind"] == "card" && link["system"] == "fizzy" && link["ref"].as_str().is_some_and(|r| !r.is_empty())
+    link["kind"] == "card"
+        && link["system"] == "fizzy"
+        && link["ref"].as_str().is_some_and(|r| !r.is_empty())
 }
 
 /// The cache key for a card link: `ACCOUNT\tNUMBER`.
@@ -160,10 +173,14 @@ pub fn find_cards<'a>(tasks: impl IntoIterator<Item = &'a Value>) -> HashMap<Str
         .into_iter()
         .map(|(k, account, number)| std::thread::spawn(move || (k, show(&account, &number))))
         .collect();
-    let answers: Vec<(String, Result<Card, String>)> = asks.into_iter().filter_map(|h| h.join().ok()).collect();
+    let answers: Vec<(String, Result<Card, String>)> =
+        asks.into_iter().filter_map(|h| h.join().ok()).collect();
     for (k, answer) in &answers {
         if let Err(why) = answer {
-            diagnose(&format!("card {} lookup failed: {why}", k.replace('\t', "/")));
+            diagnose(&format!(
+                "card {} lookup failed: {why}",
+                k.replace('\t', "/")
+            ));
         }
     }
     found.extend(record(&mut cache, answers, stamp));
@@ -183,18 +200,30 @@ fn from_cache<'a>(
     let mut found = HashMap::new();
     let mut seen = std::collections::HashSet::new();
     let mut due = Vec::new();
-    for link in tasks.into_iter().filter_map(|t| t["links"].as_array()).flatten().filter(|l| is_card(l)) {
+    for link in tasks
+        .into_iter()
+        .filter_map(|t| t["links"].as_array())
+        .flatten()
+        .filter(|l| is_card(l))
+    {
         let k = key(link);
         if !seen.insert(k.clone()) {
             continue;
         }
         let entry = &cache["cards"][&k];
-        if entry["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < CARD_TTL_SECS) {
+        if entry["at"]
+            .as_u64()
+            .is_some_and(|at| stamp.saturating_sub(at) < CARD_TTL_SECS)
+        {
             if let Some(card) = current(entry) {
                 found.insert(k, card);
             }
         } else {
-            due.push((k, account(link), link["ref"].as_str().unwrap_or("").to_string()));
+            due.push((
+                k,
+                account(link),
+                link["ref"].as_str().unwrap_or("").to_string(),
+            ));
         }
     }
     (found, due)
@@ -205,7 +234,11 @@ fn from_cache<'a>(
 /// asked again until it goes stale, keeping the card's last answer and when
 /// that was (`seen`) but marked with the failure, so it isn't shown or
 /// trusted as current.
-fn record(cache: &mut Value, answers: Vec<(String, Result<Card, String>)>, stamp: u64) -> HashMap<String, Card> {
+fn record(
+    cache: &mut Value,
+    answers: Vec<(String, Result<Card, String>)>,
+    stamp: u64,
+) -> HashMap<String, Card> {
     if !cache["cards"].is_object() {
         cache["cards"] = json!({});
     }
@@ -224,7 +257,11 @@ fn record(cache: &mut Value, answers: Vec<(String, Result<Card, String>)>, stamp
         };
     }
     if let Some(cards) = cache["cards"].as_object_mut() {
-        cards.retain(|_, e| e["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < KEEP_SECS));
+        cards.retain(|_, e| {
+            e["at"]
+                .as_u64()
+                .is_some_and(|at| stamp.saturating_sub(at) < KEEP_SECS)
+        });
     }
     found
 }
@@ -241,14 +278,20 @@ pub fn forget(account: &str, number: &str) {
 
 /// `forget` on a cache; whether it dropped an entry.
 fn forget_in(cache: &mut Value, account: &str, number: &str) -> bool {
-    cache["cards"].as_object_mut().is_some_and(|cards| cards.remove(&format!("{account}\t{number}")).is_some())
+    cache["cards"]
+        .as_object_mut()
+        .is_some_and(|cards| cards.remove(&format!("{account}\t{number}")).is_some())
 }
 
 /// Add each card link's live state from `cards` (not saved).
 pub fn add_live(task: &mut Value, cards: &HashMap<String, Card>) {
-    let Some(links) = task["links"].as_array_mut() else { return };
+    let Some(links) = task["links"].as_array_mut() else {
+        return;
+    };
     for link in links.iter_mut().filter(|l| is_card(l)) {
-        let Some(card) = cards.get(&key(link)) else { continue };
+        let Some(card) = cards.get(&key(link)) else {
+            continue;
+        };
         link["state"] = if card.closed { "closed" } else { "open" }.into();
         link["column"] = card.column.clone().into();
         link["assignee"] = card.assignee.clone().into();
@@ -264,8 +307,16 @@ pub fn cards_closed(task: &Value) -> bool {
 }
 
 fn all_closed(task: &Value, cache: &Value) -> bool {
-    let cards: Vec<&Value> = task["links"].as_array().into_iter().flatten().filter(|l| is_card(l)).collect();
-    !cards.is_empty() && cards.iter().all(|l| current(&cache["cards"][&key(l)]).is_some_and(|c| c.closed))
+    let cards: Vec<&Value> = task["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|l| is_card(l))
+        .collect();
+    !cards.is_empty()
+        && cards
+            .iter()
+            .all(|l| current(&cache["cards"][&key(l)]).is_some_and(|c| c.closed))
 }
 
 #[cfg(test)]
@@ -288,9 +339,25 @@ mod tests {
             "column":{"id":"x","name":"In Progress"},
             "assignees":[{"name":"John Allen"},{"name":"Ada Lovelace"}],"has_more_assignees":true}}"#)
             .unwrap();
-        assert_eq!(card, Card { closed: false, column: "In Progress".into(), assignee: "John, Ada, …".into() });
-        let card = parse_card(r#"{"number":1155,"closed":true,"column":{"name":"Done","pseudo":true}}"#).unwrap();
-        assert_eq!(card, Card { closed: true, column: "Done".into(), assignee: String::new() });
+        assert_eq!(
+            card,
+            Card {
+                closed: false,
+                column: "In Progress".into(),
+                assignee: "John, Ada, …".into()
+            }
+        );
+        let card =
+            parse_card(r#"{"number":1155,"closed":true,"column":{"name":"Done","pseudo":true}}"#)
+                .unwrap();
+        assert_eq!(
+            card,
+            Card {
+                closed: true,
+                column: "Done".into(),
+                assignee: String::new()
+            }
+        );
         assert!(parse_card("").is_none());
         assert!(parse_card(r#"{"ok":false,"error":"unauthorized"}"#).is_none());
     }
@@ -306,11 +373,26 @@ mod tests {
             "9\t6": {"at": 0, "card": {"closed": true}},
         }});
         assert!(all_closed(&json!({"links": [card("1")]}), &cache));
-        assert!(!all_closed(&json!({"links": [card("1"), card("2")]}), &cache), "one open card");
-        assert!(!all_closed(&json!({"links": [card("1"), card("3")]}), &cache), "one unknown card");
-        assert!(!all_closed(&json!({"links": [card("5")]}), &cache), "closed only before a failed lookup");
-        assert!(!all_closed(&json!({"links": [card("6")]}), &cache), "an entry from before failures were marked");
-        assert!(!all_closed(&json!({"links": [card("1"), card("4")]}), &cache), "one never looked up");
+        assert!(
+            !all_closed(&json!({"links": [card("1"), card("2")]}), &cache),
+            "one open card"
+        );
+        assert!(
+            !all_closed(&json!({"links": [card("1"), card("3")]}), &cache),
+            "one unknown card"
+        );
+        assert!(
+            !all_closed(&json!({"links": [card("5")]}), &cache),
+            "closed only before a failed lookup"
+        );
+        assert!(
+            !all_closed(&json!({"links": [card("6")]}), &cache),
+            "an entry from before failures were marked"
+        );
+        assert!(
+            !all_closed(&json!({"links": [card("1"), card("4")]}), &cache),
+            "one never looked up"
+        );
         assert!(!all_closed(&json!({"links": []}), &cache));
         assert!(!all_closed(&json!({}), &cache));
     }
@@ -324,13 +406,33 @@ mod tests {
             {"kind":"pr","system":"github","ref":"o/r#5","url":"p"},
         ]});
         let cards = HashMap::from([
-            ("99\t5".to_string(), Card { closed: true, column: "Done".into(), assignee: String::new() }),
-            ("\t6".to_string(), Card { closed: false, column: "Maybe?".into(), assignee: "John".into() }),
+            (
+                "99\t5".to_string(),
+                Card {
+                    closed: true,
+                    column: "Done".into(),
+                    assignee: String::new(),
+                },
+            ),
+            (
+                "\t6".to_string(),
+                Card {
+                    closed: false,
+                    column: "Maybe?".into(),
+                    assignee: "John".into(),
+                },
+            ),
         ]);
         add_live(&mut task, &cards);
         let l = &task["links"];
-        assert_eq!((l[0]["state"].as_str(), l[0]["column"].as_str()), (Some("closed"), Some("Done")));
-        assert_eq!((l[1]["state"].as_str(), l[1]["assignee"].as_str()), (Some("open"), Some("John")));
+        assert_eq!(
+            (l[0]["state"].as_str(), l[0]["column"].as_str()),
+            (Some("closed"), Some("Done"))
+        );
+        assert_eq!(
+            (l[1]["state"].as_str(), l[1]["assignee"].as_str()),
+            (Some("open"), Some("John"))
+        );
         assert!(l[2]["state"].is_null(), "another account's card 5");
         assert!(l[3]["state"].is_null());
     }
@@ -340,7 +442,11 @@ mod tests {
     }
 
     fn open_card() -> Card {
-        Card { closed: false, column: "Maybe?".into(), assignee: String::new() }
+        Card {
+            closed: false,
+            column: "Maybe?".into(),
+            assignee: String::new(),
+        }
     }
 
     #[test]
@@ -351,10 +457,17 @@ mod tests {
 
         // Fizzy can't run: the old answer stays, with when it was seen, but
         // nothing is found and the failure is kept with its reason.
-        let found = record(&mut cache, vec![("9\t1156".into(), Err("fizzy: not found on PATH".into()))], 300);
+        let found = record(
+            &mut cache,
+            vec![("9\t1156".into(), Err("fizzy: not found on PATH".into()))],
+            300,
+        );
         assert!(found.is_empty());
         let entry = &cache["cards"]["9\t1156"];
-        assert_eq!((entry["at"].as_u64(), entry["seen"].as_u64()), (Some(300), Some(100)));
+        assert_eq!(
+            (entry["at"].as_u64(), entry["seen"].as_u64()),
+            (Some(300), Some(100))
+        );
         assert_eq!(entry["error"], "fizzy: not found on PATH");
         assert_eq!(entry["card"]["column"], "Maybe?");
 
@@ -366,11 +479,22 @@ mod tests {
         assert!(t["links"][0]["state"].is_null(), "just the number");
         // Once stale it is asked again.
         let (_, due) = from_cache(&cache, [&task("1156")], 300 + CARD_TTL_SECS);
-        assert_eq!(due, [("9\t1156".to_string(), "9".to_string(), "1156".to_string())]);
+        assert_eq!(
+            due,
+            [("9\t1156".to_string(), "9".to_string(), "1156".to_string())]
+        );
 
         // A later answer clears the failure.
-        let closed = Card { closed: true, column: "Done".into(), assignee: String::new() };
-        record(&mut cache, vec![("9\t1156".into(), Ok(closed.clone()))], 500);
+        let closed = Card {
+            closed: true,
+            column: "Done".into(),
+            assignee: String::new(),
+        };
+        record(
+            &mut cache,
+            vec![("9\t1156".into(), Ok(closed.clone()))],
+            500,
+        );
         assert!(cache["cards"]["9\t1156"]["error"].is_null());
         let (found, due) = from_cache(&cache, [&task("1156")], 501);
         assert_eq!((found.get("9\t1156"), due.len()), (Some(&closed), 0));
@@ -380,17 +504,35 @@ mod tests {
     #[test]
     fn a_closed_card_whose_lookup_then_fails_blocks_archive() {
         let mut cache = json!({});
-        let closed = Card { closed: true, column: "Done".into(), assignee: String::new() };
+        let closed = Card {
+            closed: true,
+            column: "Done".into(),
+            assignee: String::new(),
+        };
         record(&mut cache, vec![("9\t7".into(), Ok(closed))], 0);
         assert!(all_closed(&task("7"), &cache));
-        record(&mut cache, vec![("9\t7".into(), Err("fizzy: unauthorized".into()))], CARD_TTL_SECS);
+        record(
+            &mut cache,
+            vec![("9\t7".into(), Err("fizzy: unauthorized".into()))],
+            CARD_TTL_SECS,
+        );
         assert!(!all_closed(&task("7"), &cache), "unknown blocks");
     }
 
     #[test]
     fn a_first_lookup_that_fails_leaves_the_card_unknown() {
         let mut cache = json!({});
-        assert!(record(&mut cache, vec![("9\t8".into(), Err("fizzy took longer than 10s; gave up".into()))], 50).is_empty());
+        assert!(
+            record(
+                &mut cache,
+                vec![(
+                    "9\t8".into(),
+                    Err("fizzy took longer than 10s; gave up".into())
+                )],
+                50
+            )
+            .is_empty()
+        );
         let entry = &cache["cards"]["9\t8"];
         assert!(entry["seen"].is_null() && entry["card"].is_null());
         assert!(!all_closed(&task("8"), &cache));

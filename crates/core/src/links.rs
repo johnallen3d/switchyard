@@ -53,9 +53,15 @@ const GH_TIMEOUT: Duration = Duration::from_secs(10);
 /// `owner/repo` for a GitHub remote URL (https, ssh or scp form), or None.
 pub fn github_repo(url: &str) -> Option<String> {
     let url = url.trim();
-    let rest = ["https://github.com/", "http://github.com/", "ssh://git@github.com/", "git@github.com:", "github:"]
-        .iter()
-        .find_map(|p| url.strip_prefix(p))?;
+    let rest = [
+        "https://github.com/",
+        "http://github.com/",
+        "ssh://git@github.com/",
+        "git@github.com:",
+        "github:",
+    ]
+    .iter()
+    .find_map(|p| url.strip_prefix(p))?;
     let rest = rest.trim_end_matches('/');
     let rest = rest.strip_suffix(".git").unwrap_or(rest);
     let mut parts = rest.split('/');
@@ -82,14 +88,20 @@ pub struct Pr {
 /// Summarize gh's statusCheckRollup: any failure fails, then anything not
 /// finished is pending, else pass; empty for no checks.
 fn checks_summary(rollup: &Value) -> String {
-    let Some(items) = rollup.as_array().filter(|a| !a.is_empty()) else { return String::new() };
+    let Some(items) = rollup.as_array().filter(|a| !a.is_empty()) else {
+        return String::new();
+    };
     let mut pending = false;
     for item in items {
         // CheckRun: status + conclusion; StatusContext: state.
-        let conclusion = item["conclusion"].as_str().or(item["state"].as_str()).unwrap_or("");
+        let conclusion = item["conclusion"]
+            .as_str()
+            .or(item["state"].as_str())
+            .unwrap_or("");
         let status = item["status"].as_str().unwrap_or("COMPLETED");
         match conclusion {
-            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" => {
                 return "fail".into();
             }
             "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
@@ -105,7 +117,9 @@ fn checks_summary(rollup: &Value) -> String {
 /// The newest PR in gh's `pr list --json` output, or None for no PR.
 pub fn parse_pr_list(json: &str) -> Result<Option<Pr>, String> {
     let list: Value = serde_json::from_str(json).map_err(|e| format!("gh pr list: {e}"))?;
-    let Some(pr) = list.as_array().and_then(|a| a.first()) else { return Ok(None) };
+    let Some(pr) = list.as_array().and_then(|a| a.first()) else {
+        return Ok(None);
+    };
     let state = match pr["state"].as_str().unwrap_or("") {
         "MERGED" => "merged",
         "CLOSED" => "closed",
@@ -148,7 +162,9 @@ fn save_cache(cache: &Value) {
 }
 
 fn fresh(entry: &Value, ttl: u64, stamp: u64) -> bool {
-    entry["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < ttl)
+    entry["at"]
+        .as_u64()
+        .is_some_and(|at| stamp.saturating_sub(at) < ttl)
 }
 
 /// Run gh under `profile` (work gets amfaro's mise env, personal the login
@@ -166,16 +182,29 @@ pub(crate) fn gh(profile: &str, args: &[&str]) -> Option<String> {
 /// A GitHub issue or PR's title, under `profile`'s GitHub auth (see `gh`).
 pub(crate) fn gh_title(profile: &str, kind: &str, repo: &str, number: &str) -> Option<String> {
     let kind = if kind == "pr" { "pr" } else { "issue" };
-    gh(profile, &[kind, "view", number, "-R", repo, "--json", "title", "-q", ".title"])
+    gh(
+        profile,
+        &[
+            kind, "view", number, "-R", repo, "--json", "title", "-q", ".title",
+        ],
+    )
 }
 
 /// Run `cmd` with `input` (or nothing) on stdin and stderr dropped, giving
 /// up after `timeout`. Its stdout, or None when it can't run, fails, or
 /// takes too long.
-pub(crate) fn bounded_output(cmd: &mut Command, input: Option<&str>, timeout: Duration) -> Option<String> {
-    cmd.stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+pub(crate) fn bounded_output(
+    cmd: &mut Command,
+    input: Option<&str>,
+    timeout: Duration,
+) -> Option<String> {
+    cmd.stdin(if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
     let mut child = cmd.spawn().ok()?;
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         let text = text.to_string();
@@ -222,7 +251,9 @@ pub fn pr_key(repo: &str, branch: &str) -> String {
 
 fn pr_to_json(pr: &Option<Pr>) -> Value {
     match pr {
-        Some(p) => json!({"number": p.number, "url": p.url, "state": p.state, "checks": p.checks, "fixes": p.fixes}),
+        Some(p) => {
+            json!({"number": p.number, "url": p.url, "state": p.state, "checks": p.checks, "fixes": p.fixes})
+        }
         None => Value::Null,
     }
 }
@@ -235,7 +266,11 @@ fn pr_from_json(v: &Value) -> Option<Pr> {
         checks: v["checks"].as_str().unwrap_or("").to_string(),
         fixes: v["fixes"]
             .as_array()
-            .map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|f| f.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default(),
     })
 }
@@ -275,9 +310,12 @@ pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
         if fresh(entry, AUTH_TTL_SECS, stamp) {
             authed.insert(p, entry["ok"].as_bool().unwrap_or(false));
         } else {
-            checks.push((p.clone(), std::thread::spawn(move || {
-                gh(&p, &["auth", "status", "--hostname", "github.com"]).is_some()
-            })));
+            checks.push((
+                p.clone(),
+                std::thread::spawn(move || {
+                    gh(&p, &["auth", "status", "--hostname", "github.com"]).is_some()
+                }),
+            ));
         }
     }
     let mut changed = false;
@@ -295,16 +333,31 @@ pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
         .filter(|l| authed.get(&l.profile).copied().unwrap_or(false))
         .map(|l| {
             std::thread::spawn(move || {
-                let out = gh(&l.profile, &[
-                    "pr", "list", "--repo", &l.repo, "--head", &l.branch, "--state", "all", "--limit", "1",
-                    "--json", "number,url,state,isDraft,statusCheckRollup,body",
-                ]);
+                let out = gh(
+                    &l.profile,
+                    &[
+                        "pr",
+                        "list",
+                        "--repo",
+                        &l.repo,
+                        "--head",
+                        &l.branch,
+                        "--state",
+                        "all",
+                        "--limit",
+                        "1",
+                        "--json",
+                        "number,url,state,isDraft,statusCheckRollup,body",
+                    ],
+                );
                 (l, out.and_then(|o| parse_pr_list(&o).ok()))
             })
         })
         .collect();
     for handle in asks {
-        let Ok((l, Some(pr))) = handle.join() else { continue };
+        let Ok((l, Some(pr))) = handle.join() else {
+            continue;
+        };
         let key = pr_key(&l.repo, &l.branch);
         if !cache["prs"].is_object() {
             cache["prs"] = json!({});
@@ -316,7 +369,11 @@ pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
     if changed {
         // Drop entries no one has asked about in a day.
         if let Some(prs) = cache["prs"].as_object_mut() {
-            prs.retain(|_, e| e["at"].as_u64().is_some_and(|at| stamp.saturating_sub(at) < 86400));
+            prs.retain(|_, e| {
+                e["at"]
+                    .as_u64()
+                    .is_some_and(|at| stamp.saturating_sub(at) < 86400)
+            });
         }
         save_cache(&cache);
     }
@@ -333,7 +390,10 @@ pub fn set_derived_pr(task: &mut Value, repo: &str, pr: &Option<Pr>) -> bool {
     if let Some(pr) = pr {
         let reference = format!("{repo}#{}", pr.number);
         // An explicit link to the same PR wins over a derived one.
-        if !links.iter().any(|l| l["kind"] == "pr" && l["ref"] == reference.as_str()) {
+        if !links
+            .iter()
+            .any(|l| l["kind"] == "pr" && l["ref"] == reference.as_str())
+        {
             links.push(json!({
                 "kind": "pr", "system": "github", "ref": reference, "url": pr.url, "source": "derived",
             }));
@@ -351,7 +411,10 @@ pub fn set_derived_pr(task: &mut Value, repo: &str, pr: &Option<Pr>) -> bool {
 pub fn add_live(task: &mut Value, repo: &str, pr: &Pr) {
     let reference = format!("{repo}#{}", pr.number);
     if let Some(links) = task["links"].as_array_mut() {
-        for l in links.iter_mut().filter(|l| l["kind"] == "pr" && l["ref"] == reference.as_str()) {
+        for l in links
+            .iter_mut()
+            .filter(|l| l["kind"] == "pr" && l["ref"] == reference.as_str())
+        {
             l["state"] = pr.state.clone().into();
             l["checks"] = pr.checks.clone().into();
         }
@@ -393,7 +456,10 @@ impl Tracker {
     }
 
     fn card(&self, number: &str) -> Value {
-        let url = self.fizzy_account.as_ref().map(|a| format!("https://app.fizzy.do/{a}/cards/{number}"));
+        let url = self
+            .fizzy_account
+            .as_ref()
+            .map(|a| format!("https://app.fizzy.do/{a}/cards/{number}"));
         json!({"kind": "card", "system": "fizzy", "ref": number, "url": url.unwrap_or_default()})
     }
 
@@ -455,7 +521,9 @@ fn digits(s: &str) -> Option<&str> {
 pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
     let text = text.trim().trim_end_matches(['.', ',', ')', ';', ':']);
     for scheme in ["https://", "http://"] {
-        let Some(rest) = text.strip_prefix(scheme) else { continue };
+        let Some(rest) = text.strip_prefix(scheme) else {
+            continue;
+        };
         let rest = rest.split(['?', '#']).next().unwrap_or("");
         let parts: Vec<&str> = rest.split('/').collect();
         return match parts.as_slice() {
@@ -464,7 +532,11 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
                 Some(t.github(kind, &format!("{owner}/{repo}"), digits(n)?))
             }
             ["app.fizzy.do", account, "cards", n, ..] => {
-                let mut link = Tracker { fizzy_account: Some(account.to_string()), ..Tracker::default() }.card(digits(n)?);
+                let mut link = Tracker {
+                    fizzy_account: Some(account.to_string()),
+                    ..Tracker::default()
+                }
+                .card(digits(n)?);
                 link["url"] = format!("https://app.fizzy.do/{account}/cards/{n}").into();
                 Some(link)
             }
@@ -482,8 +554,14 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
             return t.bare(digits(n)?);
         }
         let (owner, name) = repo.split_once('/')?;
-        let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
-        return (ok(owner) && ok(name)).then(|| t.github("issue", repo, n)).filter(|_| digits(n).is_some());
+        let ok = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        };
+        return (ok(owner) && ok(name))
+            .then(|| t.github("issue", repo, n))
+            .filter(|_| digits(n).is_some());
     }
     t.bare(digits(text)?)
 }
@@ -492,8 +570,14 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
 /// checking what `switchyard link` records before the tracker is known.
 pub fn ref_shape_ok(text: &str) -> bool {
     let any = [
-        Tracker { github: Some("o/r".into()), ..Tracker::default() },
-        Tracker { cards: true, ..Tracker::default() },
+        Tracker {
+            github: Some("o/r".into()),
+            ..Tracker::default()
+        },
+        Tracker {
+            cards: true,
+            ..Tracker::default()
+        },
     ];
     any.iter().any(|t| parse_ref(text, t).is_some())
 }
@@ -503,7 +587,8 @@ pub fn ref_shape_ok(text: &str) -> bool {
 pub fn refs_in_text(text: &str, t: &Tracker) -> Vec<Value> {
     let mut links: Vec<Value> = Vec::new();
     for word in text.split(|c: char| c.is_whitespace() || "()[]<>\"'`".contains(c)) {
-        let plausible = word.starts_with("http") || word.starts_with("fizzy:") || word.contains('#');
+        let plausible =
+            word.starts_with("http") || word.starts_with("fizzy:") || word.contains('#');
         if !plausible {
             continue;
         }
@@ -519,7 +604,9 @@ pub fn refs_in_text(text: &str, t: &Tracker) -> Vec<Value> {
 /// Issue refs a text says it fixes: `Fixes #42`, `closes owner/repo#7`,
 /// `Resolved: #3` (any case), as `#42` or `owner/repo#7`.
 pub fn fixed_refs(text: &str) -> Vec<String> {
-    const VERBS: [&str; 9] = ["fix", "fixes", "fixed", "close", "closes", "closed", "resolve", "resolves", "resolved"];
+    const VERBS: [&str; 9] = [
+        "fix", "fixes", "fixed", "close", "closes", "closed", "resolve", "resolves", "resolved",
+    ];
     let words: Vec<&str> = text.split_whitespace().collect();
     let mut refs: Vec<String> = Vec::new();
     for pair in words.windows(2) {
@@ -543,7 +630,9 @@ pub fn fixed_refs(text: &str) -> Vec<String> {
 /// The issue number leading a branch's last part: `feature/42-foo` → 42.
 pub fn branch_number(branch: &str) -> Option<&str> {
     let last = branch.rsplit('/').next()?;
-    let end = last.find(|c: char| !c.is_ascii_digit()).unwrap_or(last.len());
+    let end = last
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(last.len());
     let (n, rest) = last.split_at(end);
     (!n.is_empty() && (rest.is_empty() || rest.starts_with('-'))).then_some(n)
 }
@@ -577,7 +666,9 @@ pub fn add_link(task: &mut Value, mut link: Value, source: &str) -> bool {
 pub fn set_derived_items(task: &mut Value, derived: Vec<Value>) -> bool {
     let before = task["links"].clone();
     let mut links: Vec<Value> = before.as_array().cloned().unwrap_or_default();
-    links.retain(|l| l["source"] != "derived" || l["kind"] == "pr" || derived.iter().any(|d| same(l, d)));
+    links.retain(|l| {
+        l["source"] != "derived" || l["kind"] == "pr" || derived.iter().any(|d| same(l, d))
+    });
     task["links"] = links.into();
     for link in derived {
         add_link(task, link, "derived");
@@ -617,7 +708,9 @@ pub fn set_agent_links(task: &mut Value, refs: &[String], t: &Tracker) -> bool {
 /// (marked it ready), so the next worktree check asks GitHub again.
 pub fn forget_pr(url: &str) {
     let mut cache = load_cache();
-    let Some(prs) = cache["prs"].as_object_mut() else { return };
+    let Some(prs) = cache["prs"].as_object_mut() else {
+        return;
+    };
     let before = prs.len();
     prs.retain(|_, entry| entry["pr"]["url"].as_str() != Some(url));
     if prs.len() != before {
@@ -630,20 +723,30 @@ pub fn forget_pr(url: &str) {
 pub fn pr_merged(task: &Value) -> bool {
     let branch = task["branch"].as_str().unwrap_or("");
     let cache = load_cache();
-    task["links"].as_array().into_iter().flatten().filter(|l| l["kind"] == "pr").any(|l| {
-        let Some((repo, n)) = l["ref"].as_str().and_then(|r| r.split_once('#')) else { return false };
-        let pr = &cache["prs"][&pr_key(repo, branch)]["pr"];
-        pr["state"] == "merged" && pr["number"].as_u64().map(|x| x.to_string()).as_deref() == Some(n)
-    })
+    task["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|l| l["kind"] == "pr")
+        .any(|l| {
+            let Some((repo, n)) = l["ref"].as_str().and_then(|r| r.split_once('#')) else {
+                return false;
+            };
+            let pr = &cache["prs"][&pr_key(repo, branch)]["pr"];
+            pr["state"] == "merged"
+                && pr["number"].as_u64().map(|x| x.to_string()).as_deref() == Some(n)
+        })
 }
 
 /// The link John most likely wants to open: a PR, then an issue, a card,
 /// a commit; the first of a kind.
 pub fn primary(task: &Value) -> Option<&Value> {
     let links = task["links"].as_array()?;
-    ["pr", "issue", "card", "commit"]
-        .iter()
-        .find_map(|kind| links.iter().find(|l| l["kind"] == *kind && l["url"].as_str().is_some_and(|u| !u.is_empty())))
+    ["pr", "issue", "card", "commit"].iter().find_map(|kind| {
+        links
+            .iter()
+            .find(|l| l["kind"] == *kind && l["url"].as_str().is_some_and(|u| !u.is_empty()))
+    })
 }
 
 #[cfg(test)]
@@ -659,7 +762,11 @@ mod tests {
             "ssh://git@github.com/johnallen3d/switchyard.git",
             "github:johnallen3d/switchyard",
         ] {
-            assert_eq!(github_repo(url).as_deref(), Some("johnallen3d/switchyard"), "{url}");
+            assert_eq!(
+                github_repo(url).as_deref(),
+                Some("johnallen3d/switchyard"),
+                "{url}"
+            );
         }
         assert_eq!(github_repo("https://gitlab.com/a/b.git"), None);
         assert_eq!(github_repo("~/dev/src/local"), None);
@@ -672,10 +779,26 @@ mod tests {
             "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#)
             .unwrap()
             .unwrap();
-        assert_eq!(pr, Pr { number: 57, url: "u".into(), state: "open".into(), checks: "pass".into(), fixes: vec![] });
-        let pr = parse_pr_list(r#"[{"number":1,"state":"OPEN","isDraft":true,
-            "statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}]"#).unwrap().unwrap();
-        assert_eq!((pr.state.as_str(), pr.checks.as_str()), ("draft", "pending"));
+        assert_eq!(
+            pr,
+            Pr {
+                number: 57,
+                url: "u".into(),
+                state: "open".into(),
+                checks: "pass".into(),
+                fixes: vec![]
+            }
+        );
+        let pr = parse_pr_list(
+            r#"[{"number":1,"state":"OPEN","isDraft":true,
+            "statusCheckRollup":[{"status":"IN_PROGRESS","conclusion":""}]}]"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (pr.state.as_str(), pr.checks.as_str()),
+            ("draft", "pending")
+        );
         let pr = parse_pr_list(r#"[{"number":1,"state":"MERGED","statusCheckRollup":[
             {"status":"COMPLETED","conclusion":"SUCCESS"},{"status":"COMPLETED","conclusion":"FAILURE"}]}]"#)
             .unwrap()
@@ -690,7 +813,13 @@ mod tests {
             {"kind":"card","system":"fizzy","ref":"123","url":"c","source":"spawn"},
             {"kind":"pr","system":"github","ref":"o/r#1","url":"old","source":"derived"},
         ]});
-        let pr = Some(Pr { number: 2, url: "new".into(), state: "open".into(), checks: String::new(), fixes: vec![] });
+        let pr = Some(Pr {
+            number: 2,
+            url: "new".into(),
+            state: "open".into(),
+            checks: String::new(),
+            fixes: vec![],
+        });
         assert!(set_derived_pr(&mut task, "o/r", &pr));
         let links = task["links"].as_array().unwrap();
         assert_eq!(links.len(), 2);
@@ -708,7 +837,13 @@ mod tests {
     #[test]
     fn explicit_pr_link_wins_and_gets_live_state() {
         let mut task = json!({"links": [{"kind":"pr","system":"github","ref":"o/r#2","url":"x","source":"manual"}]});
-        let pr = Pr { number: 2, url: "x".into(), state: "merged".into(), checks: "pass".into(), fixes: vec![] };
+        let pr = Pr {
+            number: 2,
+            url: "x".into(),
+            state: "merged".into(),
+            checks: "pass".into(),
+            fixes: vec![],
+        };
         assert!(!set_derived_pr(&mut task, "o/r", &Some(pr.clone())));
         add_live(&mut task, "o/r", &pr);
         assert_eq!(task["links"][0]["state"], "merged");
@@ -725,16 +860,31 @@ mod tests {
 
     #[test]
     fn tracker_decides_bare_refs() {
-        assert_eq!(fizzy(), Tracker {
-            github: Some("o/r".into()), fizzy_account: Some("6284043".into()), fizzy_board: Some("board".into()), cards: true,
-        });
-        assert_eq!(Tracker::new("github:a/b, fizzy:1", "").github.as_deref(), Some("a/b"));
+        assert_eq!(
+            fizzy(),
+            Tracker {
+                github: Some("o/r".into()),
+                fizzy_account: Some("6284043".into()),
+                fizzy_board: Some("board".into()),
+                cards: true,
+            }
+        );
+        assert_eq!(
+            Tracker::new("github:a/b, fizzy:1", "").github.as_deref(),
+            Some("a/b")
+        );
         assert!(!Tracker::new("github:a/b, fizzy:1", "").cards);
         let issue = parse_ref("#42", &github()).unwrap();
-        assert_eq!((issue["kind"].as_str(), issue["ref"].as_str()), (Some("issue"), Some("o/r#42")));
+        assert_eq!(
+            (issue["kind"].as_str(), issue["ref"].as_str()),
+            (Some("issue"), Some("o/r#42"))
+        );
         assert_eq!(issue["url"], "https://github.com/o/r/issues/42");
         let card = parse_ref("#42", &fizzy()).unwrap();
-        assert_eq!((card["kind"].as_str(), card["ref"].as_str()), (Some("card"), Some("42")));
+        assert_eq!(
+            (card["kind"].as_str(), card["ref"].as_str()),
+            (Some("card"), Some("42"))
+        );
         assert_eq!(card["url"], "https://app.fizzy.do/6284043/cards/42");
         assert!(parse_ref("#42", &Tracker::default()).is_none());
     }
@@ -744,18 +894,33 @@ mod tests {
         assert_eq!(tracker_or_fizzy("", "6284043/b1\n"), "fizzy:6284043/b1");
         assert_eq!(tracker_or_fizzy("github:o/r", "6284043/b1"), "github:o/r");
         assert_eq!(tracker_or_fizzy("", ""), "");
-        let t = Tracker::new(&tracker_or_fizzy("", "6284043/b1"), "https://github.com/o/r");
+        let t = Tracker::new(
+            &tracker_or_fizzy("", "6284043/b1"),
+            "https://github.com/o/r",
+        );
         let card = parse_ref("#1062", &t).unwrap();
-        assert_eq!((card["kind"].as_str(), card["url"].as_str()), (Some("card"), Some("https://app.fizzy.do/6284043/cards/1062")));
+        assert_eq!(
+            (card["kind"].as_str(), card["url"].as_str()),
+            (
+                Some("card"),
+                Some("https://app.fizzy.do/6284043/cards/1062")
+            )
+        );
     }
 
     #[test]
     fn parse_ref_reads_urls_and_prefixes() {
         let t = github();
         let pr = parse_ref("https://github.com/a/b/pull/57/files", &t).unwrap();
-        assert_eq!((pr["kind"].as_str(), pr["ref"].as_str()), (Some("pr"), Some("a/b#57")));
+        assert_eq!(
+            (pr["kind"].as_str(), pr["ref"].as_str()),
+            (Some("pr"), Some("a/b#57"))
+        );
         let card = parse_ref("https://app.fizzy.do/99/cards/1041.", &t).unwrap();
-        assert_eq!((card["ref"].as_str(), card["url"].as_str()), (Some("1041"), Some("https://app.fizzy.do/99/cards/1041")));
+        assert_eq!(
+            (card["ref"].as_str(), card["url"].as_str()),
+            (Some("1041"), Some("https://app.fizzy.do/99/cards/1041"))
+        );
         assert_eq!(parse_ref("fizzy:7", &t).unwrap()["url"], "");
         assert_eq!(parse_ref("a/b#3", &t).unwrap()["ref"], "a/b#3");
         assert_eq!(parse_ref("pr:9", &t).unwrap()["kind"], "pr");
@@ -767,14 +932,20 @@ mod tests {
 
     #[test]
     fn prompt_refs_branch_numbers_and_fixes() {
-        let links = refs_in_text("Work on https://app.fizzy.do/1/cards/5 (see #42), then #42 again; email a#b", &github());
+        let links = refs_in_text(
+            "Work on https://app.fizzy.do/1/cards/5 (see #42), then #42 again; email a#b",
+            &github(),
+        );
         let refs: Vec<_> = links.iter().map(|l| l["ref"].as_str().unwrap()).collect();
         assert_eq!(refs, ["5", "o/r#42"]);
         assert_eq!(branch_number("feature/42-foo"), Some("42"));
         assert_eq!(branch_number("42"), Some("42"));
         assert_eq!(branch_number("feature/v2-foo"), None);
         assert_eq!(branch_number("feature/42foo"), None);
-        assert_eq!(fixed_refs("Fixes #1, closes a/b#2.\nResolved: #3 and fix #1 again; fixing #9"), ["#1", "a/b#2", "#3"]);
+        assert_eq!(
+            fixed_refs("Fixes #1, closes a/b#2.\nResolved: #3 and fix #1 again; fixing #9"),
+            ["#1", "a/b#2", "#3"]
+        );
     }
 
     #[test]
@@ -782,14 +953,34 @@ mod tests {
         let t = fizzy();
         let mut task = json!({"links": []});
         assert!(add_link(&mut task, parse_ref("#5", &t).unwrap(), "derived"));
-        assert!(!add_link(&mut task, parse_ref("#5", &t).unwrap(), "derived"));
-        assert!(add_link(&mut task, parse_ref("fizzy:5", &t).unwrap(), "spawn"));
+        assert!(!add_link(
+            &mut task,
+            parse_ref("#5", &t).unwrap(),
+            "derived"
+        ));
+        assert!(add_link(
+            &mut task,
+            parse_ref("fizzy:5", &t).unwrap(),
+            "spawn"
+        ));
         assert_eq!(task["links"].as_array().unwrap().len(), 1);
         assert_eq!(task["links"][0]["source"], "spawn");
-        assert!(!add_link(&mut task, parse_ref("#5", &t).unwrap(), "derived"));
-        assert!(set_agent_links(&mut task, &["fizzy:6".into(), "#7".into(), "junk".into()], &t));
+        assert!(!add_link(
+            &mut task,
+            parse_ref("#5", &t).unwrap(),
+            "derived"
+        ));
+        assert!(set_agent_links(
+            &mut task,
+            &["fizzy:6".into(), "#7".into(), "junk".into()],
+            &t
+        ));
         assert_eq!(task["links"].as_array().unwrap().len(), 3);
-        assert!(!set_agent_links(&mut task, &["fizzy:6".into(), "#7".into()], &t));
+        assert!(!set_agent_links(
+            &mut task,
+            &["fizzy:6".into(), "#7".into()],
+            &t
+        ));
         assert!(set_agent_links(&mut task, &[], &t));
         assert_eq!(task["links"].as_array().unwrap().len(), 1);
         let mut old = json!({});
@@ -803,17 +994,39 @@ mod tests {
         let mut task = json!({"links": []});
         add_link(&mut task, parse_ref("#5", &t).unwrap(), "derived");
         add_link(&mut task, parse_ref("fizzy:6", &t).unwrap(), "spawn");
-        set_derived_pr(&mut task, "o/r", &Some(Pr { number: 2, url: "p".into(), state: "open".into(), checks: String::new(), fixes: vec![] }));
-        assert!(!set_derived_items(&mut task, vec![parse_ref("#5", &t).unwrap()]));
-        assert!(set_derived_items(&mut task, vec![parse_ref("#7", &t).unwrap()]));
+        set_derived_pr(
+            &mut task,
+            "o/r",
+            &Some(Pr {
+                number: 2,
+                url: "p".into(),
+                state: "open".into(),
+                checks: String::new(),
+                fixes: vec![],
+            }),
+        );
+        assert!(!set_derived_items(
+            &mut task,
+            vec![parse_ref("#5", &t).unwrap()]
+        ));
+        assert!(set_derived_items(
+            &mut task,
+            vec![parse_ref("#7", &t).unwrap()]
+        ));
         let refs: Vec<(&str, &str)> = task["links"]
             .as_array()
             .unwrap()
             .iter()
             .map(|l| (l["ref"].as_str().unwrap(), l["source"].as_str().unwrap()))
             .collect();
-        assert_eq!(refs, [("6", "spawn"), ("o/r#2", "derived"), ("7", "derived")]);
-        assert!(!set_derived_items(&mut task, vec![parse_ref("#7", &t).unwrap()]));
+        assert_eq!(
+            refs,
+            [("6", "spawn"), ("o/r#2", "derived"), ("7", "derived")]
+        );
+        assert!(!set_derived_items(
+            &mut task,
+            vec![parse_ref("#7", &t).unwrap()]
+        ));
         let mut old = json!({});
         assert!(!set_derived_items(&mut old, vec![]));
         assert_eq!(old, json!({}));

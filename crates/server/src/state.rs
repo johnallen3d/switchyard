@@ -61,7 +61,8 @@ pub fn split_rows(output: &str) -> Rows {
 /// Whether the rows have a session labelled `label`: the project's session
 /// that makes a host warm for `auto`.
 fn has_session(text: &str, label: &str) -> bool {
-    text.lines().any(|l| l.starts_with("S\t") && l.split('\t').nth(4) == Some(label))
+    text.lines()
+        .any(|l| l.starts_with("S\t") && l.split('\t').nth(4) == Some(label))
 }
 
 /// The last attempt at something the server lists over SSH: the last good
@@ -78,7 +79,13 @@ pub struct Listing<T> {
 
 impl<T> Default for Listing<T> {
     fn default() -> Self {
-        Listing { value: None, at: None, error: None, running: false, wanted: false }
+        Listing {
+            value: None,
+            at: None,
+            error: None,
+            running: false,
+            wanted: false,
+        }
     }
 }
 
@@ -86,7 +93,11 @@ impl<T> Listing<T> {
     /// Whether to start an attempt: none yet, wanted, or the last is `every`
     /// old, and none running.
     pub fn due(&self, now: Instant, every: std::time::Duration) -> bool {
-        !self.running && (self.wanted || self.at.is_none_or(|at| now.saturating_duration_since(at) >= every))
+        !self.running
+            && (self.wanted
+                || self
+                    .at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= every))
     }
 
     pub fn set(&mut self, got: Result<T, String>, now: Instant) {
@@ -163,7 +174,10 @@ impl State {
             .iter()
             .map(|name| match old.iter().position(|h| &h.name == name) {
                 Some(i) => old.swap_remove(i),
-                None => Host { name: name.clone(), ..Host::default() },
+                None => Host {
+                    name: name.clone(),
+                    ..Host::default()
+                },
             })
             .collect();
     }
@@ -175,7 +189,9 @@ impl State {
     /// New rows from a host's watcher; whether anything a client sees
     /// changed (the safety timer mostly sends the same rows again).
     pub fn set_rows(&mut self, name: &str, rows: Rows, now: Instant) -> bool {
-        let Some(host) = self.host(name) else { return false };
+        let Some(host) = self.host(name) else {
+            return false;
+        };
         host.read_at = Some(now);
         let changed = host.rows != rows || host.error.is_some();
         host.rows = rows;
@@ -184,14 +200,18 @@ impl State {
     }
 
     pub fn set_error(&mut self, name: &str, error: String) -> bool {
-        let Some(host) = self.host(name) else { return false };
+        let Some(host) = self.host(name) else {
+            return false;
+        };
         let changed = host.error.as_deref() != Some(&error);
         host.error = Some(error);
         changed
     }
 
     pub fn set_watching(&mut self, name: &str, watching: bool) -> bool {
-        let Some(host) = self.host(name) else { return false };
+        let Some(host) = self.host(name) else {
+            return false;
+        };
         let changed = host.watching != watching;
         host.watching = watching;
         changed
@@ -200,13 +220,23 @@ impl State {
     /// The registry, read (`checked` false) or reconciled (true); whether
     /// a client would see a difference (most timed checks change nothing).
     /// A failed read keeps the last good list along with the error.
-    pub fn set_tasks(&mut self, got: Result<Vec<Value>, String>, checked: bool, now: Instant) -> bool {
+    pub fn set_tasks(
+        &mut self,
+        got: Result<Vec<Value>, String>,
+        checked: bool,
+        now: Instant,
+    ) -> bool {
         match got {
             Ok(list) => {
                 let changed = self.tasks.list.as_ref() != Some(&list)
                     || self.tasks.checked != checked
                     || self.tasks.error.is_some();
-                self.tasks = Tasks { list: Some(list), checked, read_at: Some(now), error: None };
+                self.tasks = Tasks {
+                    list: Some(list),
+                    checked,
+                    read_at: Some(now),
+                    error: None,
+                };
                 changed
             }
             Err(e) => {
@@ -221,7 +251,10 @@ impl State {
     /// first: where to look for a block in it.
     pub fn hosts_for_session(&self, session: &str) -> Vec<String> {
         let has = |h: &Host| {
-            h.rows.text.lines().any(|l| l.starts_with("S\t") && l.split('\t').nth(3) == Some(session))
+            h.rows
+                .text
+                .lines()
+                .any(|l| l.starts_with("S\t") && l.split('\t').nth(3) == Some(session))
         };
         let (mut first, rest): (Vec<&Host>, Vec<&Host>) = self.hosts.iter().partition(|h| has(h));
         first.extend(rest);
@@ -230,7 +263,8 @@ impl State {
 
     /// The snapshot as clients get it.
     pub fn snapshot(&self, now: Instant) -> Value {
-        let age = |at: Option<Instant>| at.map(|at| now.saturating_duration_since(at).as_millis() as u64);
+        let age =
+            |at: Option<Instant>| at.map(|at| now.saturating_duration_since(at).as_millis() as u64);
         let hosts: Vec<Value> = self
             .hosts
             .iter()
@@ -265,15 +299,25 @@ impl State {
 
     /// The reply to `folders` for `host` (see core's `server`), and whether
     /// the listing is older than `stale`, so worth listing again.
-    pub fn folders_reply(&self, host: &str, now: Instant, stale: std::time::Duration) -> (Value, bool) {
+    pub fn folders_reply(
+        &self,
+        host: &str,
+        now: Instant,
+        stale: std::time::Duration,
+    ) -> (Value, bool) {
         let Some(l) = self.info.folders.get(host) else {
-            return (json!({ "error": format!("no folders kept for {host}") }), false);
+            return (
+                json!({ "error": format!("no folders kept for {host}") }),
+                false,
+            );
         };
         let age = l.at.map(|at| now.saturating_duration_since(at));
         let stale = age.is_some_and(|a| a >= stale);
         let reply = match (&l.value, &l.error, age) {
             (_, Some(e), _) => json!({ "error": format!("{host}: {e}") }),
-            (Some(text), None, Some(age)) => json!({ "host": host, "folders": text, "age_ms": age.as_millis() as u64 }),
+            (Some(text), None, Some(age)) => {
+                json!({ "host": host, "folders": text, "age_ms": age.as_millis() as u64 })
+            }
             _ => json!({ "error": format!("{host}: not listed yet") }),
         };
         (reply, stale)
@@ -289,7 +333,11 @@ impl State {
             .into_iter()
             .map(|name| {
                 let l = &self.info.metrics[name];
-                let rows_name = if *name == self.info.local { "local" } else { name.as_str() };
+                let rows_name = if *name == self.info.local {
+                    "local"
+                } else {
+                    name.as_str()
+                };
                 let rows = self
                     .hosts
                     .iter()
@@ -363,10 +411,23 @@ mod tests {
     #[test]
     fn split_rows_keeps_the_picker_rows_and_takes_the_status() {
         let rows = split_rows(OUTPUT);
-        assert_eq!(rows.text, "S\t-\tlocal\tsession:1\tagents\nT\twindow:a\tworking\tclaude\t~/dev\nT\twindow:b\t\tshell\t~\n");
+        assert_eq!(
+            rows.text,
+            "S\t-\tlocal\tsession:1\tagents\nT\twindow:a\tworking\tclaude\t~/dev\nT\twindow:b\t\tshell\t~\n"
+        );
         let a = &rows.live["window:a"];
-        assert_eq!((a.state.as_str(), a.at, a.msg.as_str()), ("working", 1794084018, "thinking"));
-        assert_eq!(rows.live["window:b"], TabStatus { state: "idle".into(), at: 0, msg: String::new() });
+        assert_eq!(
+            (a.state.as_str(), a.at, a.msg.as_str()),
+            ("working", 1794084018, "thinking")
+        );
+        assert_eq!(
+            rows.live["window:b"],
+            TabStatus {
+                state: "idle".into(),
+                at: 0,
+                msg: String::new()
+            }
+        );
         assert_eq!(rows.busy, 2);
     }
 
@@ -376,18 +437,47 @@ mod tests {
         let t0 = Instant::now();
         s.info.track("mac", &["mac".into(), "miller".into()], &[]);
         let stale = std::time::Duration::from_secs(60);
-        assert_eq!(s.folders_reply("miller", t0, stale).0["error"], "miller: not listed yet");
-        assert_eq!(s.folders_reply("nas", t0, stale).0["error"], "no folders kept for nas");
-        s.info.folders.get_mut("miller").unwrap().set(Ok("/home/j/dev\n".into()), t0);
+        assert_eq!(
+            s.folders_reply("miller", t0, stale).0["error"],
+            "miller: not listed yet"
+        );
+        assert_eq!(
+            s.folders_reply("nas", t0, stale).0["error"],
+            "no folders kept for nas"
+        );
+        s.info
+            .folders
+            .get_mut("miller")
+            .unwrap()
+            .set(Ok("/home/j/dev\n".into()), t0);
         let t1 = t0 + std::time::Duration::from_secs(61);
         let (reply, stale_now) = s.folders_reply("miller", t1, stale);
-        assert_eq!((reply["folders"].as_str(), reply["age_ms"].as_u64(), stale_now), (Some("/home/j/dev\n"), Some(61000), true));
+        assert_eq!(
+            (
+                reply["folders"].as_str(),
+                reply["age_ms"].as_u64(),
+                stale_now
+            ),
+            (Some("/home/j/dev\n"), Some(61000), true)
+        );
         // A failed listing is an error until the next good one.
-        s.info.folders.get_mut("miller").unwrap().set(Err("couldn't reach miller".into()), t1);
-        assert_eq!(s.folders_reply("miller", t1, stale).0["error"], "miller: couldn't reach miller");
+        s.info
+            .folders
+            .get_mut("miller")
+            .unwrap()
+            .set(Err("couldn't reach miller".into()), t1);
+        assert_eq!(
+            s.folders_reply("miller", t1, stale).0["error"],
+            "miller: couldn't reach miller"
+        );
         // Hosts the config drops go.
         s.info.track("mac", &["mac".into()], &[]);
-        assert!(s.folders_reply("miller", t1, stale).0["error"].as_str().unwrap().starts_with("no folders"));
+        assert!(
+            s.folders_reply("miller", t1, stale).0["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("no folders")
+        );
     }
 
     #[test]
@@ -409,9 +499,23 @@ mod tests {
     fn probes_take_agents_and_sessions_from_the_rows() {
         let mut s = state();
         let now = Instant::now();
-        s.info.track("mac", &[], &["miller".into(), "mac".into(), "drummer".into()]);
-        s.info.metrics.get_mut("miller").unwrap().set(Ok(Metrics { load: 0.5, mem_gib: 30.0 }), now);
-        s.info.metrics.get_mut("drummer").unwrap().set(Err("couldn't reach drummer".into()), now);
+        s.info.track(
+            "mac",
+            &[],
+            &["miller".into(), "mac".into(), "drummer".into()],
+        );
+        s.info.metrics.get_mut("miller").unwrap().set(
+            Ok(Metrics {
+                load: 0.5,
+                mem_gib: 30.0,
+            }),
+            now,
+        );
+        s.info
+            .metrics
+            .get_mut("drummer")
+            .unwrap()
+            .set(Err("couldn't reach drummer".into()), now);
         s.set_rows("miller", split_rows(OUTPUT), now);
         s.set_rows("local", split_rows("S\t-\tlocal\ts\tother\nB\t0\n"), now);
         let reply = s.probes_reply("agents", now);
@@ -419,9 +523,15 @@ mod tests {
         let names: Vec<_> = p.iter().map(|e| e["host"].as_str().unwrap()).collect();
         assert_eq!(names, ["drummer", "mac", "miller"]);
         assert_eq!(p[2]["load"], 0.5);
-        assert_eq!((p[2]["agents"].as_u64(), p[2]["warm"].as_bool()), (Some(2), Some(true)));
+        assert_eq!(
+            (p[2]["agents"].as_u64(), p[2]["warm"].as_bool()),
+            (Some(2), Some(true))
+        );
         // The config host's rows are `local`'s.
-        assert_eq!((p[1]["agents"].as_u64(), p[1]["warm"].as_bool()), (Some(0), Some(false)));
+        assert_eq!(
+            (p[1]["agents"].as_u64(), p[1]["warm"].as_bool()),
+            (Some(0), Some(false))
+        );
         assert!(p[1]["age_ms"].is_null() && p[1]["load"].is_null());
         // No rows read for drummer: nothing to say about its agents.
         assert_eq!(p[0]["error"], "couldn't reach drummer");
@@ -447,7 +557,10 @@ mod tests {
         assert!(!s.set_error("local", "gone".into()));
         assert!(s.set_rows("local", split_rows(OUTPUT), t1));
         assert!(s.snapshot(t1)["hosts"][0]["error"].is_null());
-        assert!(!s.set_rows("nas", Rows::default(), t1), "unknown hosts are ignored");
+        assert!(
+            !s.set_rows("nas", Rows::default(), t1),
+            "unknown hosts are ignored"
+        );
     }
 
     #[test]
@@ -458,7 +571,12 @@ mod tests {
         s.set_error("miller", "miller: connection lost".into());
         let snap = s.snapshot(now);
         assert_eq!(snap["hosts"][1]["error"], "miller: connection lost");
-        assert!(snap["hosts"][1]["rows"].as_str().unwrap().starts_with("S\t"));
+        assert!(
+            snap["hosts"][1]["rows"]
+                .as_str()
+                .unwrap()
+                .starts_with("S\t")
+        );
         assert!(snap["hosts"][0]["age_ms"].is_null());
     }
 
@@ -467,7 +585,11 @@ mod tests {
         let mut s = State::default();
         let now = Instant::now();
         s.set_hosts(&["local".into(), "miller".into()]);
-        s.set_rows("miller", split_rows("S\tmiller\tmiller\tsession:x\tproj\nT\twindow:a\tidle\tname\t~\n"), now);
+        s.set_rows(
+            "miller",
+            split_rows("S\tmiller\tmiller\tsession:x\tproj\nT\twindow:a\tidle\tname\t~\n"),
+            now,
+        );
         assert_eq!(s.hosts_for_session("session:x"), ["miller", "local"]);
         assert_eq!(s.hosts_for_session("session:y"), ["local", "miller"]);
     }
@@ -478,7 +600,12 @@ mod tests {
         s.set_rows("miller", split_rows(OUTPUT), Instant::now());
         s.set_hosts(&["local".into(), "drummer".into(), "miller".into()]);
         let snap = s.snapshot(Instant::now());
-        let names: Vec<_> = snap["hosts"].as_array().unwrap().iter().map(|h| h["host"].as_str().unwrap()).collect();
+        let names: Vec<_> = snap["hosts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| h["host"].as_str().unwrap())
+            .collect();
         assert_eq!(names, ["local", "drummer", "miller"]);
         assert_ne!(snap["hosts"][2]["rows"], "");
     }
@@ -493,11 +620,17 @@ mod tests {
             {"window_id": "window:b", "ended_at": 5},
         ]);
         assert!(s.set_tasks(Ok(tasks.as_array().unwrap().clone()), true, now));
-        assert!(!s.set_tasks(Ok(tasks.as_array().unwrap().clone()), true, now), "the same tasks again");
+        assert!(
+            !s.set_tasks(Ok(tasks.as_array().unwrap().clone()), true, now),
+            "the same tasks again"
+        );
         s.set_rows("local", split_rows(OUTPUT), now);
         let snap = s.snapshot(now);
         let t = &snap["tasks"];
-        assert_eq!((t[0]["status"].as_str(), t[0]["status_msg"].as_str()), (Some("working"), Some("thinking")));
+        assert_eq!(
+            (t[0]["status"].as_str(), t[0]["status_msg"].as_str()),
+            (Some("working"), Some("thinking"))
+        );
         // No listed tab: the reconcile's status stays.
         assert_eq!(t[1]["status"], "blocked");
         // Ended tasks get no status.

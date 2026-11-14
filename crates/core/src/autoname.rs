@@ -52,10 +52,19 @@ const SCHEMA: &str = r#"{
 
 /// A name for work that has none: from `item`'s title when it can be
 /// looked up, otherwise from `prompt`. None when neither gives one.
-pub fn name_work(profile: &str, item: Option<&str>, tracker: &Tracker, prompt: &str) -> Option<String> {
+pub fn name_work(
+    profile: &str,
+    item: Option<&str>,
+    tracker: &Tracker,
+    prompt: &str,
+) -> Option<String> {
     item.and_then(|i| item_title(profile, i, tracker))
         .and_then(|title| suggest(&title))
-        .or_else(|| Some(prompt.trim()).filter(|p| !p.is_empty()).and_then(suggest))
+        .or_else(|| {
+            Some(prompt.trim())
+                .filter(|p| !p.is_empty())
+                .and_then(suggest)
+        })
 }
 
 /// A work item's title: a Fizzy card's from the Fizzy CLI, a GitHub issue
@@ -89,8 +98,13 @@ pub(crate) fn link_title(profile: &str, link: &Value, tracker: &Tracker) -> Opti
 
 /// The account in a Fizzy card link's URL.
 fn card_account(link: &Value) -> Option<String> {
-    let rest = link["url"].as_str()?.strip_prefix("https://app.fizzy.do/")?;
-    rest.split('/').next().filter(|a| !a.is_empty()).map(String::from)
+    let rest = link["url"]
+        .as_str()?
+        .strip_prefix("https://app.fizzy.do/")?;
+    rest.split('/')
+        .next()
+        .filter(|a| !a.is_empty())
+        .map(String::from)
 }
 
 /// Ask the on-device model to name work described by `text`.
@@ -101,10 +115,21 @@ fn suggest(text: &str) -> Option<String> {
     let text: String = text.chars().take(MAX_INPUT_CHARS).collect();
     // `fm` reads the schema from a file; one per process keeps concurrent
     // launches from tripping over each other.
-    let schema = std::env::temp_dir().join(format!("switchyard-name-schema-{}.json", std::process::id()));
+    let schema = std::env::temp_dir().join(format!(
+        "switchyard-name-schema-{}.json",
+        std::process::id()
+    ));
     std::fs::write(&schema, SCHEMA).ok()?;
     let mut cmd = Command::new("fm");
-    cmd.args(["respond", "--no-stream", "--greedy", "--instructions", INSTRUCTIONS, "--schema"]).arg(&schema);
+    cmd.args([
+        "respond",
+        "--no-stream",
+        "--greedy",
+        "--instructions",
+        INSTRUCTIONS,
+        "--schema",
+    ])
+    .arg(&schema);
     // The text goes in on stdin, so one starting with `-` stays text.
     let out = bounded_output(&mut cmd, Some(&text), FM_TIMEOUT);
     let _ = std::fs::remove_file(&schema);
@@ -116,13 +141,24 @@ fn suggest(text: &str) -> Option<String> {
 /// there is no usable slug.
 fn parse(answer: &str) -> Option<String> {
     let v: Value = serde_json::from_str(answer.trim()).ok()?;
-    let prefix = v["prefix"].as_str().map(|p| p.trim().to_ascii_lowercase()).unwrap_or_default();
-    let prefix = PREFIXES.iter().find(|p| **p == prefix).copied().unwrap_or("feature");
+    let prefix = v["prefix"]
+        .as_str()
+        .map(|p| p.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let prefix = PREFIXES
+        .iter()
+        .find(|p| **p == prefix)
+        .copied()
+        .unwrap_or("feature");
     let slug = slug(v["slug"].as_str()?);
     if slug.is_empty() {
         return None;
     }
-    let name = if prefix == "feature" { slug } else { format!("{prefix}/{slug}") };
+    let name = if prefix == "feature" {
+        slug
+    } else {
+        format!("{prefix}/{slug}")
+    };
     name_problem(&name).is_none().then_some(name)
 }
 
@@ -136,7 +172,11 @@ fn slug(text: &str) -> String {
         .collect();
     let mut slug = String::new();
     for word in cleaned.split('-').filter(|w| !w.is_empty()) {
-        let extra = if slug.is_empty() { word.len() } else { word.len() + 1 };
+        let extra = if slug.is_empty() {
+            word.len()
+        } else {
+            word.len() + 1
+        };
         if slug.len() + extra > MAX_SLUG_CHARS {
             if slug.is_empty() {
                 slug.push_str(&word[..MAX_SLUG_CHARS]);
@@ -157,13 +197,28 @@ mod tests {
 
     #[test]
     fn answers_become_names() {
-        assert_eq!(parse(r#"{"prefix": "fix", "slug": "archive-during-check-crash"}"#).as_deref(), Some("fix/archive-during-check-crash"));
+        assert_eq!(
+            parse(r#"{"prefix": "fix", "slug": "archive-during-check-crash"}"#).as_deref(),
+            Some("fix/archive-during-check-crash")
+        );
         // Key order varies; feature work is named by its slug alone.
-        assert_eq!(parse(r#"{"slug": "dark-mode-toggle", "prefix": "feature"}"#).as_deref(), Some("dark-mode-toggle"));
-        assert_eq!(parse(r#"{"prefix": "Docs", "slug": "README Linux install"}"#).as_deref(), Some("docs/readme-linux-install"));
+        assert_eq!(
+            parse(r#"{"slug": "dark-mode-toggle", "prefix": "feature"}"#).as_deref(),
+            Some("dark-mode-toggle")
+        );
+        assert_eq!(
+            parse(r#"{"prefix": "Docs", "slug": "README Linux install"}"#).as_deref(),
+            Some("docs/readme-linux-install")
+        );
         // An unknown prefix falls back to feature.
-        assert_eq!(parse(r#"{"prefix": "bugfix", "slug": "x"}"#).as_deref(), Some("x"));
-        assert_eq!(parse(r#"{"prefix": "fix", "slug": "a/b.c--d_e"}"#).as_deref(), Some("fix/a-b-c-d-e"));
+        assert_eq!(
+            parse(r#"{"prefix": "bugfix", "slug": "x"}"#).as_deref(),
+            Some("x")
+        );
+        assert_eq!(
+            parse(r#"{"prefix": "fix", "slug": "a/b.c--d_e"}"#).as_deref(),
+            Some("fix/a-b-c-d-e")
+        );
     }
 
     #[test]
@@ -187,19 +242,29 @@ mod tests {
     #[ignore]
     fn live_names_from_prompt_and_card() {
         let fizzy = Tracker::new("fizzy:6284043/board", "");
-        for prompt in ["the tab picker crashes when you archive a task while its check is still running", "-n starts with a dash"] {
+        for prompt in [
+            "the tab picker crashes when you archive a task while its check is still running",
+            "-n starts with a dash",
+        ] {
             let name = name_work("personal", None, &fizzy, prompt);
             eprintln!("{prompt} -> {name:?}");
             assert!(name.is_some());
         }
         let title = item_title("personal", "#1056", &fizzy);
-        eprintln!("#1056 -> {title:?} -> {:?}", name_work("personal", Some("#1056"), &fizzy, ""));
+        eprintln!(
+            "#1056 -> {title:?} -> {:?}",
+            name_work("personal", Some("#1056"), &fizzy, "")
+        );
         assert!(title.is_some());
     }
 
     #[test]
     fn card_links_carry_their_account() {
-        let link = parse_ref("https://app.fizzy.do/6284043/cards/1056", &Tracker::default()).unwrap();
+        let link = parse_ref(
+            "https://app.fizzy.do/6284043/cards/1056",
+            &Tracker::default(),
+        )
+        .unwrap();
         assert_eq!(card_account(&link).as_deref(), Some("6284043"));
     }
 }

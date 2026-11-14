@@ -46,8 +46,8 @@
 use std::time::Duration;
 
 use crate::hosts::catalog;
-use crate::launch::launch;
 use crate::images::carry;
+use crate::launch::launch;
 use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, local_label, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
@@ -90,16 +90,31 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, S
     if cwd.is_empty() {
         return Err("no agent in that tab to archive".into());
     }
-    let out = host_bash(host, &checkout_script(cwd)).ok_or_else(|| format!("{host} can't be reached"))?;
+    let out =
+        host_bash(host, &checkout_script(cwd)).ok_or_else(|| format!("{host} can't be reached"))?;
     if !out.status.success() {
-        return Err(format!("{cwd} isn't a Git checkout: nothing to archive but the tab"));
+        return Err(format!(
+            "{cwd} isn't a Git checkout: nothing to archive but the tab"
+        ));
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut f = text.trim_end_matches('\n').split('\t');
-    let (top, repo, branch) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
-    let base = |p: &str| p.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+    let (top, repo, branch) = (
+        f.next().unwrap_or(""),
+        f.next().unwrap_or(""),
+        f.next().unwrap_or(""),
+    );
+    let base = |p: &str| {
+        p.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
     if top != repo && branch.is_empty() {
-        return Err(format!("{top} is on a detached HEAD; check out its branch to archive it"));
+        return Err(format!(
+            "{top} is on a detached HEAD; check out its branch to archive it"
+        ));
     }
     // Rex names Claude Code `claude-code`; spawned tasks record `claude`.
     let app = pane["app"].as_str().unwrap_or("");
@@ -144,20 +159,31 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
     // Tasks from before sessions were recorded: ask the host for the newest.
     let agent_session = match field("agent_session") {
         id if !id.is_empty() => id,
-        _ => newest_session(&task).ok_or_else(|| format!("{label}: no agent session found on {host}"))?,
+        _ => newest_session(&task)
+            .ok_or_else(|| format!("{label}: no agent session found on {host}"))?,
     };
     // Folder tasks have no catalog entry. Their recorded repository is the
     // primary checkout, which remains after the task worktree is archived.
     let path = catalog()?
         .into_iter()
-        .find(|p| crate::folders::home_relative(&p.path) == crate::folders::home_relative(&field("repo")))
+        .find(|p| {
+            crate::folders::home_relative(&p.path) == crate::folders::home_relative(&field("repo"))
+        })
         .map(|p| p.path)
         .unwrap_or_else(|| field("repo"));
     let harness = match field("harness").as_str() {
         "" => "claude".to_string(),
         h => h.to_string(),
     };
-    let (host, session, window_id) = launch(host, &path, &field("name"), &harness, None, None, Some((&agent_session, &field("profile"))))?;
+    let (host, session, window_id) = launch(
+        host,
+        &path,
+        &field("name"),
+        &harness,
+        None,
+        None,
+        Some((&agent_session, &field("profile"))),
+    )?;
     // The new task takes the ended one's place in the archive, keeping its
     // work items.
     update_tasks(|tasks| {
@@ -195,7 +221,11 @@ fn pin(window: &str) -> Result<String, String> {
         let task = open_task(tasks, window)?;
         let pinned = !task["pinned"].as_bool().unwrap_or(false);
         set_or_remove(task, "pinned", pinned.then(|| true.into()));
-        Ok(format!("{} {}", if pinned { "pinned" } else { "unpinned" }, label_of(task)))
+        Ok(format!(
+            "{} {}",
+            if pinned { "pinned" } else { "unpinned" },
+            label_of(task)
+        ))
     })
 }
 
@@ -208,7 +238,11 @@ pub fn snooze(window: &str, until: u64) -> Result<String, String> {
         Ok(label_of(task))
     })?;
     crate::server::refresh();
-    Ok(if until > 0 { format!("snoozed {label}") } else { format!("woke {label}") })
+    Ok(if until > 0 {
+        format!("snoozed {label}")
+    } else {
+        format!("woke {label}")
+    })
 }
 
 /// How long to let the agent take a paste before pressing Enter.
@@ -227,21 +261,35 @@ pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<St
 }
 
 /// `message` with pasted files taken from host `from`.
-fn message_from(from: &str, host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
+fn message_from(
+    from: &str,
+    host: &str,
+    session: &str,
+    window: &str,
+    text: &str,
+) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("nothing to send".into());
     }
     let pane = crate::transcript::agent_pane(host, session, window)?;
-    let block = pane["block"].as_str().filter(|b| !b.is_empty()).ok_or("no agent in that tab")?;
+    let block = pane["block"]
+        .as_str()
+        .filter(|b| !b.is_empty())
+        .ok_or("no agent in that tab")?;
     let label = load_tasks()
         .ok()
         .and_then(|tasks| {
-            tasks.iter().find(|t| t["ended_at"].is_null() && in_window(t, window)).map(label_of)
+            tasks
+                .iter()
+                .find(|t| t["ended_at"].is_null() && in_window(t, window))
+                .map(label_of)
         })
         .unwrap_or_else(|| "the agent".into());
     if pane["state"].as_str() == Some("blocked") {
-        return Err(format!("{label} is waiting on a prompt; answer it in its tab"));
+        return Err(format!(
+            "{label} is waiting on a prompt; answer it in its tab"
+        ));
     }
     let text = &carry(from, host, text)?;
     let event = serde_json::json!({
@@ -258,7 +306,12 @@ fn message_from(from: &str, host: &str, session: &str, window: &str, text: &str)
 
 /// `message` with the text of a prompt file (`LABEL:ID`, see `prompts`),
 /// which is removed once sent.
-pub fn message_ref(host: &str, session: &str, window: &str, prompt_ref: &str) -> Result<String, String> {
+pub fn message_ref(
+    host: &str,
+    session: &str,
+    window: &str,
+    prompt_ref: &str,
+) -> Result<String, String> {
     let text = fetch_prompt(prompt_ref)?;
     let (from, _) = parse_prompt_ref(prompt_ref)?;
     let sent = message_from(from, host, session, window, &text)?;
@@ -266,7 +319,10 @@ pub fn message_ref(host: &str, session: &str, window: &str, prompt_ref: &str) ->
     Ok(sent)
 }
 
-fn open_task<'a>(tasks: &'a mut [serde_json::Value], window: &str) -> Result<&'a mut serde_json::Value, String> {
+fn open_task<'a>(
+    tasks: &'a mut [serde_json::Value],
+    window: &str,
+) -> Result<&'a mut serde_json::Value, String> {
     tasks
         .iter_mut()
         .find(|t| t["ended_at"].is_null() && in_window(t, window))
@@ -274,7 +330,11 @@ fn open_task<'a>(tasks: &'a mut [serde_json::Value], window: &str) -> Result<&'a
 }
 
 fn label_of(task: &serde_json::Value) -> String {
-    format!("{}/{}", task["project"].as_str().unwrap_or(""), task["name"].as_str().unwrap_or(""))
+    format!(
+        "{}/{}",
+        task["project"].as_str().unwrap_or(""),
+        task["name"].as_str().unwrap_or("")
+    )
 }
 
 fn set_or_remove(task: &mut serde_json::Value, key: &str, value: Option<serde_json::Value>) {
@@ -314,7 +374,10 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
     // ended task reopened (it ended by mistake), or else one adopted for
     // the agent in it, so any agent tab can be archived. Otherwise the
     // latest ended task (closing its tab left the worktree).
-    let i = match tasks.iter().position(|t| t["ended_at"].is_null() && here(t)) {
+    let i = match tasks
+        .iter()
+        .position(|t| t["ended_at"].is_null() && here(t))
+    {
         Some(i) => i,
         None if archiving && agent_block(host, session, window).is_ok() => {
             match tasks.iter().rposition(here) {
@@ -339,8 +402,12 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
     }
     let ended = !tasks[i]["ended_at"].is_null();
     let field = |k: &str| tasks[i][k].as_str().unwrap_or("").to_string();
-    let (label, worktree, repo, branch) =
-        (format!("{}/{}", field("project"), field("name")), field("worktree"), field("repo"), field("branch"));
+    let (label, worktree, repo, branch) = (
+        format!("{}/{}", field("project"), field("name")),
+        field("worktree"),
+        field("repo"),
+        field("branch"),
+    );
 
     match action {
         // The task's main work item (see `links::primary`), for the caller
@@ -350,7 +417,10 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             .map(String::from)
             .ok_or_else(|| format!("{label} has no linked work item")),
         // A primary checkout is never removed: close the tab and end the task.
-        "archive" | "force-archive" if !worktree.is_empty() && worktree.trim_end_matches('/') == repo.trim_end_matches('/') => {
+        "archive" | "force-archive"
+            if !worktree.is_empty()
+                && worktree.trim_end_matches('/') == repo.trim_end_matches('/') =>
+        {
             if !ended {
                 let _ = rex(host, &["window", "close", "-s", session, window]);
                 tasks[i]["ended_at"] = now().into();
@@ -358,31 +428,45 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             kill_if_empty(host, session);
             tasks[i]["ended_reason"] = "archived".into();
             save_record(&tasks[i])?;
-            Ok(format!("archived {label}; kept the primary checkout {worktree}"))
+            Ok(format!(
+                "archived {label}; kept the primary checkout {worktree}"
+            ))
         }
         "archive" | "force-archive" => {
             let force = action == "force-archive";
             // Exit 3: the worktree is already gone. Any status line:
             // uncommitted changes. The last line, `@STATE`, says whether the
             // branch is merged (see MERGED_SH).
-            let out = host_bash(host, &archive_check(&worktree, &branch)).ok_or_else(|| format!("{host} can't be reached"))?;
+            let out = host_bash(host, &archive_check(&worktree, &branch))
+                .ok_or_else(|| format!("{host} can't be reached"))?;
             let exists = out.status.code() != Some(3);
             if exists && !force && !out.status.success() {
-                return Err(format!("{label}: can't read the worktree's status on {host}"));
+                return Err(format!(
+                    "{label}: can't read the worktree's status on {host}"
+                ));
             }
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            let status: Vec<&str> = text.lines().filter(|l| !l.is_empty() && !l.starts_with('@')).collect();
+            let status: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('@'))
+                .collect();
             let branch_merged = text.lines().any(|l| l == "@merged");
             // Safe to archive: the work is merged (its PR, or the branch
             // itself) or all its cards closed, and nothing is left uncommitted.
             let merged = exists
                 && out.status.success()
                 && status.is_empty()
-                && (branch_merged || crate::links::pr_merged(&tasks[i]) || crate::cards::cards_closed(&tasks[i]));
+                && (branch_merged
+                    || crate::links::pr_merged(&tasks[i])
+                    || crate::cards::cards_closed(&tasks[i]));
             if exists && !force && !status.is_empty() {
                 let files: Vec<&str> = status.iter().map(|l| l.get(3..).unwrap_or(l)).collect();
                 let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
-                let more = if files.len() > 3 { format!(" and {} more", files.len() - 3) } else { String::new() };
+                let more = if files.len() > 3 {
+                    format!(" and {} more", files.len() - 3)
+                } else {
+                    String::new()
+                };
                 return Err(format!(
                     "Archive refused: {label} has uncommitted changes in {shown}{more}. \
                      Press ⌃X, Enter, Enter in the tab picker (⌘K) to throw them away."
@@ -415,9 +499,16 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                     if force { "--force " } else { "" },
                     sh_quote(&branch)
                 );
-                let out = host_bash(host, &remove).ok_or_else(|| format!("{host} can't be reached"))?;
+                let out =
+                    host_bash(host, &remove).ok_or_else(|| format!("{host} can't be reached"))?;
                 let text = String::from_utf8_lossy(&out.stdout);
-                let last = text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+                let last = text
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
                 if !out.status.success() {
                     failed = true;
                     note = format!("; wt remove failed: {last}");
@@ -449,7 +540,10 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             if failed {
                 return Err(format!("{label}: tab closed{note}"));
             }
-            Ok(format!("archived {label}{}{note}", if merged { " (merged)" } else { "" }))
+            Ok(format!(
+                "archived {label}{}{note}",
+                if merged { " (merged)" } else { "" }
+            ))
         }
         _ => Err(format!("unknown action {action}")),
     }
@@ -462,27 +556,68 @@ mod tests {
 
     #[test]
     fn checkout_script_finds_the_checkout_repo_and_branch() {
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("switchyard-adopt-{}-{unique}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("switchyard-adopt-{}-{unique}", std::process::id()));
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
-            assert!(Command::new("git").arg("-C").arg(dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-                .args(args).output().unwrap().status.success(), "git {args:?}");
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args([
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "user.email=t@t",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
         };
         git(&repo, &["init", "--quiet", "-b", "main"]);
         git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
         let wt = root.join("wt");
-        git(&repo, &["worktree", "add", "--quiet", "-b", "feature/x", wt.to_str().unwrap(), "main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
         std::fs::create_dir_all(wt.join("sub")).unwrap();
         let run = |dir: &std::path::Path| {
-            let out = Command::new("bash").args(["-c", &checkout_script(dir.to_str().unwrap())]).output().unwrap();
-            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+            let out = Command::new("bash")
+                .args(["-c", &checkout_script(dir.to_str().unwrap())])
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
         };
         let (r, w) = (repo.to_str().unwrap(), wt.to_str().unwrap());
         // From a subfolder of a linked worktree.
-        assert_eq!(run(&wt.join("sub")), (Some(0), format!("{w}\t{r}\tfeature/x\n")));
+        assert_eq!(
+            run(&wt.join("sub")),
+            (Some(0), format!("{w}\t{r}\tfeature/x\n"))
+        );
         // The primary checkout is its own repo, which the archive keeps.
         assert_eq!(run(&repo), (Some(0), format!("{r}\t{r}\tmain\n")));
         assert_eq!(run(&root).0, Some(3));
@@ -491,23 +626,62 @@ mod tests {
 
     #[test]
     fn archive_check_reports_status_and_merge_state() {
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("switchyard-archive-{}-{unique}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "switchyard-archive-{}-{unique}",
+            std::process::id()
+        ));
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
-            assert!(Command::new("git").arg("-C").arg(dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-                .args(args).output().unwrap().status.success(), "git {args:?}");
+            assert!(
+                Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args([
+                        "-c",
+                        "user.name=t",
+                        "-c",
+                        "user.email=t@t",
+                        "-c",
+                        "commit.gpgsign=false"
+                    ])
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?}"
+            );
         };
         git(&repo, &["init", "--quiet", "-b", "main"]);
         git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
         let wt = root.join("wt");
-        git(&repo, &["worktree", "add", "--quiet", "-b", "feature/x", wt.to_str().unwrap(), "main"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+                "main",
+            ],
+        );
         git(&wt, &["commit", "--quiet", "--allow-empty", "-m", "work"]);
         let run = || {
-            let out = Command::new("bash").args(["-c", &archive_check(wt.to_str().unwrap(), "feature/x")]).output().unwrap();
-            (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned())
+            let out = Command::new("bash")
+                .args(["-c", &archive_check(wt.to_str().unwrap(), "feature/x")])
+                .output()
+                .unwrap();
+            (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            )
         };
         assert_eq!(run(), (Some(0), "@unmerged\n".into()));
         git(&repo, &["merge", "--quiet", "--ff-only", "feature/x"]);

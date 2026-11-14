@@ -88,7 +88,11 @@ pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, Stri
 /// `target` names the tab's host as the picker's title does: `-` for this
 /// one, else the hex-encoded label.
 pub fn fetch(target: &str, session: &str, window: &str) -> Value {
-    let host = if target == "-" { local_label() } else { unhex(target) };
+    let host = if target == "-" {
+        local_label()
+    } else {
+        unhex(target)
+    };
     fetch_inner(&host, session, window).unwrap_or_else(|e| json!({ "error": e }))
 }
 
@@ -98,15 +102,24 @@ pub fn fetch_on(host: &str, session: &str, window: &str) -> Value {
 }
 
 fn unhex(s: &str) -> String {
-    let bytes: Vec<u8> = (0..s.len() / 2).filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+    let bytes: Vec<u8> = (0..s.len() / 2)
+        .filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String> {
     let task = load_tasks().ok().and_then(|tasks| {
-        tasks.into_iter().find(|t| t["ended_at"].is_null() && in_window(t, window))
+        tasks
+            .into_iter()
+            .find(|t| t["ended_at"].is_null() && in_window(t, window))
     });
-    let f = |k: &str| task.as_ref().and_then(|t| t[k].as_str()).unwrap_or("").to_string();
+    let f = |k: &str| {
+        task.as_ref()
+            .and_then(|t| t[k].as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let pane = match (agent_pane(host, session, window), &task) {
         (Ok(p), _) => p,
         (Err(_), Some(_)) => json!({}),
@@ -137,7 +150,8 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
     let mut v = if host == local_label() {
         local(&profile, &harness, &dir, &agent_session, pid)
     } else {
-        remote(host, &profile, &harness, &dir, &agent_session, pid).unwrap_or_else(|e| json!({ "error": e }))
+        remote(host, &profile, &harness, &dir, &agent_session, pid)
+            .unwrap_or_else(|e| json!({ "error": e }))
     };
     if let Some(o) = v.as_object_mut() {
         o.insert("agent".into(), agent);
@@ -146,7 +160,14 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
 }
 
 /// `local` on `host`, over SSH.
-fn remote(host: &str, profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Result<Value, String> {
+fn remote(
+    host: &str,
+    profile: &str,
+    harness: &str,
+    dir: &str,
+    agent_session: &str,
+    pid: u64,
+) -> Result<Value, String> {
     let script = format!(
         "switchyard transcript --local {} {} {} {} {pid}",
         sh_quote(profile),
@@ -156,7 +177,9 @@ fn remote(host: &str, profile: &str, harness: &str, dir: &str, agent_session: &s
     );
     let out = host_bash(host, &script).ok_or_else(|| format!("can't reach {host}"))?;
     if !out.status.success() {
-        return Err(format!("no transcript reader on {host} (install matching Switchyard there)"));
+        return Err(format!(
+            "no transcript reader on {host} (install matching Switchyard there)"
+        ));
     }
     serde_json::from_slice(&out.stdout).map_err(|_| format!("unreadable transcript from {host}"))
 }
@@ -213,7 +236,11 @@ fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) 
             .map(|e| e.path().join(format!("{id}.jsonl")))
             .find(|p| p.is_file())
     };
-    running.as_deref().and_then(named).or_else(|| named(agent_session)).or_else(newest)
+    running
+        .as_deref()
+        .and_then(named)
+        .or_else(|| named(agent_session))
+        .or_else(newest)
 }
 
 fn newest_log(dir: &Path) -> Option<PathBuf> {
@@ -239,8 +266,16 @@ fn read(path: &Path, harness: &str) -> std::io::Result<Tail> {
     file.read_to_end(&mut bytes)?;
     let text = String::from_utf8_lossy(&bytes);
     // A cut mid-line: start at the next whole one.
-    let text = if start > 0 { text.split_once('\n').map_or("", |(_, rest)| rest) } else { &text };
-    Ok((entries(text, harness), tokens(text, harness), model(text, harness)))
+    let text = if start > 0 {
+        text.split_once('\n').map_or("", |(_, rest)| rest)
+    } else {
+        &text
+    };
+    Ok((
+        entries(text, harness),
+        tokens(text, harness),
+        model(text, harness),
+    ))
 }
 
 /// The model the agent's last turn ran on, or Pi's last switch to one since.
@@ -262,7 +297,9 @@ pub fn model(log: &str, harness: &str) -> Option<String> {
             &v["message"]["model"]
         };
         // Claude marks the turns it writes itself, such as API errors.
-        m.as_str().filter(|m| !m.is_empty() && *m != "<synthetic>").map(String::from)
+        m.as_str()
+            .filter(|m| !m.is_empty() && *m != "<synthetic>")
+            .map(String::from)
     })
 }
 
@@ -286,7 +323,9 @@ pub fn tokens(log: &str, harness: &str) -> Option<u64> {
             if v["type"] != "assistant" || v["isSidechain"] == true {
                 return None;
             }
-            let u = v["message"]["usage"].as_object().map(|_| &v["message"]["usage"])?;
+            let u = v["message"]["usage"]
+                .as_object()
+                .map(|_| &v["message"]["usage"])?;
             let sum = n(u, "input_tokens")
                 + n(u, "output_tokens")
                 + n(u, "cache_read_input_tokens")
@@ -300,7 +339,9 @@ pub fn tokens(log: &str, harness: &str) -> Option<u64> {
 pub fn entries(log: &str, harness: &str) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     for line in log.lines() {
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         if harness == "pi" {
             pi_entry(&v, &mut out);
         } else {
@@ -332,7 +373,9 @@ fn claude_entry(v: &Value, out: &mut Vec<(&'static str, String)>) {
     for part in content.as_array().into_iter().flatten() {
         match part["type"].as_str() {
             Some("text") => push_text(out, kind, part["text"].as_str().unwrap_or("")),
-            Some("tool_use") => push_tool(out, part["name"].as_str().unwrap_or("tool"), &part["input"]),
+            Some("tool_use") => {
+                push_tool(out, part["name"].as_str().unwrap_or("tool"), &part["input"])
+            }
             _ => {}
         }
     }
@@ -356,7 +399,11 @@ fn pi_entry(v: &Value, out: &mut Vec<(&'static str, String)>) {
     for part in content.as_array().into_iter().flatten() {
         match part["type"].as_str() {
             Some("text") => push_text(out, kind, part["text"].as_str().unwrap_or("")),
-            Some("toolCall") => push_tool(out, part["name"].as_str().unwrap_or("tool"), &part["arguments"]),
+            Some("toolCall") => push_tool(
+                out,
+                part["name"].as_str().unwrap_or("tool"),
+                &part["arguments"],
+            ),
             _ => {}
         }
     }
@@ -389,12 +436,26 @@ fn push_tool(out: &mut Vec<(&'static str, String)>, name: &str, input: &Value) {
         out.push(("ask", clip(text.trim(), TEXT)));
         return;
     }
-    let detail = ["description", "command", "file_path", "path", "pattern", "url", "query", "prompt", "skill"]
-        .iter()
-        .find_map(|k| input[*k].as_str().filter(|s| !s.is_empty()))
-        .unwrap_or("");
+    let detail = [
+        "description",
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "url",
+        "query",
+        "prompt",
+        "skill",
+    ]
+    .iter()
+    .find_map(|k| input[*k].as_str().filter(|s| !s.is_empty()))
+    .unwrap_or("");
     let detail = detail.lines().next().unwrap_or("");
-    let text = if detail.is_empty() { name.to_string() } else { format!("{name}: {}", clip(detail, 200)) };
+    let text = if detail.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}: {}", clip(detail, 200))
+    };
     out.push(("tool", text));
 }
 
@@ -489,13 +550,18 @@ mod tests {
         .join("\n");
         assert_eq!(
             entries(&log, "pi"),
-            [("user", "Hi".to_string()), ("assistant", "Reading.".to_string()), ("tool", "read: /a/b".to_string())]
+            [
+                ("user", "Hi".to_string()),
+                ("assistant", "Reading.".to_string()),
+                ("tool", "read: /a/b".to_string())
+            ]
         );
     }
 
     #[test]
     fn a_running_claude_agent_is_found_by_its_process() {
-        let root = std::env::temp_dir().join(format!("switchyard-transcript-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("switchyard-transcript-{}", std::process::id()));
         let projects = root.join("projects");
         std::fs::create_dir_all(projects.join("elsewhere")).unwrap();
         std::fs::create_dir_all(root.join("sessions")).unwrap();

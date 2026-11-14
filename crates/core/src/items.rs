@@ -42,11 +42,25 @@ pub struct OpenItems {
 
 /// The open items of `project`'s tracker, as this host's CLIs see them.
 pub fn list_open(project: &Project) -> Result<OpenItems, String> {
-    let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &local_board(&project.path)), &project.clone_url);
+    let tracker = Tracker::new(
+        &tracker_or_fizzy(&project.tracker, &local_board(&project.path)),
+        &project.clone_url,
+    );
     if tracker.cards {
-        let board = tracker.fizzy_board.as_deref().ok_or("the tracker names no Fizzy board")?;
+        let board = tracker
+            .fizzy_board
+            .as_deref()
+            .ok_or("the tracker names no Fizzy board")?;
         let mut cmd = Command::new("fizzy");
-        cmd.args(["card", "list", "--board", board, "--all", "--jq", "[.data[]|{number,title,url}]"]);
+        cmd.args([
+            "card",
+            "list",
+            "--board",
+            board,
+            "--all",
+            "--jq",
+            "[.data[]|{number,title,url}]",
+        ]);
         // Away from any checkout's `.fizzy.yaml`; the board is explicit.
         cmd.current_dir(home());
         // The Fizzy CLI's profiles are named after their accounts.
@@ -56,15 +70,36 @@ pub fn list_open(project: &Project) -> Result<OpenItems, String> {
         // Why it failed (not on PATH, its error, a timeout) goes to the
         // picker's log.
         let out = run_bounded(&mut cmd, "fizzy", LIST_TIMEOUT)?;
-        return Ok(OpenItems { noun: "cards", items: parse(&out)? });
+        return Ok(OpenItems {
+            noun: "cards",
+            items: parse(&out)?,
+        });
     }
-    let repo = tracker.github.as_deref().ok_or("no GitHub repo or Fizzy board to list")?;
+    let repo = tracker
+        .github
+        .as_deref()
+        .ok_or("no GitHub repo or Fizzy board to list")?;
     let limit = LIST_LIMIT.to_string();
-    let out = gh(&project.profile, &[
-        "issue", "list", "-R", repo, "--state", "open", "--limit", &limit, "--json", "number,title,url",
-    ])
+    let out = gh(
+        &project.profile,
+        &[
+            "issue",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,title,url",
+        ],
+    )
     .ok_or("gh issue list failed")?;
-    Ok(OpenItems { noun: "issues", items: parse(&out)? })
+    Ok(OpenItems {
+        noun: "issues",
+        items: parse(&out)?,
+    })
 }
 
 /// The board the checkout at `path` (here) names in its `.fizzy.yaml`, as
@@ -75,14 +110,18 @@ fn local_board(path: &str) -> String {
         None => path.to_string(),
     };
     let mut cmd = Command::new("bash");
-    cmd.args(["-c", &format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&dir))]);
+    cmd.args([
+        "-c",
+        &format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&dir)),
+    ]);
     bounded_output(&mut cmd, None, LIST_TIMEOUT).unwrap_or_default()
 }
 
 /// Items from a JSON list of `{number, title, url}`, as both CLIs give
 /// them, capped at `LIST_LIMIT`.
 fn parse(json: &str) -> Result<Vec<OpenItem>, String> {
-    let list: Value = serde_json::from_str(json.trim()).map_err(|e| format!("work item list: {e}"))?;
+    let list: Value =
+        serde_json::from_str(json.trim()).map_err(|e| format!("work item list: {e}"))?;
     let items = list.as_array().ok_or("work item list: not a list")?;
     Ok(items
         .iter()
@@ -110,10 +149,21 @@ mod tests {
             {"number": 42, "title": "Fix it", "url": "https://github.com/o/r/issues/42"}
         ]"#;
         let items = parse(json).unwrap();
-        assert_eq!(items, vec![
-            OpenItem { number: 1158, title: "Spawn from a card".into(), url: "https://app.fizzy.do/1/cards/1158".into() },
-            OpenItem { number: 42, title: "Fix it".into(), url: "https://github.com/o/r/issues/42".into() },
-        ]);
+        assert_eq!(
+            items,
+            vec![
+                OpenItem {
+                    number: 1158,
+                    title: "Spawn from a card".into(),
+                    url: "https://app.fizzy.do/1/cards/1158".into()
+                },
+                OpenItem {
+                    number: 42,
+                    title: "Fix it".into(),
+                    url: "https://github.com/o/r/issues/42".into()
+                },
+            ]
+        );
         assert!(parse("[]").unwrap().is_empty());
         assert!(parse("{\"ok\": false}").is_err());
         assert!(parse("not json").is_err());

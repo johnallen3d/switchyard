@@ -17,8 +17,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, EnableBracketedPaste, KeyCode, KeyEvent, KeyModifiers,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::Rect;
@@ -114,7 +114,9 @@ impl PromptBox {
     /// Up/Down (ctrl-p/n, shift-Tab) move, Escape closes it. False when the
     /// menu is closed or the key isn't one of these.
     pub fn menu_key(&mut self, k: KeyEvent) -> bool {
-        let Some((word, found)) = self.menu() else { return false };
+        let Some((word, found)) = self.menu() else {
+            return false;
+        };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         match k.code {
             KeyCode::Tab => self.complete(&word, found[self.slash.selected].index),
@@ -155,8 +157,15 @@ impl PromptBox {
     /// Insert pasted text: line endings as newlines, tabs as spaces, and no
     /// other control characters.
     pub fn paste(&mut self, text: &str) {
-        let text = text.replace("\r\n", "\n").replace('\r', "\n").replace('\t', "    ");
-        self.field.insert_str(text.chars().filter(|&c| c == '\n' || !c.is_control()).collect::<String>());
+        let text = text
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .replace('\t', "    ");
+        self.field.insert_str(
+            text.chars()
+                .filter(|&c| c == '\n' || !c.is_control())
+                .collect::<String>(),
+        );
     }
 
     /// The reference to hand on: Some("") for an empty prompt (no file),
@@ -240,7 +249,14 @@ impl PromptBox {
             return None;
         }
         let buf = f.buffer_mut();
-        buf.set_style(Rect { y: card.y + 1, height: card.height - 2, ..card }, Style::new().bg(fill));
+        buf.set_style(
+            Rect {
+                y: card.y + 1,
+                height: card.height - 2,
+                ..card
+            },
+            Style::new().bg(fill),
+        );
         let edge = |l: &str, mid: &str, r: &str| {
             Line::from(vec![
                 Span::styled(l.to_string(), Style::new().fg(fill).bg(p.base)),
@@ -252,7 +268,14 @@ impl PromptBox {
         // blocks would leave a step.
         f.render_widget(edge("▄", "▄", "▄"), Rect { height: 1, ..card });
         let bottom = card.y + card.height - 1;
-        f.render_widget(edge("▀", "▀", "▀"), Rect { y: bottom, height: 1, ..card });
+        f.render_widget(
+            edge("▀", "▀", "▀"),
+            Rect {
+                y: bottom,
+                height: 1,
+                ..card
+            },
+        );
         if let Some(corners) = corners {
             let right = card.x + card.width - 1;
             for (x, y, corner) in [
@@ -265,15 +288,26 @@ impl PromptBox {
             }
         }
 
-        let text = Rect { x: card.x + 2, y: card.y + 1, width: card.width.saturating_sub(4), height: rows };
+        let text = Rect {
+            x: card.x + 2,
+            y: card.y + 1,
+            width: card.width.saturating_sub(4),
+            height: rows,
+        };
         self.field.set_style(Style::new().fg(p.text).bg(fill));
-        self.field.set_placeholder_style(Style::new().fg(p.muted).bg(fill));
+        self.field
+            .set_placeholder_style(Style::new().fg(p.muted).bg(fill));
         f.render_widget(&self.field, text);
         if focused {
             place_cursor(f, &self.field, text);
         }
         let skip = self.field.scroll_offset().0 as usize;
-        let chips = Rect { x: card.x + 1, y: card.y + 2 + rows, width: card.width.saturating_sub(2), height: 1 };
+        let chips = Rect {
+            x: card.x + 1,
+            y: card.y + 2 + rows,
+            width: card.width.saturating_sub(2),
+            height: 1,
+        };
         Some((chips, skip))
     }
 }
@@ -328,11 +362,15 @@ pub fn edit_in_editor(
     fills: [Color; 2],
     before_editor: impl FnOnce(),
 ) -> io::Result<Option<String>> {
-    let Ok((_, id)) = parse_prompt_ref(&prompt.file_ref) else { return Ok(None) };
+    let Ok((_, id)) = parse_prompt_ref(&prompt.file_ref) else {
+        return Ok(None);
+    };
     let dir = prompt_dir();
     let path = dir.join(format!("{id}.edit.md"));
     let before = prompt.field.lines().join("\n");
-    if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n"))) {
+    if let Err(e) =
+        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n")))
+    {
         log(&format!("could not write the prompt for the editor: {e}"));
         return Ok(None);
     }
@@ -378,7 +416,10 @@ pub fn edit_in_editor(
 pub fn place_cursor(f: &mut Frame, field: &TextArea, area: Rect) {
     let c = field.screen_cursor();
     let (top, left) = field.scroll_offset();
-    let (row, col) = (c.row.saturating_sub(top as usize) as u16, c.col.saturating_sub(left as usize) as u16);
+    let (row, col) = (
+        c.row.saturating_sub(top as usize) as u16,
+        c.col.saturating_sub(left as usize) as u16,
+    );
     if row < area.height && col < area.width {
         f.set_cursor_position((area.x + col, area.y + row));
     }

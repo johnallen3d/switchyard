@@ -105,14 +105,15 @@ use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use model::{
-    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, in_folders, in_raw_folders,
-    link, now, parse_rows, parse_tasks, resolve_folders, urgency, work_dir,
+    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, in_folders,
+    in_raw_folders, link, now, parse_rows, parse_tasks, resolve_folders, urgency, work_dir,
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -137,7 +138,9 @@ const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
 /// no known status), the tabs with no agent (quick float only), then Snoozed.
-const SECTIONS: [&str; 9] = ["pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed"];
+const SECTIONS: [&str; 9] = [
+    "pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed",
+];
 
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
@@ -366,7 +369,10 @@ const CHOOSER_TITLE_MAX: usize = 60;
 
 /// A task's links whose titles the right side's header shows.
 fn titled(links: &[Link]) -> impl Iterator<Item = &Link> {
-    links.iter().filter(|l| !l.title.is_empty()).take(DETAIL_LINK_ROWS)
+    links
+        .iter()
+        .filter(|l| !l.title.is_empty())
+        .take(DETAIL_LINK_ROWS)
 }
 
 /// How wide a row's work-item badges may be in a list `width` wide.
@@ -563,7 +569,11 @@ impl App {
             "live" if matches!(self.tasks_load, Tasks::Ready) => {}
             "live" | "tasks" => match parse_tasks(body) {
                 Ok(tasks) => {
-                    let next = if kind == "live" { Tasks::Live } else { Tasks::Ready };
+                    let next = if kind == "live" {
+                        Tasks::Live
+                    } else {
+                        Tasks::Ready
+                    };
                     self.deliver(|app| {
                         app.tasks = tasks;
                         app.tasks_load = next;
@@ -586,14 +596,22 @@ impl App {
     fn set_current(&mut self, current: &str) {
         let current = current.trim();
         if current.is_empty() {
-            if self.chooser.is_none() && self.items.is_none() && self.snooze.is_none() && self.reply.is_none() {
+            if self.chooser.is_none()
+                && self.items.is_none()
+                && self.snooze.is_none()
+                && self.reply.is_none()
+            {
                 self.clear_search();
             }
             return;
         }
         let (s, w) = current.split_once('/').unwrap_or((current, ""));
         self.current = (s.to_string(), w.to_string());
-        if self.chooser.is_some() || self.items.is_some() || self.snooze.is_some() || self.reply.is_some() {
+        if self.chooser.is_some()
+            || self.items.is_some()
+            || self.snooze.is_some()
+            || self.reply.is_some()
+        {
             return;
         }
         self.follow = true;
@@ -628,19 +646,35 @@ impl App {
         take(self);
         self.apply_pending();
         link(&mut self.tabs, &self.sessions, &mut self.tasks);
-        let want = if self.follow { Some(self.current.clone()) } else { keep.clone() };
+        let want = if self.follow {
+            Some(self.current.clone())
+        } else {
+            keep.clone()
+        };
         self.refilter_to(want.clone());
         // Following the current tab that isn't shown yet: keep the old row.
         if self.follow && self.selected_key() != want {
             self.select_key(keep.clone());
         }
-        self.armed = if self.selected_key() == keep && self.can_arm(armed) { armed } else { Armed::No };
+        self.armed = if self.selected_key() == keep && self.can_arm(armed) {
+            armed
+        } else {
+            Armed::No
+        };
         // The snooze prompt goes with its task.
-        if self.snooze.as_ref().is_some_and(|z| self.selected_key().as_ref() != Some(&z.key)) {
+        if self
+            .snooze
+            .as_ref()
+            .is_some_and(|z| self.selected_key().as_ref() != Some(&z.key))
+        {
             self.snooze = None;
         }
         // As does the work items float.
-        if self.items.as_ref().is_some_and(|i| self.selected_key().as_ref() != Some(&i.key)) {
+        if self
+            .items
+            .as_ref()
+            .is_some_and(|i| self.selected_key().as_ref() != Some(&i.key))
+        {
             self.items = None;
         }
         // The reply box stays on its agent, closing only when it's gone.
@@ -661,7 +695,10 @@ impl App {
             if at.elapsed() > PENDING_TTL {
                 return false;
             }
-            match tasks.iter_mut().find(|t| t.ended.is_none() && &t.host == host && &t.window_id == window) {
+            match tasks
+                .iter_mut()
+                .find(|t| t.ended.is_none() && &t.host == host && &t.window_id == window)
+            {
                 Some(t) if t.pinned == *pinned && t.snoozed_until == *until => false,
                 Some(t) => {
                     t.pinned = *pinned;
@@ -691,7 +728,10 @@ impl App {
                 let tab = &self.tabs[t];
                 Some((self.sessions[tab.session].id.clone(), tab.window_id.clone()))
             }
-            Item::Task(k) => Some((self.tasks[k].session_id.clone(), self.tasks[k].window_id.clone())),
+            Item::Task(k) => Some((
+                self.tasks[k].session_id.clone(),
+                self.tasks[k].window_id.clone(),
+            )),
         }
     }
 
@@ -700,7 +740,11 @@ impl App {
     }
 
     fn select_key(&mut self, want: Option<Key>) {
-        let at = want.and_then(|w| self.rows.iter().position(|&i| self.key_of(i).as_ref() == Some(&w)));
+        let at = want.and_then(|w| {
+            self.rows
+                .iter()
+                .position(|&i| self.key_of(i).as_ref() == Some(&w))
+        });
         self.selected = at.or_else(|| self.rows.iter().position(selectable));
     }
 
@@ -729,7 +773,9 @@ impl App {
     /// The highlighted open task, which ctrl-t can pin (not in the archive)
     /// and ctrl-s snooze (in Inbox).
     fn selected_open_task(&self) -> Option<usize> {
-        self.selected_item().and_then(|i| self.task_index(i)).filter(|&k| self.tasks[k].ended.is_none())
+        self.selected_item()
+            .and_then(|i| self.task_index(i))
+            .filter(|&k| self.tasks[k].ended.is_none())
     }
 
     fn can_pin(&self) -> bool {
@@ -765,7 +811,10 @@ impl App {
     /// without, or reopens an ended one whose tab is still open), an open
     /// task, or an ended one that left its worktree behind.
     fn armable(&self) -> bool {
-        self.selected_agent_tab().is_some() || self.selected_task().is_some_and(|t| t.ended.is_none() || t.left)
+        self.selected_agent_tab().is_some()
+            || self
+                .selected_task()
+                .is_some_and(|t| t.ended.is_none() || t.left)
     }
 
     /// The highlighted row's tab, when it is an agent with no open task.
@@ -796,7 +845,11 @@ impl App {
         }
         let tab = &self.tabs[t];
         let s = &self.sessions[tab.session];
-        Some(preview::Pane { target: s.target.clone(), session: s.id.clone(), window: tab.window_id.clone() })
+        Some(preview::Pane {
+            target: s.target.clone(),
+            session: s.id.clone(),
+            window: tab.window_id.clone(),
+        })
     }
 
     fn is_current(&self, t: usize) -> bool {
@@ -830,7 +883,9 @@ impl App {
     fn is_picker_tab(&self, item: Item) -> bool {
         let Item::Tab(t) = item else { return false };
         let tab = &self.tabs[t];
-        tab.name == PICKER_TAB && self.sessions[tab.session].target == "-" && self.is_plain_tab(item)
+        tab.name == PICKER_TAB
+            && self.sessions[tab.session].target == "-"
+            && self.is_plain_tab(item)
     }
 
     /// Whether a row is a tab with no agent.
@@ -842,7 +897,9 @@ impl App {
     /// it already), and a plain tab only in the quick float, which jumps to
     /// any tab.
     fn listed(&self, item: Item) -> bool {
-        !self.is_picker_tab(item) && (self.quick || !self.is_plain_tab(item)) && !self.left_out(item)
+        !self.is_picker_tab(item)
+            && (self.quick || !self.is_plain_tab(item))
+            && !self.left_out(item)
     }
 
     /// Whether a tab sits in a folder `[inbox] exclude` names, or under
@@ -859,7 +916,9 @@ impl App {
 
     /// Open tasks with no listed tab.
     fn orphans(&self) -> impl Iterator<Item = Item> + '_ {
-        (0..self.tasks.len()).filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none()).map(Item::Task)
+        (0..self.tasks.len())
+            .filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none())
+            .map(Item::Task)
     }
 
     /// The listed session a row belongs to: a tab's, or for a task with
@@ -867,7 +926,10 @@ impl App {
     fn session_of(&self, item: Item) -> Option<usize> {
         match item {
             Item::Tab(t) => Some(self.tabs[t].session),
-            Item::Task(k) => self.sessions.iter().position(|s| s.id == self.tasks[k].session_id),
+            Item::Task(k) => self
+                .sessions
+                .iter()
+                .position(|s| s.id == self.tasks[k].session_id),
             _ => None,
         }
     }
@@ -881,7 +943,11 @@ impl App {
     /// first.
     fn agent_key(&self, i: Item) -> (std::cmp::Reverse<u8>, u64, (String, String, String)) {
         let f = self.flat(i);
-        let name = (f.project.to_string(), f.name.to_string(), f.host.to_string());
+        let name = (
+            f.project.to_string(),
+            f.name.to_string(),
+            f.host.to_string(),
+        );
         if self.agent_group(i) == "snoozed" {
             return (std::cmp::Reverse(0), f.wake, name);
         }
@@ -915,7 +981,11 @@ impl App {
                         name: &t.name,
                         msg: &t.msg,
                         host: &t.host,
-                        state: if tab.state != State::Idle { tab.state.name() } else { &t.state },
+                        state: if tab.state != State::Idle {
+                            tab.state.name()
+                        } else {
+                            &t.state
+                        },
                         ended: None,
                         left: false,
                         work: t.work(),
@@ -923,7 +993,11 @@ impl App {
                         since: t.since,
                         links: &t.links,
                         merged: &t.merged,
-                        wake: if t.is_snoozed(self.now) { t.snoozed_until } else { 0 },
+                        wake: if t.is_snoozed(self.now) {
+                            t.snoozed_until
+                        } else {
+                            0
+                        },
                     },
                     None => Flat {
                         project: &session.label,
@@ -973,7 +1047,11 @@ impl App {
                     since: t.since,
                     links: &t.links,
                     merged: &t.merged,
-                    wake: if t.is_snoozed(self.now) { t.snoozed_until } else { 0 },
+                    wake: if t.is_snoozed(self.now) {
+                        t.snoozed_until
+                    } else {
+                        0
+                    },
                 }
             }
         }
@@ -997,7 +1075,11 @@ impl App {
             View::Archive => self.filter_archive(&pattern, filtering),
             View::Usage => None,
         };
-        let want = if filtering { best.and_then(|i| self.key_of(i)) } else { want };
+        let want = if filtering {
+            best.and_then(|i| self.key_of(i))
+        } else {
+            want
+        };
         self.select_key(want);
         self.offset = 0;
     }
@@ -1008,23 +1090,45 @@ impl App {
     fn score_row(&mut self, item: Item, pattern: &Pattern) -> Option<u32> {
         let (name, project, host) = {
             let f = self.flat(item);
-            (f.name.to_string(), f.project.to_string(), f.host.to_string())
+            (
+                f.name.to_string(),
+                f.project.to_string(),
+                f.host.to_string(),
+            )
         };
         let dir = match item {
             Item::Tab(t) => self.tabs[t].dir.clone(),
             _ => String::new(),
         };
-        let label = self.session_of(item).map(|s| self.sessions[s].label.clone()).unwrap_or_default();
+        let label = self
+            .session_of(item)
+            .map(|s| self.sessions[s].label.clone())
+            .unwrap_or_default();
         let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
-        let (score, f) = score_fields(&mut self.matcher, pattern, &[&name, &dir, &project, &label, &host, &links])?;
-        self.hits.insert(item, Hits { name: f[0].clone(), second: f[2].clone(), dir: f[1].clone() });
+        let (score, f) = score_fields(
+            &mut self.matcher,
+            pattern,
+            &[&name, &dir, &project, &label, &host, &links],
+        )?;
+        self.hits.insert(
+            item,
+            Hits {
+                name: f[0].clone(),
+                second: f[2].clone(),
+                dir: f[1].clone(),
+            },
+        );
         Some(score)
     }
 
     /// The Inbox section a row goes in (see `SECTIONS`): an agent's group,
     /// or `tabs` for a tab with no agent.
     fn section(&self, item: Item) -> &'static str {
-        if self.is_agent(item) { self.agent_group(item) } else { "tabs" }
+        if self.is_agent(item) {
+            self.agent_group(item)
+        } else {
+            "tabs"
+        }
     }
 
     /// Inbox: one flat list across every session, in sections under
@@ -1035,7 +1139,10 @@ impl App {
     fn filter_merged(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
         let mut best: Option<(u32, Item)> = None;
         let mut sections: Vec<Vec<Item>> = vec![Vec::new(); SECTIONS.len()];
-        let items: Vec<Item> = (0..self.tabs.len()).map(Item::Tab).chain(self.orphans()).collect();
+        let items: Vec<Item> = (0..self.tabs.len())
+            .map(Item::Tab)
+            .chain(self.orphans())
+            .collect();
         for item in items {
             if !self.listed(item) || !self.profile_passes(self.flat(item).work) {
                 continue;
@@ -1049,7 +1156,10 @@ impl App {
                 }
             }
             let section = self.section(item);
-            let at = SECTIONS.iter().position(|&s| s == section).unwrap_or(SECTIONS.len() - 1);
+            let at = SECTIONS
+                .iter()
+                .position(|&s| s == section)
+                .unwrap_or(SECTIONS.len() - 1);
             sections[at].push(item);
         }
         for (&heading, mut rows) in SECTIONS.iter().zip(sections) {
@@ -1069,7 +1179,10 @@ impl App {
     /// The row for the agent that spawned `item`'s task: the tab in its
     /// `parent_window`, or the open task there when its tab isn't listed.
     fn parent_of(&self, item: Item) -> Option<Item> {
-        let window = self.task_of(item).map(|t| t.parent_window.as_str()).filter(|w| !w.is_empty())?;
+        let window = self
+            .task_of(item)
+            .map(|t| t.parent_window.as_str())
+            .filter(|w| !w.is_empty())?;
         if let Some(t) = self.tabs.iter().position(|t| t.window_id == window) {
             return Some(Item::Tab(t));
         }
@@ -1082,7 +1195,9 @@ impl App {
     /// over it already names.
     fn same_project_as_parent(&self, item: Item) -> bool {
         self.tree.contains_key(&item)
-            && self.parent_of(item).is_some_and(|up| self.project_of(up).0 == self.project_of(item).0)
+            && self
+                .parent_of(item)
+                .is_some_and(|up| self.project_of(up).0 == self.project_of(item).0)
     }
 
     /// Move each Inbox row whose spawner is listed too under it, as a tree
@@ -1094,7 +1209,12 @@ impl App {
         let listed: HashSet<Item> = self.rows.iter().copied().filter(selectable).collect();
         let mut parent: HashMap<Item, Item> = HashMap::new();
         for &item in &listed {
-            let Some(up) = self.parent_of(item).filter(|p| *p != item && listed.contains(p)) else { continue };
+            let Some(up) = self
+                .parent_of(item)
+                .filter(|p| *p != item && listed.contains(p))
+            else {
+                continue;
+            };
             let group = self.agent_group(item);
             if matches!(group, "pinned" | "snoozed") && self.agent_group(up) != group {
                 continue;
@@ -1138,9 +1258,14 @@ impl App {
             rows: &mut Vec<Item>,
             tree: &mut HashMap<Item, Guide>,
         ) {
-            let Some(kids) = children.get(&item) else { return };
+            let Some(kids) = children.get(&item) else {
+                return;
+            };
             for (n, &kid) in kids.iter().enumerate() {
-                let guide = Guide { lead: lead.to_string(), last: n + 1 == kids.len() };
+                let guide = Guide {
+                    lead: lead.to_string(),
+                    last: n + 1 == kids.len(),
+                };
                 let next = guide.stem();
                 rows.push(kid);
                 tree.insert(kid, guide);
@@ -1181,18 +1306,33 @@ impl App {
         for item in self.archive() {
             let (project, name, host, work) = {
                 let f = self.flat(item);
-                (f.project.to_string(), f.name.to_string(), f.host.to_string(), f.work)
+                (
+                    f.project.to_string(),
+                    f.name.to_string(),
+                    f.host.to_string(),
+                    f.work,
+                )
             };
             if !self.profile_passes(work) {
                 continue;
             }
             if filtering {
                 let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
-                let Some((score, f)) = score_fields(&mut self.matcher, pattern, &[&project, &name, &host, &links])
-                else {
+                let Some((score, f)) = score_fields(
+                    &mut self.matcher,
+                    pattern,
+                    &[&project, &name, &host, &links],
+                ) else {
                     continue;
                 };
-                self.hits.insert(item, Hits { name: f[1].clone(), second: f[0].clone(), dir: Vec::new() });
+                self.hits.insert(
+                    item,
+                    Hits {
+                        name: f[1].clone(),
+                        second: f[0].clone(),
+                        dir: Vec::new(),
+                    },
+                );
                 if best.is_none_or(|(b, _)| score > b) {
                     best = Some((score, item));
                 }
@@ -1218,7 +1358,8 @@ impl App {
     /// of this group (then the one before).
     fn jump_group(&mut self, forward: bool) {
         let Some(at) = self.selected else { return };
-        let first_pick = |i: usize| selectable(&self.rows[i]) && i > 0 && !selectable(&self.rows[i - 1]);
+        let first_pick =
+            |i: usize| selectable(&self.rows[i]) && i > 0 && !selectable(&self.rows[i - 1]);
         let found = if forward {
             (at + 1..self.rows.len()).find(|&i| first_pick(i))
         } else {
@@ -1232,7 +1373,11 @@ impl App {
 
     fn edge(&mut self, end: bool) {
         self.moved();
-        self.selected = if end { self.rows.iter().rposition(selectable) } else { self.rows.iter().position(selectable) };
+        self.selected = if end {
+            self.rows.iter().rposition(selectable)
+        } else {
+            self.rows.iter().position(selectable)
+        };
     }
 
     fn set_view(&mut self, view: View) {
@@ -1251,7 +1396,9 @@ impl App {
     /// What Enter would do with the highlighted row, as standalone.rs's
     /// parse_pick reads it.
     fn pick(&self) -> String {
-        let Some(item) = self.selected_item() else { return String::new() };
+        let Some(item) = self.selected_item() else {
+            return String::new();
+        };
         let task = self.task_of(item);
         let dirty = task.is_some_and(|t| t.dirty > 0);
         let action = match self.armed {
@@ -1266,7 +1413,11 @@ impl App {
         };
         // Several links: ctrl-b opens the chooser rather than the main one.
         let links = task.map_or(0, |t| chooser_links(&t.links).len());
-        let more = if links > 1 { format!("/{links}") } else { String::new() };
+        let more = if links > 1 {
+            format!("/{links}")
+        } else {
+            String::new()
+        };
         match item {
             Item::Status(_) => String::new(),
             Item::Tab(t) => {
@@ -1276,7 +1427,12 @@ impl App {
             }
             Item::Task(k) => {
                 let t = &self.tasks[k];
-                format!("{action}:{}/{}/{}{more}", hex(&t.host), t.session_id, t.window_id)
+                format!(
+                    "{action}:{}/{}/{}{more}",
+                    hex(&t.host),
+                    t.session_id,
+                    t.window_id
+                )
             }
         }
     }
@@ -1284,7 +1440,10 @@ impl App {
     /// Open the chooser on the selected task's links when it has several;
     /// whether it opened.
     fn open_chooser(&mut self) -> bool {
-        let links = self.selected_task().map(|t| chooser_links(&t.links)).unwrap_or_default();
+        let links = self
+            .selected_task()
+            .map(|t| chooser_links(&t.links))
+            .unwrap_or_default();
         if links.len() < 2 {
             return false;
         }
@@ -1304,7 +1463,9 @@ impl App {
             return;
         };
         let (label, profile, links) = (t.label(), t.profile.clone(), chooser_links(&t.links));
-        let Some(key) = self.selected_key() else { return };
+        let Some(key) = self.selected_key() else {
+            return;
+        };
         match items::Items::new(key, label.clone(), profile, links) {
             Some(i) => {
                 self.armed = Armed::No;
@@ -1343,7 +1504,9 @@ impl App {
         if !self.can_pin() {
             return false;
         }
-        let Some(k) = self.selected_open_task() else { return false };
+        let Some(k) = self.selected_open_task() else {
+            return false;
+        };
         let (pinned, until) = (!self.tasks[k].pinned, self.tasks[k].snoozed_until);
         self.moved();
         self.set_inbox(k, pinned, until);
@@ -1356,7 +1519,10 @@ impl App {
         let t = &mut self.tasks[k];
         t.pinned = pinned;
         t.snoozed_until = until;
-        self.pending.insert((t.host.clone(), t.window_id.clone()), (pinned, until, Instant::now()));
+        self.pending.insert(
+            (t.host.clone(), t.window_id.clone()),
+            (pinned, until, Instant::now()),
+        );
     }
 
     /// Open the snooze prompt on the highlighted open task in Inbox.
@@ -1364,10 +1530,22 @@ impl App {
         if !self.can_snooze() {
             return;
         }
-        let (Some(k), Some(key)) = (self.selected_open_task(), self.selected_key()) else { return };
+        let (Some(k), Some(key)) = (self.selected_open_task(), self.selected_key()) else {
+            return;
+        };
         let t = &self.tasks[k];
-        let current = if t.is_snoozed(self.now) { t.snoozed_until } else { 0 };
-        let mut z = Snooze { key, label: t.label(), current, text: String::new(), until: Ok(0) };
+        let current = if t.is_snoozed(self.now) {
+            t.snoozed_until
+        } else {
+            0
+        };
+        let mut z = Snooze {
+            key,
+            label: t.label(),
+            current,
+            text: String::new(),
+            until: Ok(0),
+        };
         z.update(self.now);
         self.moved();
         self.snooze = Some(z);
@@ -1381,7 +1559,9 @@ impl App {
             self.snooze = Some(z);
             return;
         };
-        let Some(k) = self.selected_open_task() else { return };
+        let Some(k) = self.selected_open_task() else {
+            return;
+        };
         let next = match (until, self.selected) {
             (0, _) | (_, None) => self.selected_key(),
             (_, Some(at)) => {
@@ -1445,19 +1625,30 @@ impl App {
     /// Open the reply box on the highlighted agent in Inbox. An agent waiting
     /// on a prompt is refused: the message would answer it.
     fn open_reply(&mut self) {
-        let Some(item) = self.selected_item() else { return };
+        let Some(item) = self.selected_item() else {
+            return;
+        };
         if self.preview_want().is_none() {
             self.note = Some(("highlight an agent to message it".into(), true));
             return;
         }
-        let Some(key) = self.selected_key() else { return };
+        let Some(key) = self.selected_key() else {
+            return;
+        };
         let label = self.selected_label();
         if self.flat(item).state == "blocked" {
-            self.note = Some((format!("{label} is waiting on a prompt; answer it in its tab"), true));
+            self.note = Some((
+                format!("{label} is waiting on a prompt; answer it in its tab"),
+                true,
+            ));
             return;
         }
         self.moved();
-        self.reply = Some(Reply { key, label, prompt: PromptBox::new() });
+        self.reply = Some(Reply {
+            key,
+            label,
+            prompt: PromptBox::new(),
+        });
     }
 
     /// Close the reply box, throwing its message away.
@@ -1478,10 +1669,19 @@ impl App {
     /// Edit the reply box's message in `$VISUAL` or `$EDITOR` (ctrl-g), then
     /// put the saved text back; ctrl-z undoes that.
     fn edit_reply(&mut self, term: &mut DefaultTerminal) -> io::Result<()> {
-        let Some(r) = &mut self.reply else { return Ok(()) };
+        let Some(r) = &mut self.reply else {
+            return Ok(());
+        };
         let before = r.prompt.field.lines().join("\n");
         let fills = [self.p.overlay, self.p.surface];
-        let edited = prompt_box::edit_in_editor(term, &r.prompt, &mut self.corners, self.cell, fills, || {})?;
+        let edited = prompt_box::edit_in_editor(
+            term,
+            &r.prompt,
+            &mut self.corners,
+            self.cell,
+            fills,
+            || {},
+        )?;
         if let Some(text) = edited.filter(|text| *text != before) {
             r.prompt.clear();
             r.prompt.paste(&text);
@@ -1497,7 +1697,9 @@ impl App {
     fn reply_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let newline = k
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         let page = self.page();
         let Some(r) = &mut self.reply else { return };
         // The slash-command menu, while open, has Tab, the arrows and Escape.
@@ -1528,7 +1730,10 @@ impl App {
     fn sync_commands(&mut self) {
         while let Ok((agent, got)) = self.commands_rx.try_recv() {
             let list = got.unwrap_or_else(|e| {
-                log(&format!("slash commands for {} on {}: {e}", agent.harness, agent.host));
+                log(&format!(
+                    "slash commands for {} on {}: {e}",
+                    agent.harness, agent.host
+                ));
                 Vec::new()
             });
             self.commands.insert(agent, Some(list));
@@ -1537,18 +1742,25 @@ impl App {
         if r.prompt.has_commands() {
             return;
         }
-        let Some(agent) = self.preview.as_ref().filter(|pv| pv.pane.window == r.key.1).and_then(|pv| pv.agent.clone())
+        let Some(agent) = self
+            .preview
+            .as_ref()
+            .filter(|pv| pv.pane.window == r.key.1)
+            .and_then(|pv| pv.agent.clone())
         else {
             return;
         };
         match self.commands.get(&agent) {
-            Some(Some(list)) => r.prompt.set_commands(list.clone(), commands::anywhere(&agent.harness)),
+            Some(Some(list)) => r
+                .prompt
+                .set_commands(list.clone(), commands::anywhere(&agent.harness)),
             Some(None) => {}
             None => {
                 self.commands.insert(agent.clone(), None);
                 let tx = self.commands_tx.clone();
                 std::thread::spawn(move || {
-                    let got = commands::fetch(&agent.host, &agent.profile, &agent.harness, &agent.dir);
+                    let got =
+                        commands::fetch(&agent.host, &agent.profile, &agent.harness, &agent.dir);
                     let _ = tx.send((agent, got));
                 });
             }
@@ -1628,11 +1840,19 @@ impl App {
         if self.view == View::Usage {
             let delta = match k.code {
                 KeyCode::Up | KeyCode::Char('p' | 'k') if k.code == KeyCode::Up || ctrl => Some(-1),
-                KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => Some(1),
+                KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => {
+                    Some(1)
+                }
                 KeyCode::PageUp => Some(-page),
                 KeyCode::PageDown => Some(page),
-                KeyCode::Home => { self.usage.offset = 0; return; }
-                KeyCode::End => { self.usage.offset = usize::MAX; return; }
+                KeyCode::Home => {
+                    self.usage.offset = 0;
+                    return;
+                }
+                KeyCode::End => {
+                    self.usage.offset = usize::MAX;
+                    return;
+                }
                 _ => None,
             };
             if let Some(delta) = delta {
@@ -1645,14 +1865,20 @@ impl App {
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('r') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
-            KeyCode::Char('e') if ctrl && self.view == View::Inbox => self.expanded = !self.expanded,
+            KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
+                self.expanded = !self.expanded
+            }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
             KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
             KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
             // The archive is long and has no transcript, so ctrl-u and
             // ctrl-d page through it by half a page, as in scrollback.
-            KeyCode::Char('u') if ctrl && self.view == View::Archive => self.step(-(page / 2).max(1)),
-            KeyCode::Char('d') if ctrl && self.view == View::Archive => self.step((page / 2).max(1)),
+            KeyCode::Char('u') if ctrl && self.view == View::Archive => {
+                self.step(-(page / 2).max(1))
+            }
+            KeyCode::Char('d') if ctrl && self.view == View::Archive => {
+                self.step((page / 2).max(1))
+            }
             KeyCode::Char('u') if ctrl => {
                 self.query.clear();
                 self.refilter();
@@ -1662,9 +1888,11 @@ impl App {
                 self.profile = self.profile.next();
                 self.refilter();
             }
-            KeyCode::Char('a') if ctrl => {
-                self.set_view(if self.view == View::Archive { View::Inbox } else { View::Archive })
-            }
+            KeyCode::Char('a') if ctrl => self.set_view(if self.view == View::Archive {
+                View::Inbox
+            } else {
+                View::Archive
+            }),
             KeyCode::Char('f') if ctrl && self.view == View::Archive => {
                 self.kept = !self.kept;
                 self.refilter();
@@ -1689,7 +1917,9 @@ impl App {
             // Shift scrolling back through the transcript, as the arrows
             // do with it expanded, goes into scrollback; it is already at
             // its end.
-            KeyCode::Up | KeyCode::PageUp if shift || self.expanded => self.enter_scrollback(Some(k)),
+            KeyCode::Up | KeyCode::PageUp if shift || self.expanded => {
+                self.enter_scrollback(Some(k))
+            }
             KeyCode::Home if self.expanded => self.enter_scrollback(Some(k)),
             KeyCode::Down | KeyCode::PageDown if shift || self.expanded => {}
             KeyCode::End if self.expanded => {}
@@ -1709,7 +1939,11 @@ impl App {
     /// context (two-line rows in the sidebar).
     fn page(&self) -> isize {
         let lines = (self.list_area.height as isize - 2).max(1);
-        if self.sidebar && !self.expanded { (lines / SIDE_ROW_LINES as isize).max(1) } else { lines }
+        if self.sidebar && !self.expanded {
+            (lines / SIDE_ROW_LINES as isize).max(1)
+        } else {
+            lines
+        }
     }
 
     /// Scroll the preview back (positive) or forward; draw_preview keeps it
@@ -1747,7 +1981,11 @@ impl App {
             return;
         }
         let h = self.transcript.height as usize;
-        let back = if self.scroll.1.as_ref() == Some(&pane) { self.scroll.0 } else { 0 };
+        let back = if self.scroll.1.as_ref() == Some(&pane) {
+            self.scroll.0
+        } else {
+            0
+        };
         let mut sb = scrollback::Scrollback::new(pane, lines.len(), h);
         sb.cursor = sb.cursor.saturating_sub(back);
         sb.sync(lines.len(), h);
@@ -1759,9 +1997,13 @@ impl App {
     }
 
     fn scrollback_key(&mut self, k: KeyEvent) {
-        let Some(lines) = self.transcript_text() else { return self.leave_scrollback() };
+        let Some(lines) = self.transcript_text() else {
+            return self.leave_scrollback();
+        };
         let h = self.transcript.height as usize;
-        let Some(sb) = &mut self.scrollback else { return };
+        let Some(sb) = &mut self.scrollback else {
+            return;
+        };
         match sb.key(k, &lines, h) {
             scrollback::Outcome::Stay => sb.sync(lines.len(), h),
             scrollback::Outcome::Exit => self.leave_scrollback(),
@@ -1770,7 +2012,10 @@ impl App {
                     return self.leave_scrollback();
                 };
                 let n = text.lines().count();
-                self.note = Some((format!("copied {n} line{}", if n == 1 { "" } else { "s" }), false));
+                self.note = Some((
+                    format!("copied {n} line{}", if n == 1 { "" } else { "s" }),
+                    false,
+                ));
                 self.copied = Some(text);
                 self.leave_scrollback();
             }
@@ -1793,8 +2038,14 @@ impl App {
         }
         let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1));
         // Down to the bottom border, which holds the footer.
-        let content = Rect { height: inner.height + 1, ..inner };
-        self.sidebar = !self.quick && self.view == View::Inbox && content.width >= SIDEBAR_MIN_WIDTH && content.height >= 10;
+        let content = Rect {
+            height: inner.height + 1,
+            ..inner
+        };
+        self.sidebar = !self.quick
+            && self.view == View::Inbox
+            && content.width >= SIDEBAR_MIN_WIDTH
+            && content.height >= 10;
         if self.sidebar {
             self.draw_split(f, content);
         } else {
@@ -1824,16 +2075,26 @@ impl App {
             area
         } else {
             let w = (area.width * 3 / 10).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
-            let [side, gap, main] =
-                Layout::horizontal([Constraint::Length(w), Constraint::Length(3), Constraint::Min(0)]).areas(area);
-            let [search, rule, list] =
-                Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)]).areas(side);
+            let [side, gap, main] = Layout::horizontal([
+                Constraint::Length(w),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .areas(area);
+            let [search, rule, list] = Layout::vertical([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(side);
             self.draw_search(f, search);
             draw::rule(f, &p, rule);
             self.draw_list(f, list);
             let buf = f.buffer_mut();
             for y in gap.y..gap.y + gap.height {
-                buf[(gap.x + 1, y)].set_symbol("│").set_style(Style::new().fg(p.hl_med));
+                buf[(gap.x + 1, y)]
+                    .set_symbol("│")
+                    .set_style(Style::new().fg(p.hl_med));
             }
             main
         };
@@ -1870,13 +2131,18 @@ impl App {
     /// work items' titles (at most DETAIL_LINK_ROWS), then the status
     /// message wrapped to at most DETAIL_MSG_ROWS.
     fn detail_rows(&self, width: u16) -> u16 {
-        let Some(item) = self.selected_item() else { return 1 };
+        let Some(item) = self.selected_item() else {
+            return 1;
+        };
         let t = self.flat(item);
         let titles = titled(t.links).count() as u16;
         if t.msg.is_empty() {
             return 1 + titles;
         }
-        1 + titles + preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1)).len().min(DETAIL_MSG_ROWS) as u16
+        1 + titles
+            + preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1))
+                .len()
+                .min(DETAIL_MSG_ROWS) as u16
     }
 
     /// The right side's header: the highlighted row's status, project and
@@ -1885,14 +2151,23 @@ impl App {
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         let Some(item) = self.selected_item() else {
-            f.render_widget(Line::styled(" Nothing highlighted", Style::new().fg(p.muted)), area);
+            f.render_widget(
+                Line::styled(" Nothing highlighted", Style::new().fg(p.muted)),
+                area,
+            );
             return;
         };
         let t = self.flat(item);
         let titles = titled(t.links).count() as u16;
-        let [line, titles_area, msg_area] =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(titles), Constraint::Min(0)]).areas(area);
-        let lines: Vec<Line> = titled(t.links).map(|l| self.title_line(l, titles_area.width as usize)).collect();
+        let [line, titles_area, msg_area] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(titles),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        let lines: Vec<Line> = titled(t.links)
+            .map(|l| self.title_line(l, titles_area.width as usize))
+            .collect();
         f.render_widget(Paragraph::new(lines), titles_area);
         let plain = self.is_plain_tab(item);
         let (glyph, color, verb) = self.status_of(&t, item, tick(self.started));
@@ -1920,7 +2195,11 @@ impl App {
         if t.msg.is_empty() || msg_area.height == 0 {
             return;
         }
-        let style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle });
+        let style = Style::new().fg(if t.state == "blocked" {
+            p.gold
+        } else {
+            p.subtle
+        });
         let width = (msg_area.width as usize).saturating_sub(2).max(1);
         let mut wrapped = preview::wrap(t.msg, width);
         let max = msg_area.height as usize;
@@ -1931,7 +2210,10 @@ impl App {
                 *last = format!("{keep}…");
             }
         }
-        let lines: Vec<Line> = wrapped.into_iter().map(|l| Line::styled(format!("  {l}"), style)).collect();
+        let lines: Vec<Line> = wrapped
+            .into_iter()
+            .map(|l| Line::styled(format!("  {l}"), style))
+            .collect();
         f.render_widget(Paragraph::new(lines), msg_area);
     }
 
@@ -1942,7 +2224,10 @@ impl App {
         let room = width.saturating_sub(str_width(&short) + 4);
         Line::from(vec![
             Span::styled(format!("  {short}  "), Style::new().fg(p.muted)),
-            Span::styled(preview::clip_width(&l.title, room), Style::new().fg(p.subtle)),
+            Span::styled(
+                preview::clip_width(&l.title, room),
+                Style::new().fg(p.subtle),
+            ),
         ])
     }
 
@@ -1961,13 +2246,17 @@ impl App {
         // The reply box keeps the bottom of Inbox, under the preview, with
         // one text row until Tab moves into it.
         let mut reply_card = None;
-        let body = if !self.quick && self.view == View::Inbox && body.height >= prompt_box::CHROME_ROWS + 4 {
+        let body = if !self.quick
+            && self.view == View::Inbox
+            && body.height >= prompt_box::CHROME_ROWS + 4
+        {
             let rows = match &self.reply {
                 Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
                 None => 1,
             };
             let h = (rows + prompt_box::CHROME_ROWS).min(body.height.saturating_sub(3));
-            let [rest, card] = Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
+            let [rest, card] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
             reply_card = Some((card, h.saturating_sub(prompt_box::CHROME_ROWS)));
             rest
         } else {
@@ -1975,8 +2264,12 @@ impl App {
         };
         if self.view == View::Usage {
             self.list_area = body;
-            let profile = match self.profile { Profile::All => None, p => Some(p.name()) };
-            self.usage.draw(f, body, &self.p, self.now, &self.query, profile);
+            let profile = match self.profile {
+                Profile::All => None,
+                p => Some(p.name()),
+            };
+            self.usage
+                .draw(f, body, &self.p, self.now, &self.query, profile);
         } else if let Some((list, pane)) = self.preview_split(body) {
             if self.expanded {
                 // Page keys page through the preview.
@@ -2013,9 +2306,17 @@ impl App {
         if body.height < if replying { 12 } else { 15 } {
             return None;
         }
-        let pane = if replying { (body.height / 2).clamp(6, 14) } else { (body.height / 3).clamp(8, 14) };
-        let [list, _, preview] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(1), Constraint::Length(pane)]).areas(body);
+        let pane = if replying {
+            (body.height / 2).clamp(6, 14)
+        } else {
+            (body.height / 3).clamp(8, 14)
+        };
+        let [list, _, preview] = Layout::vertical([
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(pane),
+        ])
+        .areas(body);
         Some((list, preview))
     }
 
@@ -2024,31 +2325,50 @@ impl App {
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
         let p = self.p;
         let p = &p;
-        let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let [head, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         let want = self.preview_want();
-        let flat = want.as_ref().and(self.selected_item()).map(|i| self.flat(i));
+        let flat = want
+            .as_ref()
+            .and(self.selected_item())
+            .map(|i| self.flat(i));
         let mut spans = vec![Span::styled("── ", Style::new().fg(p.overlay))];
         match &flat {
             Some(t) => {
                 if !t.project.is_empty() && t.project != t.name {
-                    spans.push(Span::styled(format!("{} ", t.project), Style::new().fg(p.subtle)));
+                    spans.push(Span::styled(
+                        format!("{} ", t.project),
+                        Style::new().fg(p.subtle),
+                    ));
                 }
-                spans.push(Span::styled(format!("{} ", t.name), Style::new().fg(p.text).add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled(
+                    format!("{} ", t.name),
+                    Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+                ));
                 // Its first work item's title, where there is room.
                 let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
                 if let Some(l) = titled(t.links).next() {
                     let short = l.short();
                     let room = (head.width as usize).saturating_sub(used + str_width(&short) + 6);
                     if room >= 12 {
-                        spans.push(Span::styled(format!("· {short} "), Style::new().fg(p.muted)));
-                        spans.push(Span::styled(format!("{} ", preview::clip_width(&l.title, room)), Style::new().fg(p.subtle)));
+                        spans.push(Span::styled(
+                            format!("· {short} "),
+                            Style::new().fg(p.muted),
+                        ));
+                        spans.push(Span::styled(
+                            format!("{} ", preview::clip_width(&l.title, room)),
+                            Style::new().fg(p.subtle),
+                        ));
                     }
                 }
             }
             None => spans.push(Span::styled("Preview ", Style::new().fg(p.muted))),
         }
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-        spans.push(Span::styled("─".repeat((head.width as usize).saturating_sub(used)), Style::new().fg(p.overlay)));
+        spans.push(Span::styled(
+            "─".repeat((head.width as usize).saturating_sub(used)),
+            Style::new().fg(p.overlay),
+        ));
         f.render_widget(Line::from(spans), head);
         self.draw_transcript(f, body);
     }
@@ -2074,7 +2394,11 @@ impl App {
         let muted = |text: &str| vec![Line::styled(text.to_string(), Style::new().fg(p.muted))];
         let want = self.preview_want();
         // Scrollback is for one agent's transcript.
-        if self.scrollback.as_ref().is_some_and(|sb| Some(&sb.pane) != want.as_ref()) {
+        if self
+            .scrollback
+            .as_ref()
+            .is_some_and(|sb| Some(&sb.pane) != want.as_ref())
+        {
             self.leave_scrollback();
         }
         let Some(pane) = want else {
@@ -2089,7 +2413,10 @@ impl App {
             self.scroll = (0, Some(pane.clone()));
         }
         // Leave a column for the scrollbar.
-        let text = Rect { width: screen.width.saturating_sub(2), ..screen };
+        let text = Rect {
+            width: screen.width.saturating_sub(2),
+            ..screen
+        };
         self.transcript = text;
         let Some(pv) = self.preview.as_mut().filter(|pv| pv.pane == pane) else {
             return draw::centered(f, screen, muted("Loading the transcript…"));
@@ -2133,7 +2460,10 @@ impl App {
                 let top = lines.len().saturating_sub(h);
                 self.scroll.0 = self.scroll.0.min(top);
                 let skip = top - self.scroll.0;
-                f.render_widget(Paragraph::new(lines[skip..lines.len().min(skip + h)].to_vec()), text);
+                f.render_widget(
+                    Paragraph::new(lines[skip..lines.len().min(skip + h)].to_vec()),
+                    text,
+                );
                 if lines.len() > h {
                     draw::scrollbar(f, p, screen, skip, lines.len());
                 }
@@ -2150,9 +2480,14 @@ impl App {
             Some(_) => None,
             None => {
                 let label = self.preview_want().map(|_| self.selected_label());
-                let blocked = self.selected_item().is_some_and(|i| self.flat(i).state == "blocked");
+                let blocked = self
+                    .selected_item()
+                    .is_some_and(|i| self.flat(i).state == "blocked");
                 Some(match label {
-                    Some(l) if blocked => (format!("{l} is waiting on a prompt; answer it in its tab"), Some(l)),
+                    Some(l) if blocked => (
+                        format!("{l} is waiting on a prompt; answer it in its tab"),
+                        Some(l),
+                    ),
                     Some(l) => ("Tab to type a message".to_string(), Some(l)),
                     None => ("Highlight an agent to message it".to_string(), None),
                 })
@@ -2171,23 +2506,36 @@ impl App {
             }
             (None, None) => return,
         };
-        let Some((chips, skip)) = prompt.draw(f, &p, card, rows, focused, self.corners.as_ref()) else { return };
+        let Some((chips, skip)) = prompt.draw(f, &p, card, rows, focused, self.corners.as_ref())
+        else {
+            return;
+        };
         let fill = if focused { p.overlay } else { p.surface };
         let mut left = Vec::new();
         if let Some(label) = label {
             left.push(Span::styled("to ", Style::new().fg(p.muted).bg(fill)));
-            let style = if focused { Style::new().fg(p.text).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) };
+            let style = if focused {
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(p.subtle)
+            };
             left.push(Span::styled(label, style.bg(fill)));
         }
         let mut right = Vec::new();
         if skip > 0 {
-            right.push(Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted).bg(fill)));
+            right.push(Span::styled(
+                format!("+{skip} lines above  "),
+                Style::new().fg(p.muted).bg(fill),
+            ));
         }
         if !prompt.saved_ok {
             right.push(Span::styled("not saved ", Style::new().fg(p.love).bg(fill)));
         }
         if let Some(t) = tokens {
-            right.push(Span::styled(format!("{t} "), Style::new().fg(p.muted).bg(fill)));
+            right.push(Span::styled(
+                format!("{t} "),
+                Style::new().fg(p.muted).bg(fill),
+            ));
         }
         let left_w: usize = left.iter().map(|s| str_width(&s.content)).sum();
         let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
@@ -2204,7 +2552,12 @@ impl App {
         let p = &self.p;
         let w = 60.min(area.width);
         let h = 4.min(area.height);
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
         f.render_widget(Clear, r);
         let title = format!(" Snooze {} ", z.label);
         let block = Block::new()
@@ -2219,22 +2572,41 @@ impl App {
         }
         let input = Line::from(vec![
             Span::styled(" until ", Style::new().fg(p.muted)),
-            Span::styled(z.text.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                z.text.clone(),
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
             Span::styled("▏", Style::new().fg(p.iris)),
         ]);
         f.render_widget(input, Rect { height: 1, ..inner });
         if inner.height < 2 {
             return;
         }
-        let row = Rect { y: inner.y + 1, height: 1, ..inner };
+        let row = Rect {
+            y: inner.y + 1,
+            height: 1,
+            ..inner
+        };
         let line = match (&z.until, z.text.trim().is_empty()) {
             (Ok(0), _) => Line::from(vec![
-                Span::styled(format!(" Snoozed until {} · ", snooze::describe(z.current, self.now)), Style::new().fg(p.muted)),
+                Span::styled(
+                    format!(
+                        " Snoozed until {} · ",
+                        snooze::describe(z.current, self.now)
+                    ),
+                    Style::new().fg(p.muted),
+                ),
                 Span::styled("⏎", Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
                 Span::styled(" wakes it", Style::new().fg(p.muted)),
             ]),
-            (Ok(until), _) => Line::styled(format!(" {}", snooze::describe(*until, self.now)), Style::new().fg(p.pine)),
-            (Err(_), true) => Line::styled(format!(" Try {}", snooze::EXAMPLES), Style::new().fg(p.muted)),
+            (Ok(until), _) => Line::styled(
+                format!(" {}", snooze::describe(*until, self.now)),
+                Style::new().fg(p.pine),
+            ),
+            (Err(_), true) => Line::styled(
+                format!(" Try {}", snooze::EXAMPLES),
+                Style::new().fg(p.muted),
+            ),
             (Err(e), false) => Line::styled(format!(" {e}"), Style::new().fg(p.love)),
         };
         f.render_widget(line, row);
@@ -2249,14 +2621,27 @@ impl App {
             .links
             .iter()
             .map(|l| {
-                let title = if l.title.is_empty() { 0 } else { str_width(&l.title).min(CHOOSER_TITLE_MAX) + 2 };
-                str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(&s) + 1) + title + str_width(&l.url) + 6
+                let title = if l.title.is_empty() {
+                    0
+                } else {
+                    str_width(&l.title).min(CHOOSER_TITLE_MAX) + 2
+                };
+                str_width(&l.short())
+                    + l.badge_state().map_or(0, |(s, _)| str_width(&s) + 1)
+                    + title
+                    + str_width(&l.url)
+                    + 6
             })
             .max()
             .unwrap_or(0);
         let w = (want as u16 + 2).min(area.width);
         let h = (c.links.len() as u16 + 2).min(area.height);
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -2269,9 +2654,17 @@ impl App {
             let (short, state, url) = (l.short(), l.badge_state(), &l.url);
             let selected = i == c.selected;
             let bg = if selected { p.overlay } else { p.base };
-            let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+            let row = Rect {
+                y: inner.y + i as u16,
+                height: 1,
+                ..inner
+            };
             f.buffer_mut().set_style(row, Style::new().bg(bg));
-            let edge = if selected { Span::styled("▎", Style::new().fg(p.iris).bg(bg)) } else { Span::styled(" ", Style::new().bg(bg)) };
+            let edge = if selected {
+                Span::styled("▎", Style::new().fg(p.iris).bg(bg))
+            } else {
+                Span::styled(" ", Style::new().bg(bg))
+            };
             let mut style = Style::new().fg(p.text).bg(bg);
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
@@ -2289,9 +2682,15 @@ impl App {
             }
             if !l.title.is_empty() {
                 let title = preview::clip_width(&l.title, CHOOSER_TITLE_MAX);
-                spans.push(Span::styled(format!("  {title}"), Style::new().fg(p.subtle).bg(bg)));
+                spans.push(Span::styled(
+                    format!("  {title}"),
+                    Style::new().fg(p.subtle).bg(bg),
+                ));
             }
-            spans.push(Span::styled(format!("  {url}"), Style::new().fg(p.muted).bg(bg)));
+            spans.push(Span::styled(
+                format!("  {url}"),
+                Style::new().fg(p.muted).bg(bg),
+            ));
             f.render_widget(Line::from(spans), row);
         }
     }
@@ -2308,7 +2707,11 @@ impl App {
         let p = &self.p;
         let mut spans = Vec::new();
         let mut chip = |text: &str, fg: Color| {
-            spans.extend(pill(vec![Span::styled(text.to_string(), Style::new().fg(fg))], p.surface, p.base));
+            spans.extend(pill(
+                vec![Span::styled(text.to_string(), Style::new().fg(fg))],
+                p.surface,
+                p.base,
+            ));
             spans.push(Span::raw(" "));
         };
         match self.profile {
@@ -2319,7 +2722,9 @@ impl App {
         if self.view == View::Archive && self.kept {
             chip("not archived", p.foam);
         }
-        if self.view == View::Usage { return spans; }
+        if self.view == View::Usage {
+            return spans;
+        }
         if let Tasks::Failed = self.tasks_load {
             chip("tabs only", p.muted);
         }
@@ -2342,7 +2747,9 @@ impl App {
             View::Usage => "Search accounts, harnesses, models, and hosts",
         };
         draw::search(f, p, area, &self.query, placeholder, typing, true);
-        if self.view == View::Usage { return; }
+        if self.view == View::Usage {
+            return;
+        }
         let shown = self.rows.iter().filter(|r| selectable(r)).count();
         let mut right = Vec::new();
         let spin = SPINNER[tick(self.started) % SPINNER.len()];
@@ -2350,8 +2757,14 @@ impl App {
             Tasks::Waiting | Tasks::Live if self.sidebar => {
                 right.push(Span::styled(format!("{spin}  "), Style::new().fg(p.muted)))
             }
-            Tasks::Waiting => right.push(Span::styled(format!("{spin} loading tasks  "), Style::new().fg(p.muted))),
-            Tasks::Live => right.push(Span::styled(format!("{spin} checking worktrees  "), Style::new().fg(p.muted))),
+            Tasks::Waiting => right.push(Span::styled(
+                format!("{spin} loading tasks  "),
+                Style::new().fg(p.muted),
+            )),
+            Tasks::Live => right.push(Span::styled(
+                format!("{spin} checking worktrees  "),
+                Style::new().fg(p.muted),
+            )),
             _ => {}
         }
         // The sidebar is too narrow for the counts by status; its
@@ -2372,22 +2785,36 @@ impl App {
                 (count("working"), "working", p.foam),
             ] {
                 if n > 0 {
-                    right.push(Span::styled(format!("{n} {label}  "), Style::new().fg(color)));
+                    right.push(Span::styled(
+                        format!("{n} {label}  "),
+                        Style::new().fg(color),
+                    ));
                 }
             }
         }
         let (total, kind) = match self.view {
-            View::Archive => (self.tasks.iter().filter(|t| t.ended.is_some()).count(), "ended"),
+            View::Archive => (
+                self.tasks.iter().filter(|t| t.ended.is_some()).count(),
+                "ended",
+            ),
             _ => {
-                let listed = (0..self.tabs.len()).filter(|&t| self.listed(Item::Tab(t))).count();
+                let listed = (0..self.tabs.len())
+                    .filter(|&t| self.listed(Item::Tab(t)))
+                    .count();
                 (listed + self.orphans().count(), "tabs")
             }
         };
         if typing || shown != total {
             right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
-            right.push(Span::styled(format!(" of {total} {kind} "), Style::new().fg(p.muted)));
+            right.push(Span::styled(
+                format!(" of {total} {kind} "),
+                Style::new().fg(p.muted),
+            ));
         } else {
-            right.push(Span::styled(format!("{total} {kind} "), Style::new().fg(p.muted)));
+            right.push(Span::styled(
+                format!("{total} {kind} "),
+                Style::new().fg(p.muted),
+            ));
         }
         f.render_widget(Line::from(right).right_aligned(), area);
     }
@@ -2411,14 +2838,20 @@ impl App {
         let tick = tick(self.started);
         let overflow = self.rows.len() > h && h > 0;
         // Leave a column for the scrollbar only when there is one.
-        let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
+        let list = Rect {
+            width: area.width.saturating_sub(if overflow { 2 } else { 0 }),
+            ..area
+        };
         // Flat rows line up their project and name columns: size them for
         // the widest values, within what the busiest agent's right side
         // leaves (a plain tab's folder takes what its row has left).
         let flat = || self.rows.iter().copied().filter(selectable);
         let right_w = flat()
             .filter(|&i| !self.is_plain_tab(i))
-            .map(|i| self.right_spans(&self.flat(i), self.p.base, "", list.width).1)
+            .map(|i| {
+                self.right_spans(&self.flat(i), self.p.base, "", list.width)
+                    .1
+            })
             .max()
             .unwrap_or(0);
         let room = (list.width as usize).saturating_sub(3 + right_w + 1);
@@ -2435,14 +2868,23 @@ impl App {
             .map(|i| {
                 let w = str_width(self.flat(i).name);
                 let guide = self.tree.get(&i).map_or(0, |g| str_width(&g.branch()));
-                guide + if self.is_plain_tab(i) { w.min(name_cap) } else { w }
+                guide
+                    + if self.is_plain_tab(i) {
+                        w.min(name_cap)
+                    } else {
+                        w
+                    }
             })
             .max()
             .unwrap_or(0)
             .min(room.saturating_sub(proj_w + 2) * 2 / 3);
         let cols = (proj_w, name_w);
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
-            let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
+            let r = Rect {
+                y: area.y + (i - self.offset) as u16,
+                height: 1,
+                ..list
+            };
             let selected = self.selected == Some(i);
             match row {
                 Item::Status(state) => self.draw_status_header(f, r, state),
@@ -2480,7 +2922,12 @@ impl App {
 
     fn draw_empty(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
-        let spin = || Line::styled(SPINNER[tick(self.started) % SPINNER.len()], Style::new().fg(p.foam));
+        let spin = || {
+            Line::styled(
+                SPINNER[tick(self.started) % SPINNER.len()],
+                Style::new().fg(p.foam),
+            )
+        };
         let icon = |glyph: &'static str, color: Color| Line::styled(glyph, Style::new().fg(color));
         let text = |s: String| Line::styled(s, Style::new().fg(p.subtle));
         let muted = |s: String| Line::styled(s, Style::new().fg(p.muted));
@@ -2563,7 +3010,13 @@ impl App {
     fn row_style(&self, selected: bool) -> (Color, Span<'static>) {
         let p = &self.p;
         let doomed = selected && self.armed.archives();
-        let bg = if doomed { p.hl_med } else if selected { p.overlay } else { p.base };
+        let bg = if doomed {
+            p.hl_med
+        } else if selected {
+            p.overlay
+        } else {
+            p.base
+        };
         let edge = match (doomed, selected) {
             (true, _) => Span::styled("▎", Style::new().fg(p.love).bg(bg)),
             (false, true) => Span::styled("▎", Style::new().fg(p.iris).bg(bg)),
@@ -2606,38 +3059,74 @@ impl App {
 
     /// The right side of a flat row, [work items] [dirty] [host chip]
     /// [state age], and its width.
-    fn right_spans(&self, t: &Flat, bg: Color, verb: &str, width: u16) -> (Vec<Span<'static>>, usize) {
+    fn right_spans(
+        &self,
+        t: &Flat,
+        bg: Color,
+        verb: &str,
+        width: u16,
+    ) -> (Vec<Span<'static>>, usize) {
         let p = &self.p;
         let mut right: Vec<Span> = self.badge_spans(t, bg, badge_budget(width));
         if t.dirty > 0 {
-            right.push(Span::styled(format!("✎{}  ", t.dirty), Style::new().fg(p.gold).bg(bg)));
+            right.push(Span::styled(
+                format!("✎{}  ", t.dirty),
+                Style::new().fg(p.gold).bg(bg),
+            ));
         }
         let chip_fg = if t.work { p.gold } else { p.subtle };
-        right.extend(pill(vec![Span::styled(t.host.to_string(), Style::new().fg(chip_fg))], p.surface, bg));
+        right.extend(pill(
+            vec![Span::styled(t.host.to_string(), Style::new().fg(chip_fg))],
+            p.surface,
+            bg,
+        ));
         // A snoozed task: how long until it wakes.
         let when = match (t.wake, t.since) {
             (wake, _) if wake > 0 => format!(" {}", age(wake.saturating_sub(self.now))),
             (_, since) if since > 0 => format!(" {}", age(self.now.saturating_sub(since))),
             _ => String::new(),
         };
-        right.push(Span::styled(format!("  {verb:>9}{when:>4} "), Style::new().fg(p.muted).bg(bg)));
+        right.push(Span::styled(
+            format!("  {verb:>9}{when:>4} "),
+            Style::new().fg(p.muted).bg(bg),
+        ));
         let w = right.iter().map(|s| str_width(&s.content)).sum();
         (right, w)
     }
 
     /// A tab with no agent's right side: whether it is the current tab,
     /// and its folder within `room` columns.
-    fn tab_right(&self, t: usize, hits: &[usize], bg: Color, selected: bool, room: usize) -> Vec<Span<'static>> {
+    fn tab_right(
+        &self,
+        t: usize,
+        hits: &[usize],
+        bg: Color,
+        selected: bool,
+        room: usize,
+    ) -> Vec<Span<'static>> {
         let p = &self.p;
         let tab = &self.tabs[t];
         let mut right = Vec::new();
         if self.is_current(t) {
-            right.push(Span::styled("current  ", Style::new().fg(p.iris).bg(bg).add_modifier(Modifier::ITALIC)));
+            right.push(Span::styled(
+                "current  ",
+                Style::new()
+                    .fg(p.iris)
+                    .bg(bg)
+                    .add_modifier(Modifier::ITALIC),
+            ));
         }
         let used: usize = right.iter().map(|s| str_width(&s.content)).sum();
-        let dir_w = str_width(&tab.dir).min(room.saturating_sub(used + 1)).min(48);
-        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-        let dir_style = Style::new().fg(if selected { p.subtle } else { p.muted }).bg(bg);
+        let dir_w = str_width(&tab.dir)
+            .min(room.saturating_sub(used + 1))
+            .min(48);
+        let hl = Style::new()
+            .fg(p.rose)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let dir_style = Style::new()
+            .fg(if selected { p.subtle } else { p.muted })
+            .bg(bg);
         right.extend(highlight(&tab.dir, hits, dir_w, true, dir_style, hl));
         right.push(Span::styled(" ", Style::new().bg(bg)));
         right
@@ -2651,7 +3140,9 @@ impl App {
             // Closed without an archive: the worktree is still there.
             (Some(_), _) if t.left => ("▢", p.gold, "closed"),
             (Some("merged"), _) => ("▢", p.iris, "merged"),
-            (Some("archived" | "force-archived" | "discarded" | "force-discarded"), _) => ("▢", p.iris, "archived"),
+            (Some("archived" | "force-archived" | "discarded" | "force-discarded"), _) => {
+                ("▢", p.iris, "archived")
+            }
             (Some("tab closed"), _) => ("▢", p.muted, "closed"),
             (Some("worktree removed"), _) => ("▢", p.muted, "removed"),
             (Some(_), _) => ("▢", p.muted, "ended"),
@@ -2662,7 +3153,11 @@ impl App {
             (None, "idle") => ("·", p.muted, "idle"),
             (None, _) => ("?", p.muted, "no status"),
         };
-        let (glyph, color) = if self.is_plain_tab(item) { ("·", p.muted) } else { (glyph, color) };
+        let (glyph, color) = if self.is_plain_tab(item) {
+            ("·", p.muted)
+        } else {
+            (glyph, color)
+        };
         let verb = if t.wake > 0 { "snoozed" } else { verb };
         (glyph, color, verb)
     }
@@ -2687,14 +3182,20 @@ impl App {
     /// or for a nested row with nothing to say under its name (see
     /// `side_detail`).
     fn side_height(&self, item: &Item) -> usize {
-        if selectable(item) && self.side_detail(*item) { SIDE_ROW_LINES } else { 1 }
+        if selectable(item) && self.side_detail(*item) {
+            SIDE_ROW_LINES
+        } else {
+            1
+        }
     }
 
     /// Whether a sidebar row has a second line: a project the row over it
     /// doesn't already name, a status message, or uncommitted files.
     fn side_detail(&self, item: Item) -> bool {
         let t = self.flat(item);
-        !t.msg.is_empty() || t.dirty > 0 || !(self.project_of(item).0.is_empty() || self.same_project_as_parent(item))
+        !t.msg.is_empty()
+            || t.dirty > 0
+            || !(self.project_of(item).0.is_empty() || self.same_project_as_parent(item))
     }
 
     /// Inbox's list as the sidebar: each tab or task on two lines (see
@@ -2717,11 +3218,18 @@ impl App {
         self.offset = self.offset.min(self.rows.len().saturating_sub(1));
         let total: usize = heights.iter().sum();
         let overflow = total > h && h > 0;
-        let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
+        let list = Rect {
+            width: area.width.saturating_sub(if overflow { 2 } else { 0 }),
+            ..area
+        };
         let tick = tick(self.started);
         // The free space goes above Snoozed, unless it leads the list.
         let slack = if overflow { 0 } else { h.saturating_sub(total) };
-        let snoozed = self.rows.iter().position(|r| *r == Item::Status("snoozed")).filter(|&i| i > 0);
+        let snoozed = self
+            .rows
+            .iter()
+            .position(|r| *r == Item::Status("snoozed"))
+            .filter(|&i| i > 0);
         let mut y = 0;
         for (i, row) in self.rows.iter().enumerate().skip(self.offset) {
             if Some(i) == snoozed {
@@ -2731,7 +3239,11 @@ impl App {
                 break;
             }
             let rows = heights[i].min(h - y) as u16;
-            let r = Rect { y: area.y + y as u16, height: rows, ..list };
+            let r = Rect {
+                y: area.y + y as u16,
+                height: rows,
+                ..list
+            };
             match row {
                 Item::Status(state) => self.draw_status_header(f, r, state),
                 _ => self.draw_side_row(f, r, *row, self.selected == Some(i), tick),
@@ -2755,7 +3267,10 @@ impl App {
         f.buffer_mut().set_style(r, Style::new().bg(bg));
         let (glyph, color, _) = self.status_of(&t, item, tick);
         let hits = self.hits.get(&item).cloned().unwrap_or_default();
-        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let hl = Style::new()
+            .fg(p.rose)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         let muted = Style::new().fg(p.muted).bg(bg);
         let width = r.width as usize;
         // The first line: status, name, age.
@@ -2770,7 +3285,11 @@ impl App {
         let guide_style = Style::new().fg(p.muted).bg(bg);
         let room = width.saturating_sub(3 + str_width(&branch) + str_width(&when) + 1);
         let name_style = Style::new().fg(p.text).bg(bg);
-        let name_style = if selected { name_style.add_modifier(Modifier::BOLD) } else { name_style };
+        let name_style = if selected {
+            name_style.add_modifier(Modifier::BOLD)
+        } else {
+            name_style
+        };
         let mut left = vec![
             edge.clone(),
             Span::styled(branch, guide_style),
@@ -2786,10 +3305,22 @@ impl App {
         }
         // The second line, under the name: project · message, or a plain
         // tab's folder.
-        let line = Rect { y: r.y + 1, height: 1, ..r };
-        let dirty = if t.dirty > 0 { format!("✎{} ", t.dirty) } else { String::new() };
+        let line = Rect {
+            y: r.y + 1,
+            height: 1,
+            ..r
+        };
+        let dirty = if t.dirty > 0 {
+            format!("✎{} ", t.dirty)
+        } else {
+            String::new()
+        };
         let mut room = width.saturating_sub(3 + str_width(&stem) + str_width(&dirty) + 1);
-        let mut left = vec![edge, Span::styled(stem, guide_style), Span::styled("  ", Style::new().bg(bg))];
+        let mut left = vec![
+            edge,
+            Span::styled(stem, guide_style),
+            Span::styled("  ", Style::new().bg(bg)),
+        ];
         let push = |left: &mut Vec<Span<'static>>, spans: Vec<Span<'static>>, room: &mut usize| {
             *room = room.saturating_sub(spans.iter().map(|s| str_width(&s.content)).sum());
             left.extend(spans);
@@ -2798,18 +3329,35 @@ impl App {
         if !project.is_empty() && !self.same_project_as_parent(item) {
             let style = Style::new().fg(p.iris).bg(bg);
             let hits = if own { hits.second.as_slice() } else { &[] };
-            push(&mut left, highlight(&project, hits, room, false, style, hl), &mut room);
+            push(
+                &mut left,
+                highlight(&project, hits, room, false, style, hl),
+                &mut room,
+            );
             if !t.msg.is_empty() && room > 6 {
                 push(&mut left, vec![Span::styled(" · ", muted)], &mut room);
             }
         }
         if !t.msg.is_empty() && room > 3 {
-            let style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.muted }).bg(bg);
+            let style = Style::new()
+                .fg(if t.state == "blocked" {
+                    p.gold
+                } else {
+                    p.muted
+                })
+                .bg(bg);
             let msg = t.msg.lines().next().unwrap_or("");
-            push(&mut left, highlight(msg, &[], room, false, style, style), &mut room);
+            push(
+                &mut left,
+                highlight(msg, &[], room, false, style, style),
+                &mut room,
+            );
         }
         f.render_widget(Line::from(left), line);
-        f.render_widget(Line::from(Span::styled(dirty, Style::new().fg(p.gold).bg(bg))).right_aligned(), line);
+        f.render_widget(
+            Line::from(Span::styled(dirty, Style::new().fg(p.gold).bg(bg))).right_aligned(),
+            line,
+        );
     }
 
     /// A flat row. A tab with no agent shows its folder on the right rather
@@ -2831,9 +3379,16 @@ impl App {
         let plain = self.is_plain_tab(item);
         // Right side first, so the columns and message get what is left; a
         // plain tab's folder gets what its columns leave.
-        let (right, right_w) = if plain { (Vec::new(), 0) } else { self.right_spans(&t, bg, verb, r.width) };
+        let (right, right_w) = if plain {
+            (Vec::new(), 0)
+        } else {
+            self.right_spans(&t, bg, verb, r.width)
+        };
         let mut left = vec![edge];
-        left.push(Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)));
+        left.push(Span::styled(
+            format!("{glyph} "),
+            Style::new().fg(color).bg(bg),
+        ));
         let room = (r.width as usize).saturating_sub(3 + right_w + 1);
         let (proj_w, name_w) = cols;
         let name_style = if selected {
@@ -2841,34 +3396,74 @@ impl App {
         } else {
             Style::new().fg(p.text).bg(bg)
         };
-        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let hl = Style::new()
+            .fg(p.rose)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         let hits = self.hits.get(&item).cloned().unwrap_or_default();
-        let column = |left: &mut Vec<Span<'static>>, text: &str, hits: &[usize], w: usize, style: Style| {
-            let spans = highlight(text, hits, w, false, style, hl);
-            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            left.extend(spans);
-            left.push(Span::styled(" ".repeat(w.saturating_sub(used) + 2), Style::new().bg(bg)));
+        let column =
+            |left: &mut Vec<Span<'static>>, text: &str, hits: &[usize], w: usize, style: Style| {
+                let spans = highlight(text, hits, w, false, style, hl);
+                let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+                left.extend(spans);
+                left.push(Span::styled(
+                    " ".repeat(w.saturating_sub(used) + 2),
+                    Style::new().bg(bg),
+                ));
+            };
+        let project = if self.same_project_as_parent(item) {
+            ""
+        } else {
+            t.project
         };
-        let project = if self.same_project_as_parent(item) { "" } else { t.project };
-        column(&mut left, project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
+        column(
+            &mut left,
+            project,
+            &hits.second,
+            proj_w,
+            Style::new().fg(p.subtle).bg(bg),
+        );
         // A row an agent spawned hangs off its spawner's (see `nest`), its
         // guide in the name column.
         let branch = self.tree.get(&item).map(Guide::branch).unwrap_or_default();
         let branch_w = str_width(&branch);
         left.push(Span::styled(branch, Style::new().fg(p.muted).bg(bg)));
-        column(&mut left, t.name, &hits.name, name_w.saturating_sub(branch_w), name_style);
+        column(
+            &mut left,
+            t.name,
+            &hits.name,
+            name_w.saturating_sub(branch_w),
+            name_style,
+        );
         if let Item::Tab(tab) = item
             && plain
         {
-            let used = 3 + proj_w + 2 + branch_w + str_width(t.name).min(name_w.saturating_sub(branch_w)) + 2;
-            let right = self.tab_right(tab, &hits.dir, bg, selected, (r.width as usize).saturating_sub(used));
+            let used = 3
+                + proj_w
+                + 2
+                + branch_w
+                + str_width(t.name).min(name_w.saturating_sub(branch_w))
+                + 2;
+            let right = self.tab_right(
+                tab,
+                &hits.dir,
+                bg,
+                selected,
+                (r.width as usize).saturating_sub(used),
+            );
             f.render_widget(Line::from(left), r);
             f.render_widget(Line::from(right).right_aligned(), r);
             return;
         }
         let msg_room = room.saturating_sub(proj_w + 2 + name_w + 2);
         if !t.msg.is_empty() && msg_room > 4 {
-            let msg_style = Style::new().fg(if t.state == "blocked" { p.gold } else { p.subtle }).bg(bg);
+            let msg_style = Style::new()
+                .fg(if t.state == "blocked" {
+                    p.gold
+                } else {
+                    p.subtle
+                })
+                .bg(bg);
             left.extend(highlight(t.msg, &[], msg_room, false, msg_style, msg_style));
         }
         f.render_widget(Line::from(left), r);
@@ -2879,13 +3474,21 @@ impl App {
     /// highlighted row's actions as the footer used to name them.
     fn help_sections(&self) -> Vec<help::Section> {
         use help::Section;
-        let own = |keys: Vec<(&str, &str)>| keys.into_iter().map(|(k, d)| (k.to_string(), d.to_string())).collect();
+        let own = |keys: Vec<(&str, &str)>| {
+            keys.into_iter()
+                .map(|(k, d)| (k.to_string(), d.to_string()))
+                .collect()
+        };
         let mut sections = Vec::new();
         if self.view != View::Usage {
             let task = self.selected_task();
             let mut row: Vec<(&str, &str)> = match task {
-                Some(t) if t.ended.is_some() && t.left && t.safe() => vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")],
-                Some(t) if t.ended.is_some() && t.left => vec![("⏎", "resume"), ("⌃X", "remove worktree")],
+                Some(t) if t.ended.is_some() && t.left && t.safe() => {
+                    vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")]
+                }
+                Some(t) if t.ended.is_some() && t.left => {
+                    vec![("⏎", "resume"), ("⌃X", "remove worktree")]
+                }
                 Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
                 Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
                 Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
@@ -2897,50 +3500,128 @@ impl App {
             let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
             match links.as_slice() {
                 [] => {}
-                [link] => row.push(("⌃B", if link.kind == "pr" { "open PR" } else { "open link" })),
+                [link] => row.push((
+                    "⌃B",
+                    if link.kind == "pr" {
+                        "open PR"
+                    } else {
+                        "open link"
+                    },
+                )),
                 _ => row.push(("⌃B", "choose a link to open")),
             }
             if !links.is_empty() {
                 row.push(("⌃R", "work items: open, comment, close, mark ready"));
             }
             if self.can_pin() {
-                row.push(("⌃T", if task.is_some_and(|t| t.pinned) { "unpin" } else { "pin" }));
+                row.push((
+                    "⌃T",
+                    if task.is_some_and(|t| t.pinned) {
+                        "unpin"
+                    } else {
+                        "pin"
+                    },
+                ));
             }
             if self.can_snooze() {
-                row.push(("⌃S", if task.is_some_and(|t| t.is_snoozed(self.now)) { "wake" } else { "snooze" }));
+                row.push((
+                    "⌃S",
+                    if task.is_some_and(|t| t.is_snoozed(self.now)) {
+                        "wake"
+                    } else {
+                        "snooze"
+                    },
+                ));
             }
             if self.preview_want().is_some() {
                 row.push(("⇥", "message the agent"));
             }
             if !row.is_empty() {
-                sections.push(Section { title: "Highlighted row", keys: own(row) });
+                sections.push(Section {
+                    title: "Highlighted row",
+                    keys: own(row),
+                });
             }
-            let mut moving = vec![("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"), ("PgUp PgDn", "page"), ("Home End", "first, last")];
+            let mut moving = vec![
+                ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
+                ("PgUp PgDn", "page"),
+                ("Home End", "first, last"),
+            ];
             if self.view == View::Inbox {
                 moving.push(("⌥↑↓", "previous, next group"));
             }
             if self.view == View::Archive {
-                moving.extend([("⌃D ⌃U", "half a page"), ("type", "search"), ("⌃W ⌥⌫", "delete a word")]);
+                moving.extend([
+                    ("⌃D ⌃U", "half a page"),
+                    ("type", "search"),
+                    ("⌃W ⌥⌫", "delete a word"),
+                ]);
             } else {
-                moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word"), ("⌃U", "clear the search")]);
+                moving.extend([
+                    ("type", "search"),
+                    ("⌃W ⌥⌫", "delete a word"),
+                    ("⌃U", "clear the search"),
+                ]);
             }
-            sections.push(Section { title: "Moving and searching", keys: own(moving) });
+            sections.push(Section {
+                title: "Moving and searching",
+                keys: own(moving),
+            });
         } else {
-            sections.push(Section::new("Usage", &[("↑↓ ⌃P ⌃N", "scroll"), ("PgUp PgDn", "page"), ("Home End", "top, bottom")]));
+            sections.push(Section::new(
+                "Usage",
+                &[
+                    ("↑↓ ⌃P ⌃N", "scroll"),
+                    ("PgUp PgDn", "page"),
+                    ("Home End", "top, bottom"),
+                ],
+            ));
         }
         let profile = format!("show {}", self.profile.next().name());
-        let mut views = vec![("⌃H ⌃L", "previous, next view"), ("⌃A", "archive, and back"), ("⌃O", profile.as_str())];
+        let mut views = vec![
+            ("⌃H ⌃L", "previous, next view"),
+            ("⌃A", "archive, and back"),
+            ("⌃O", profile.as_str()),
+        ];
         match self.view {
-            View::Inbox if self.sidebar => views.push(("⌃E", if self.expanded { "show the sidebar" } else { "hide the sidebar" })),
-            View::Inbox => views.push(("⌃E", if self.expanded { "back to the list" } else { "expand the preview" })),
-            View::Archive => views.push(("⌃F", if self.kept { "show archived tasks" } else { "hide archived tasks" })),
+            View::Inbox if self.sidebar => views.push((
+                "⌃E",
+                if self.expanded {
+                    "show the sidebar"
+                } else {
+                    "hide the sidebar"
+                },
+            )),
+            View::Inbox => views.push((
+                "⌃E",
+                if self.expanded {
+                    "back to the list"
+                } else {
+                    "expand the preview"
+                },
+            )),
+            View::Archive => views.push((
+                "⌃F",
+                if self.kept {
+                    "show archived tasks"
+                } else {
+                    "hide archived tasks"
+                },
+            )),
             View::Usage => {}
         }
         views.push(("? F1", "these keys"));
-        sections.push(Section { title: "Views", keys: own(views) });
+        sections.push(Section {
+            title: "Views",
+            keys: own(views),
+        });
         sections.push(Section::new(
             "Transcript",
-            &[("⌃V", "scroll back"), ("⇧↑ ⇧PgUp", "scroll back from here"), ("⇥", "message the agent")],
+            &[
+                ("⌃V", "scroll back"),
+                ("⇧↑ ⇧PgUp", "scroll back from here"),
+                ("⇥", "message the agent"),
+            ],
         ));
         sections.push(Section::new(
             "Scrollback",
@@ -2970,8 +3651,18 @@ impl App {
                 ("esc", "leave"),
             ],
         ));
-        sections.push(Section::new("Snooze prompt", &[("⏎", "snooze (empty: wake)"), ("⌃U", "clear"), ("esc", "cancel")]));
-        sections.push(Section::new("Link chooser", &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")]));
+        sections.push(Section::new(
+            "Snooze prompt",
+            &[
+                ("⏎", "snooze (empty: wake)"),
+                ("⌃U", "clear"),
+                ("esc", "cancel"),
+            ],
+        ));
+        sections.push(Section::new(
+            "Link chooser",
+            &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")],
+        ));
         sections.push(Section::new(
             "Work items",
             &[
@@ -2986,7 +3677,12 @@ impl App {
         ));
         sections.push(Section::new(
             "This float",
-            &[("/", "filter"), ("⌃U", "clear the filter"), ("j k ↑↓", "scroll"), ("esc q", "close")],
+            &[
+                ("/", "filter"),
+                ("⌃U", "clear the filter"),
+                ("j k ↑↓", "scroll"),
+                ("esc q", "close"),
+            ],
         ));
         // Where John is goes first.
         let here = if self.scrollback.is_some() {
@@ -3015,24 +3711,48 @@ impl App {
         let p = &self.p;
         if let Some(t) = &sb.typing {
             let line = Line::from(vec![
-                Span::styled(if t.forward { " /" } else { " ?" }, Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    if t.forward { " /" } else { " ?" },
+                    Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(t.query.clone(), Style::new().fg(p.text)),
                 Span::styled("▏", Style::new().fg(p.subtle)),
             ]);
             return f.render_widget(line, area);
         }
-        let right = Span::styled(format!("SCROLLBACK {}/{} ", sb.cursor + 1, sb.len()), Style::new().fg(p.iris));
+        let right = Span::styled(
+            format!("SCROLLBACK {}/{} ", sb.cursor + 1, sb.len()),
+            Style::new().fg(p.iris),
+        );
         let right_w = str_width(&right.content);
         let room = (area.width as usize).saturating_sub(right_w + 1);
         let mut spans = match &sb.note {
-            Some(note) => vec![Span::raw(" "), Span::styled(note.clone(), Style::new().fg(p.love))],
+            Some(note) => vec![
+                Span::raw(" "),
+                Span::styled(note.clone(), Style::new().fg(p.love)),
+            ],
             None => {
-                let select = if sb.anchor.is_some() { "copy selection" } else { "copy line" };
-                draw::hints(p, &[("y", select, p.subtle), ("q", "done", p.subtle), ("F1", "keys", p.subtle)], room).0
+                let select = if sb.anchor.is_some() {
+                    "copy selection"
+                } else {
+                    "copy line"
+                };
+                draw::hints(
+                    p,
+                    &[
+                        ("y", select, p.subtle),
+                        ("q", "done", p.subtle),
+                        ("F1", "keys", p.subtle),
+                    ],
+                    room,
+                )
+                .0
             }
         };
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-        spans.push(Span::raw(" ".repeat((area.width as usize).saturating_sub(used + right_w))));
+        spans.push(Span::raw(
+            " ".repeat((area.width as usize).saturating_sub(used + right_w)),
+        ));
         spans.push(right);
         f.render_widget(Line::from(spans), area);
     }
@@ -3045,7 +3765,12 @@ impl App {
         if outer.width < 6 || outer.height < 2 {
             return;
         }
-        let row = Rect { x: outer.x + 2, y: outer.bottom() - 1, width: outer.width - 4, height: 1 };
+        let row = Rect {
+            x: outer.x + 2,
+            y: outer.bottom() - 1,
+            width: outer.width - 4,
+            height: 1,
+        };
         let border = Style::new().fg(self.p.hl_med).bg(self.p.base);
         let buf = f.buffer_mut();
         for x in row.x..row.right() {
@@ -3066,7 +3791,10 @@ impl App {
             }
             // Gaps between hints are three spaces; longer ones are border,
             // as is all of an empty footer.
-            let (from, to) = (if start == row.x { start } else { start + 1 }, if x == row.right() { x } else { x - 1 });
+            let (from, to) = (
+                if start == row.x { start } else { start + 1 },
+                if x == row.right() { x } else { x - 1 },
+            );
             if x - start > 3 && from < to {
                 for bx in from..to {
                     buf[(bx, row.y)].set_symbol("─").set_style(border);
@@ -3079,7 +3807,10 @@ impl App {
         let p = &self.p;
         if let Some((msg, failed)) = &self.note {
             let style = Style::new().fg(if *failed { p.love } else { p.pine });
-            f.render_widget(Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]), area);
+            f.render_widget(
+                Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]),
+                area,
+            );
             return;
         }
         if let Some(sb) = &self.scrollback {
@@ -3101,18 +3832,30 @@ impl App {
                 Ok(0) => "wake",
                 _ => "snooze",
             };
-            let (spans, _) = draw::hints(p, &[("⏎", enter, p.subtle), ("F1", "keys", p.subtle)], area.width as usize);
+            let (spans, _) = draw::hints(
+                p,
+                &[("⏎", enter, p.subtle), ("F1", "keys", p.subtle)],
+                area.width as usize,
+            );
             f.render_widget(Line::from(spans), area);
             return;
         }
         if let Some(i) = &self.items {
-            let hints: Vec<(&str, &str, Color)> = i.hints().into_iter().map(|(k, d)| (k, d, p.subtle)).collect();
+            let hints: Vec<(&str, &str, Color)> = i
+                .hints()
+                .into_iter()
+                .map(|(k, d)| (k, d, p.subtle))
+                .collect();
             let (spans, _) = draw::hints(p, &hints, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
         }
         if self.chooser.is_some() {
-            let (spans, _) = draw::hints(p, &[("⏎", "open", p.subtle), ("?", "keys", p.subtle)], area.width as usize);
+            let (spans, _) = draw::hints(
+                p,
+                &[("⏎", "open", p.subtle), ("?", "keys", p.subtle)],
+                area.width as usize,
+            );
             f.render_widget(Line::from(spans), area);
             return;
         }
@@ -3129,21 +3872,49 @@ impl App {
             match self.armed {
                 Armed::Archive if t.dirty > 0 => {
                     spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(format!(" archive {}", t.label()), Style::new().fg(p.love)));
-                    spans.push(Span::styled(format!(" (uncommitted: {})", files()), Style::new().fg(p.gold)));
-                    spans.push(Span::styled(" · other keys cancel", Style::new().fg(p.muted)));
+                    spans.push(Span::styled(
+                        format!(" archive {}", t.label()),
+                        Style::new().fg(p.love),
+                    ));
+                    spans.push(Span::styled(
+                        format!(" (uncommitted: {})", files()),
+                        Style::new().fg(p.gold),
+                    ));
+                    spans.push(Span::styled(
+                        " · other keys cancel",
+                        Style::new().fg(p.muted),
+                    ));
                 }
                 Armed::Force => {
-                    spans.push(Span::styled("Are you sure? ", Style::new().fg(p.love).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(
+                        "Are you sure? ",
+                        Style::new().fg(p.love).add_modifier(Modifier::BOLD),
+                    ));
                     spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(format!(" throws away {}", files()), Style::new().fg(p.love)));
-                    spans.push(Span::styled(" · other keys cancel", Style::new().fg(p.muted)));
+                    spans.push(Span::styled(
+                        format!(" throws away {}", files()),
+                        Style::new().fg(p.love),
+                    ));
+                    spans.push(Span::styled(
+                        " · other keys cancel",
+                        Style::new().fg(p.muted),
+                    ));
                 }
                 _ => {
-                    let what = if t.ended.is_some() { "removes worktree" } else { "closes tab, removes worktree" };
+                    let what = if t.ended.is_some() {
+                        "removes worktree"
+                    } else {
+                        "closes tab, removes worktree"
+                    };
                     spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(format!(" archive {}", t.label()), Style::new().fg(p.love)));
-                    spans.push(Span::styled(format!(": {what} · other keys cancel"), Style::new().fg(p.muted)));
+                    spans.push(Span::styled(
+                        format!(" archive {}", t.label()),
+                        Style::new().fg(p.love),
+                    ));
+                    spans.push(Span::styled(
+                        format!(": {what} · other keys cancel"),
+                        Style::new().fg(p.muted),
+                    ));
                 }
             }
             f.render_widget(Line::from(spans), area);
@@ -3154,8 +3925,14 @@ impl App {
             let line = Line::from(vec![
                 Span::raw(" "),
                 Span::styled("⏎", key),
-                Span::styled(format!(" archive {}", self.tabs[t].name), Style::new().fg(p.love)),
-                Span::styled(": closes tab, removes its worktree · other keys cancel", Style::new().fg(p.muted)),
+                Span::styled(
+                    format!(" archive {}", self.tabs[t].name),
+                    Style::new().fg(p.love),
+                ),
+                Span::styled(
+                    ": closes tab, removes its worktree · other keys cancel",
+                    Style::new().fg(p.muted),
+                ),
             ]);
             f.render_widget(line, area);
             return;
@@ -3176,7 +3953,10 @@ impl App {
         if used + str_width(&summary) + 1 > area.width as usize {
             return;
         }
-        f.render_widget(Line::styled(format!("{summary} "), Style::new().fg(p.muted)).right_aligned(), area);
+        f.render_widget(
+            Line::styled(format!("{summary} "), Style::new().fg(p.muted)).right_aligned(),
+            area,
+        );
     }
 }
 
@@ -3259,8 +4039,16 @@ impl App {
                     });
                 }
                 Some(items::Outcome::Run { action, item, body }) => {
-                    let profile = self.items.as_ref().map(|i| i.profile.clone()).unwrap_or_default();
-                    let url = self.items.as_ref().map(|i| i.entries[i.selected].link.url.clone()).unwrap_or_default();
+                    let profile = self
+                        .items
+                        .as_ref()
+                        .map(|i| i.profile.clone())
+                        .unwrap_or_default();
+                    let url = self
+                        .items
+                        .as_ref()
+                        .map(|i| i.entries[i.selected].link.url.clone())
+                        .unwrap_or_default();
                     self.busy(term, format!("{} {}…", action.verb(), item.name()));
                     match standalone::item_action(action, &item, &body, &profile, &url) {
                         Ok(msg) => {
@@ -3285,7 +4073,9 @@ impl App {
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
         if let Some(r) = &self.reply {
-            let newline = k.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+            let newline = k
+                .modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
             if k.code != KeyCode::Enter || newline {
                 return false;
             }
@@ -3293,7 +4083,9 @@ impl App {
             if text.is_empty() {
                 return true;
             }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else {
+                return true;
+            };
             let label = r.label.clone();
             self.busy(term, format!("sending to {label}…"));
             self.note = Some(match standalone::message(&pick, &text) {
@@ -3308,16 +4100,24 @@ impl App {
         // The snooze prompt's Enter saves the snooze; other keys edit it.
         if let Some(z) = &self.snooze {
             // Unreadable text: Enter does nothing.
-            let Ok(until) = z.until else { return matches!(k.code, KeyCode::Enter) };
+            let Ok(until) = z.until else {
+                return matches!(k.code, KeyCode::Enter);
+            };
             if !matches!(k.code, KeyCode::Enter) {
                 return false;
             }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else {
+                return true;
+            };
             let label = z.label.clone();
             self.note = Some(match standalone::snooze(&pick, until) {
                 Ok(msg) => {
                     self.finish_snooze();
-                    let msg = if until > 0 { format!("{msg} until {}", snooze::describe(until, self.now)) } else { msg };
+                    let msg = if until > 0 {
+                        format!("{msg} until {}", snooze::describe(until, self.now))
+                    } else {
+                        msg
+                    };
                     (msg, false)
                 }
                 Err(e) => {
@@ -3333,7 +4133,9 @@ impl App {
             if !self.can_pin() {
                 return true;
             }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
+            let Some(pick) = standalone::parse_pick(&self.pick()) else {
+                return true;
+            };
             self.note = Some(match standalone::pin(&pick) {
                 Ok(msg) => {
                     self.toggle_pin();
@@ -3362,7 +4164,9 @@ impl App {
             return false;
         }
         self.note = None;
-        let Some(pick) = standalone::parse_pick(&self.pick()) else { return true };
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return true;
+        };
         let label = self.selected_label();
         // Open the task's only work item, or the chooser over several;
         // nothing to refresh after.
@@ -3391,7 +4195,10 @@ impl App {
             "archive" | "force-archive" => {
                 self.armed = Armed::No;
                 if self.archiving.is_some() {
-                    self.note = Some(("one archive at a time: wait for this one to finish".into(), true));
+                    self.note = Some((
+                        "one archive at a time: wait for this one to finish".into(),
+                        true,
+                    ));
                     return true;
                 }
                 let note = (format!("Archiving {label} on {}…", pick.host), false);
@@ -3431,7 +4238,9 @@ impl App {
             KeyCode::Esc => return true,
             KeyCode::Char('c' | 'g') if ctrl => return true,
             KeyCode::Enter => {
-                let Some(pick) = standalone::parse_pick(&self.pick()) else { return false };
+                let Some(pick) = standalone::parse_pick(&self.pick()) else {
+                    return false;
+                };
                 let label = self.selected_label();
                 let r = if pick.action == "resume" {
                     self.busy(term, format!("Resuming {label}…"));
@@ -3452,7 +4261,12 @@ impl App {
                 self.refilter();
             }
             KeyCode::Char('p' | 'k' | 'n' | 'j' | 'u' | 'd' | 'w' | 'o') if ctrl => self.key(k),
-            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Home
+            | KeyCode::End
             | KeyCode::Backspace
                 if !shift =>
             {
@@ -3555,14 +4369,26 @@ mod tests {
     #[test]
     fn agents_group_by_status_by_urgency_and_age() {
         let app = inbox();
-        assert_eq!(app.rows, vec![
-            Item::Status("blocked"), Item::Task(1), Item::Task(2), Item::Tab(1),
-            Item::Status("error"), Item::Tab(2),
-            Item::Status("done"), Item::Tab(3),
-            Item::Status("working"), Item::Tab(0),
-            Item::Status("idle"), Item::Tab(4),
-            Item::Status(""), Item::Task(3), Item::Task(4),
-        ]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("blocked"),
+                Item::Task(1),
+                Item::Task(2),
+                Item::Tab(1),
+                Item::Status("error"),
+                Item::Tab(2),
+                Item::Status("done"),
+                Item::Tab(3),
+                Item::Status("working"),
+                Item::Tab(0),
+                Item::Status("idle"),
+                Item::Tab(4),
+                Item::Status(""),
+                Item::Task(3),
+                Item::Task(4),
+            ]
+        );
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
     }
 
@@ -3599,11 +4425,20 @@ mod tests {
         // The kid (blocked) and sib (done) leave their groups for the
         // lead's; a spawner that's gone leaves `lost` where it was, and the
         // snoozed `nap` stays snoozed.
-        assert_eq!(app.rows, vec![
-            Item::Status("error"), Item::Tab(5),
-            Item::Status("idle"), Item::Tab(0), Item::Tab(1), Item::Tab(2), Item::Tab(3),
-            Item::Status("snoozed"), Item::Tab(4),
-        ]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("error"),
+                Item::Tab(5),
+                Item::Status("idle"),
+                Item::Tab(0),
+                Item::Tab(1),
+                Item::Tab(2),
+                Item::Tab(3),
+                Item::Status("snoozed"),
+                Item::Tab(4),
+            ]
+        );
         let branch = |t| app.tree.get(&Item::Tab(t)).map(Guide::branch);
         assert_eq!(branch(0), None);
         assert_eq!(branch(1).as_deref(), Some("├ "));
@@ -3611,8 +4446,12 @@ mod tests {
         assert_eq!(branch(3).as_deref(), Some("└ "));
         assert_eq!(branch(4), None);
         // The children are in the lead's project, which its row names.
-        assert!(app.same_project_as_parent(Item::Tab(1)) && app.same_project_as_parent(Item::Tab(2)));
-        assert!(!app.same_project_as_parent(Item::Tab(0)) && !app.same_project_as_parent(Item::Tab(4)));
+        assert!(
+            app.same_project_as_parent(Item::Tab(1)) && app.same_project_as_parent(Item::Tab(2))
+        );
+        assert!(
+            !app.same_project_as_parent(Item::Tab(0)) && !app.same_project_as_parent(Item::Tab(4))
+        );
     }
 
     #[test]
@@ -3733,20 +4572,45 @@ mod tests {
     #[test]
     fn pinned_tasks_lead_and_snoozed_ones_trail_the_list() {
         let mut app = inbox_with_lifecycle();
-        assert_eq!(app.rows, vec![
-            Item::Status("pinned"), Item::Tab(0),
-            Item::Status("done"), Item::Tab(2),
-            Item::Status("snoozed"), Item::Tab(3), Item::Tab(1),
-        ]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("pinned"),
+                Item::Tab(0),
+                Item::Status("done"),
+                Item::Tab(2),
+                Item::Status("snoozed"),
+                Item::Tab(3),
+                Item::Tab(1),
+            ]
+        );
         // A snoozed blocked task isn't counted as waiting.
         let mut terminal = Terminal::new(TestBackend::new(100, 1)).unwrap();
         terminal.draw(|f| app.draw_search(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(!text.contains("waiting") && text.contains("1 done"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            !text.contains("waiting") && text.contains("1 done"),
+            "{text}"
+        );
         let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Pinned") && text.contains("Snoozed") && text.contains("snoozed  1h"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("Pinned") && text.contains("Snoozed") && text.contains("snoozed  1h"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -3782,10 +4646,16 @@ mod tests {
         // tab still out.
         app.quick = true;
         app.refilter();
-        assert_eq!(app.rows, vec![
-            Item::Status("working"), Item::Tab(2),
-            Item::Status("tabs"), Item::Tab(1), Item::Tab(3),
-        ]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("working"),
+                Item::Tab(2),
+                Item::Status("tabs"),
+                Item::Tab(1),
+                Item::Tab(3),
+            ]
+        );
     }
 
     #[test]
@@ -3803,20 +4673,30 @@ mod tests {
                 "S\t-\tlocal\tc\tplain\n",
                 "T\tsh\t\tsh\t~\n",
             ));
-            app.tasks = parse_tasks(&serde_json::json!([
-                {"session_id":"gone", "window_id":"w", "name":"stray", "status":"done"}
-            ]).to_string()).unwrap();
+            app.tasks = parse_tasks(
+                &serde_json::json!([
+                    {"session_id":"gone", "window_id":"w", "name":"stray", "status":"done"}
+                ])
+                .to_string(),
+            )
+            .unwrap();
             app.load = Load::Ready;
             app.tasks_load = Tasks::Ready;
         });
         // Agents from every session share the status sections, and the open
         // task with no listed session among them. The plain tabs are left
         // out of Inbox.
-        assert_eq!(app.rows, vec![
-            Item::Status("blocked"), Item::Tab(3),
-            Item::Status("done"), Item::Task(0),
-            Item::Status("working"), Item::Tab(1),
-        ]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("blocked"),
+                Item::Tab(3),
+                Item::Status("done"),
+                Item::Task(0),
+                Item::Status("working"),
+                Item::Tab(1),
+            ]
+        );
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
         let line = |y: u16| -> String {
@@ -3826,9 +4706,16 @@ mod tests {
         for label in ["Waiting", "Done", "Working", "approval", "stray"] {
             assert!((0..10).any(|y| line(y).contains(label)), "{label}");
         }
-        assert!((0..10).all(|y| !line(y).contains("Tabs")), "plain tabs in Inbox");
+        assert!(
+            (0..10).all(|y| !line(y).contains("Tabs")),
+            "plain tabs in Inbox"
+        );
         // Each row names its session: no session headings or tree guides.
-        assert!(line(1).contains("busy") && line(5).contains("quiet"), "{}", line(5));
+        assert!(
+            line(1).contains("busy") && line(5).contains("quiet"),
+            "{}",
+            line(5)
+        );
         assert!((0..10).all(|y| !line(y).contains('├') && !line(y).contains('╰')));
     }
 
@@ -3842,7 +4729,10 @@ mod tests {
         assert!(app.tasks[2].pinned);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
         // Done ranks above working, pinned or not.
-        assert_eq!(&app.rows[..3], &[Item::Status("pinned"), Item::Tab(2), Item::Tab(0)]);
+        assert_eq!(
+            &app.rows[..3],
+            &[Item::Status("pinned"), Item::Tab(2), Item::Tab(0)]
+        );
         // Data read before the pin was saved doesn't undo it ...
         app.deliver(|app| app.tasks[2].pinned = false);
         assert!(app.tasks[2].pinned);
@@ -3879,8 +4769,17 @@ mod tests {
         assert_eq!(app.pick().split_once(':').unwrap().1, target);
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Snooze /woke") && text.contains("until 2h"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("Snooze /woke") && text.contains("until 2h"),
+            "{text}"
+        );
         app.key(plain(KeyCode::Enter));
         assert!(app.snooze.is_none());
         assert_eq!(app.tasks[2].snoozed_until, 8200);
@@ -3910,7 +4809,11 @@ mod tests {
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         let target = app.pick().split_once(':').unwrap().1.to_string();
         app.key(plain(KeyCode::Tab));
-        assert!(app.reply.as_ref().is_some_and(|r| r.prompt.text().is_empty()));
+        assert!(
+            app.reply
+                .as_ref()
+                .is_some_and(|r| r.prompt.text().is_empty())
+        );
         for c in "run the tests".chars() {
             app.key(plain(KeyCode::Char(c)));
         }
@@ -3924,9 +4827,22 @@ mod tests {
         assert_eq!(app.pick().split_once(':').unwrap().1, target);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("to /woke") && text.contains("report") && text.contains("F1 keys"), "{text}");
-        assert!(help_text(&app).starts_with("Reply box\n⏎ send\n⌥⏎ ⇧⏎ new line"), "{}", help_text(&app));
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("to /woke") && text.contains("report") && text.contains("F1 keys"),
+            "{text}"
+        );
+        assert!(
+            help_text(&app).starts_with("Reply box\n⏎ send\n⌥⏎ ⇧⏎ new line"),
+            "{}",
+            help_text(&app)
+        );
         // Enter, typed back by the config once the message is sent, closes
         // the box with a note.
         app.key(plain(KeyCode::Enter));
@@ -3948,7 +4864,11 @@ mod tests {
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(1));
         app.key(plain(KeyCode::Tab));
         assert!(app.reply.is_none());
-        assert!(app.note.as_ref().is_some_and(|(n, failed)| *failed && n.contains("waiting on a prompt")));
+        assert!(
+            app.note
+                .as_ref()
+                .is_some_and(|(n, failed)| *failed && n.contains("waiting on a prompt"))
+        );
     }
 
     #[test]
@@ -3958,10 +4878,19 @@ mod tests {
         let screen = |app: &mut App| {
             let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
-            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
         };
         let text = screen(&mut app);
-        assert!(text.contains("Tab to type a message") && text.contains("to /woke"), "{text}");
+        assert!(
+            text.contains("Tab to type a message") && text.contains("to /woke"),
+            "{text}"
+        );
         app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         assert!(app.expanded);
         let text = screen(&mut app);
@@ -3974,10 +4903,20 @@ mod tests {
     #[test]
     fn failed_hosts_keep_the_other_rows_and_show_in_the_header() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
-        let chips = |app: &App| app.header_chips().iter().map(|s| s.content.to_string()).collect::<String>();
-        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\tshell\t~\nE\tmiller\tmiller: timed out\n");
+        let chips = |app: &App| {
+            app.header_chips()
+                .iter()
+                .map(|s| s.content.to_string())
+                .collect::<String>()
+        };
+        app.paste(
+            "rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\tshell\t~\nE\tmiller\tmiller: timed out\n",
+        );
         assert!(matches!(app.load, Load::Ready));
-        assert_eq!((app.tabs.len(), app.failed.as_slice()), (1, ["miller".to_string()].as_slice()));
+        assert_eq!(
+            (app.tabs.len(), app.failed.as_slice()),
+            (1, ["miller".to_string()].as_slice())
+        );
         assert!(chips(&app).contains("miller failed"));
         app.paste("rex-data:rows\nE\tmiller\tx\nE\tdrummer\tnot listed yet\n");
         assert!(chips(&app).contains("2 hosts failed"));
@@ -4001,12 +4940,24 @@ mod tests {
         assert_eq!(app.tasks[0].links[0].kind, "pr");
         let mut terminal = Terminal::new(TestBackend::new(120, 6)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("PR #57 ✓ merged · issue #42"), "{text}");
         assert!(text.contains("merged"));
         let mut terminal = Terminal::new(TestBackend::new(160, 3)).unwrap();
         terminal.draw(|f| app.draw_footer(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("? keys"), "{text}");
         assert!(help_text(&app).contains("⌃B choose a link to open"));
     }
@@ -4053,9 +5004,21 @@ mod tests {
         assert!(app.query.is_empty());
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"), "{text}");
-        assert!(text.contains("card 1041  Work item titles  https://c"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"),
+            "{text}"
+        );
+        assert!(
+            text.contains("card 1041  Work item titles  https://c"),
+            "{text}"
+        );
         assert!(help_text(&app).starts_with("Link chooser"));
         app.key(plain(KeyCode::Esc));
         assert!(app.chooser.is_none());
@@ -4064,7 +5027,13 @@ mod tests {
         assert_eq!(app.detail_rows(80), 2);
         let mut terminal = Terminal::new(TestBackend::new(80, 2)).unwrap();
         terminal.draw(|f| app.draw_detail(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("  card 1041  Work item titles"), "{text}");
     }
 
@@ -4085,7 +5054,10 @@ mod tests {
         app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
         app.key(ctrl_r);
         assert!(app.items.is_none());
-        assert_eq!(app.note.as_ref().map(|n| n.0.as_str()), Some("/none has no linked work items"));
+        assert_eq!(
+            app.note.as_ref().map(|n| n.0.as_str()),
+            Some("/none has no linked work items")
+        );
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
         assert!(help_text(&app).contains("⌃R work items"));
         app.key(ctrl_r);
@@ -4093,11 +5065,25 @@ mod tests {
         // Its letters don't search, and x asks first, naming the card.
         app.key(plain(KeyCode::Char('x')));
         assert!(app.query.is_empty());
-        assert_eq!(app.items.as_ref().and_then(|i| i.question()).as_deref(), Some("Close card 1042?"));
+        assert_eq!(
+            app.items.as_ref().and_then(|i| i.question()).as_deref(),
+            Some("Close card 1042?")
+        );
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("Work items") && text.contains("Close card 1042?") && text.contains("yes"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("Work items")
+                && text.contains("Close card 1042?")
+                && text.contains("yes"),
+            "{text}"
+        );
         assert!(help_text(&app).starts_with("Work items"));
         // Escape backs out of the confirmation, then closes the float.
         app.key(plain(KeyCode::Esc));
@@ -4131,18 +5117,30 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
         let mut screen = |app: &mut App| {
             terminal.draw(|f| app.draw(f)).unwrap();
-            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
         };
         let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.key(plain('?'));
         assert!(app.query.is_empty());
         let text = screen(&mut app);
-        assert!(text.contains(" Keys ") && text.contains("Highlighted row") && text.contains("archive"), "{text}");
+        assert!(
+            text.contains(" Keys ") && text.contains("Highlighted row") && text.contains("archive"),
+            "{text}"
+        );
         for c in "/copy".chars() {
             app.key(plain(c));
         }
         let text = screen(&mut app);
-        assert!(text.contains("copy and leave") && !text.contains("Highlighted row"), "{text}");
+        assert!(
+            text.contains("copy and leave") && !text.contains("Highlighted row"),
+            "{text}"
+        );
         // Escape stops typing, clears the filter, then closes.
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -4164,15 +5162,29 @@ mod tests {
         app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tagent\tdone\tclaude\t~/r\n");
         app.paste("rex-data:tasks\n[]");
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
-        let entries: Vec<_> = (0..40).map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")})).collect();
-        app.paste(&format!("rex-data:preview\n-/s/agent\n{}", serde_json::json!({"entries": entries})));
+        let entries: Vec<_> = (0..40)
+            .map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")}))
+            .collect();
+        app.paste(&format!(
+            "rex-data:preview\n-/s/agent\n{}",
+            serde_json::json!({"entries": entries})
+        ));
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
         let mut screen = |app: &mut App| {
             terminal.draw(|f| app.draw(f)).unwrap();
-            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
         };
         let text = screen(&mut app);
-        assert!(app.sidebar && text.contains("answer 39") && !text.contains("answer 30 "), "{text}");
+        assert!(
+            app.sidebar && text.contains("answer 39") && !text.contains("answer 30 "),
+            "{text}"
+        );
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.key(ctrl('v'));
@@ -4180,17 +5192,32 @@ mod tests {
         assert!(text.contains("SCROLLBACK 79/79"), "{text}");
         // Search back for an early answer: the view moves to it.
         for c in "?answer 3\n".chars() {
-            app.key(if c == '\n' { KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE) } else { plain(c) });
+            app.key(if c == '\n' {
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            } else {
+                plain(c)
+            });
         }
         app.key(plain('N'));
         app.key(plain('N'));
         let text = screen(&mut app);
-        assert!(text.contains("answer 3 ") && !text.contains("answer 39"), "{text}");
+        assert!(
+            text.contains("answer 3 ") && !text.contains("answer 39"),
+            "{text}"
+        );
         // New output arriving leaves the view where it is.
-        let more: Vec<_> = (0..45).map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")})).collect();
-        app.paste(&format!("rex-data:preview\n-/s/agent\n{}", serde_json::json!({"entries": more})));
+        let more: Vec<_> = (0..45)
+            .map(|i| serde_json::json!({"kind": "assistant", "text": format!("answer {i}")}))
+            .collect();
+        app.paste(&format!(
+            "rex-data:preview\n-/s/agent\n{}",
+            serde_json::json!({"entries": more})
+        ));
         let text = screen(&mut app);
-        assert!(text.contains("answer 3 ") && !text.contains("answer 44"), "{text}");
+        assert!(
+            text.contains("answer 3 ") && !text.contains("answer 44"),
+            "{text}"
+        );
         app.key(plain('v'));
         app.key(plain('j'));
         app.key(plain('j'));
@@ -4198,7 +5225,10 @@ mod tests {
         assert_eq!(app.copied.as_deref(), Some("answer 3\n\nanswer 4"));
         assert!(app.scrollback.is_none());
         let text = screen(&mut app);
-        assert!(text.contains("copied 3 lines") && text.contains("answer 44"), "{text}");
+        assert!(
+            text.contains("copied 3 lines") && text.contains("answer 44"),
+            "{text}"
+        );
         // From the reply box, ctrl-v toggles scrollback and leaves the box
         // as it was.
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -4208,7 +5238,10 @@ mod tests {
         app.key(plain('k'));
         app.key(ctrl('v'));
         assert!(app.scrollback.is_none());
-        assert_eq!(app.reply.as_ref().map(|r| r.prompt.text()).as_deref(), Some("h"));
+        assert_eq!(
+            app.reply.as_ref().map(|r| r.prompt.text()).as_deref(),
+            Some("h")
+        );
     }
 
     #[test]
@@ -4226,8 +5259,17 @@ mod tests {
         assert_eq!(app.pick(), "archive:-/s/agent");
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
-        assert!(text.contains("archive claude") && text.contains("removes its worktree"), "{text}");
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("archive claude") && text.contains("removes its worktree"),
+            "{text}"
+        );
         // An agent waiting at its prompt is one too. (The plain shell tab
         // isn't listed in Inbox, so there is no row to arm there.)
         app.selected = Some(at(&app, 2));
@@ -4262,8 +5304,16 @@ mod tests {
         assert_eq!(app.rows, vec![Item::Task(0)]);
         assert_eq!(app.pick(), format!("resume:{}/s/a", hex("")));
         assert!(app.tasks[0].archived());
-        assert!(!app.tasks[0].safe() && app.tasks[1].safe() && !app.tasks[2].safe() && app.tasks[3].safe());
-        assert!(app.tasks[4].safe(), "all its cards closed counts as merged work");
+        assert!(
+            !app.tasks[0].safe()
+                && app.tasks[1].safe()
+                && !app.tasks[2].safe()
+                && app.tasks[3].safe()
+        );
+        assert!(
+            app.tasks[4].safe(),
+            "all its cards closed counts as merged work"
+        );
         assert!(!app.tasks[5].safe(), "one open card means work remains");
     }
 
@@ -4298,7 +5348,16 @@ mod tests {
             app.tasks_load = Tasks::Ready;
         });
         // One flat list, newest first, whatever the project or ending.
-        assert_eq!(app.rows, vec![Item::Task(4), Item::Task(0), Item::Task(3), Item::Task(1), Item::Task(2)]);
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Task(4),
+                Item::Task(0),
+                Item::Task(3),
+                Item::Task(1),
+                Item::Task(2)
+            ]
+        );
         assert_eq!(app.selected, Some(0));
         // ctrl-d and ctrl-u page by half a page, leaving the search be.
         app.list_area = Rect::new(0, 0, 100, 6);
@@ -4313,10 +5372,19 @@ mod tests {
         assert_eq!(app.rows, vec![Item::Task(1), Item::Task(2)]);
         let mut terminal = Terminal::new(TestBackend::new(100, 10)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         // Each row names its project and how it ended; no headings.
         assert!(text.contains("beta") && text.contains("closed"), "{text}");
-        assert!(!text.contains("Left behind") && !text.contains("─"), "{text}");
+        assert!(
+            !text.contains("Left behind") && !text.contains("─"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -4349,13 +5417,18 @@ mod tests {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.quick = true;
         let long = "x".repeat(200);
-        app.paste(&format!("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\t{long}\t~/dev/src/project\n"));
+        app.paste(&format!(
+            "rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tw\t\t{long}\t~/dev/src/project\n"
+        ));
         let mut terminal = Terminal::new(TestBackend::new(100, 3)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
         let buf = terminal.backend().buffer();
         let row: String = (0..100).map(|x| buf[(x, 1)].symbol().to_string()).collect();
         let shown = row.matches('x').count();
-        assert!(row.contains('…') && row.contains("~/dev/src/project") && (24..=34).contains(&shown), "{row}");
+        assert!(
+            row.contains('…') && row.contains("~/dev/src/project") && (24..=34).contains(&shown),
+            "{row}"
+        );
     }
     #[test]
     fn wide_all_shows_a_collapsible_sidebar_beside_the_highlighted_agent() {
@@ -4365,20 +5438,41 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
             let buf = terminal.backend().buffer();
-            (0..30).map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>()
+            (0..30)
+                .map(|y| {
+                    (0..w)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
         };
         // The list on the left, the agent's name, transcript and reply box
         // on the right, on the same rows.
         let rows = screen(&mut app, 140);
         assert!(app.sidebar);
         let row = rows.iter().find(|r| r.contains("Search")).unwrap();
-        assert!(row.contains('│') && row.contains("woke") && row.contains("done"), "{row}");
-        assert!(rows.iter().any(|r| r.contains("pinned") && r.contains('│')), "{rows:#?}");
-        assert!(rows.iter().any(|r| r.contains("Tab to type a message") && r.contains('│')), "{rows:#?}");
+        assert!(
+            row.contains('│') && row.contains("woke") && row.contains("done"),
+            "{row}"
+        );
+        assert!(
+            rows.iter().any(|r| r.contains("pinned") && r.contains('│')),
+            "{rows:#?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Tab to type a message") && r.contains('│')),
+            "{rows:#?}"
+        );
         // ctrl-e collapses the sidebar; typing to search brings it back.
         app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 140);
-        assert!(!rows.iter().any(|r| r.contains("Search") || r.contains("pinned")), "{rows:#?}");
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.contains("Search") || r.contains("pinned")),
+            "{rows:#?}"
+        );
         assert!(help_text(&app).contains("⌃E show the sidebar"));
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
@@ -4386,7 +5480,11 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 80);
         assert!(!app.sidebar);
-        assert!(rows.iter().any(|r| r.contains("Search tabs, agents, and work items")), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("Search tabs, agents, and work items")),
+            "{rows:#?}"
+        );
     }
 
     #[test]
@@ -4411,7 +5509,13 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(140, 20)).unwrap();
             terminal.draw(|f| app.draw(f)).unwrap();
             let buf = terminal.backend().buffer();
-            (0..20).map(|y| (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>()
+            (0..20)
+                .map(|y| {
+                    (0..50)
+                        .map(|x| buf[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
         };
         // Every project is the same colour, edits or not; only the pencil
         // is gold, and the name keeps the text colour beside the age.
@@ -4420,10 +5524,12 @@ mod tests {
         terminal.draw(|f| app.draw(f)).unwrap();
         let buf = terminal.backend().buffer();
         let find = |text: &str| {
-            (0..20u16).find_map(|y| {
-                let row: String = (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect();
-                row.find(text).map(|i| (row[..i].chars().count() as u16, y))
-            }).unwrap()
+            (0..20u16)
+                .find_map(|y| {
+                    let row: String = (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                    row.find(text).map(|i| (row[..i].chars().count() as u16, y))
+                })
+                .unwrap()
         };
         for (x, y) in [find("proj · step 0"), find("proj · step 1")] {
             assert_eq!(buf[(x, y)].fg, app.p.iris);
@@ -4435,18 +5541,27 @@ mod tests {
         let lines = screen(&mut app);
         assert!(app.sidebar);
         let at = lines.iter().position(|l| l.contains("task-00")).unwrap();
-        assert!(lines[at].contains("1m") && lines[at + 1].contains("proj · step 0"), "{lines:#?}");
+        assert!(
+            lines[at].contains("1m") && lines[at + 1].contains("proj · step 0"),
+            "{lines:#?}"
+        );
         // The last row scrolls into view with both its lines.
         app.edge(true);
         let lines = screen(&mut app);
         let at = lines.iter().position(|l| l.contains("task-11")).unwrap();
-        assert!(lines[at + 1].contains("step 11") && !lines.iter().any(|l| l.contains("task-00")), "{lines:#?}");
+        assert!(
+            lines[at + 1].contains("step 11") && !lines.iter().any(|l| l.contains("task-00")),
+            "{lines:#?}"
+        );
     }
 
     #[test]
     fn plain_tabs_name_their_project_like_tasks_do() {
         assert_eq!(folder_project("~/dev/src/amfaro"), "amfaro");
-        assert_eq!(folder_project("~/dev/src/playground/switchyard/.worktrees/more-t3-code-like/crates"), "switchyard");
+        assert_eq!(
+            folder_project("~/dev/src/playground/switchyard/.worktrees/more-t3-code-like/crates"),
+            "switchyard"
+        );
         assert_eq!(folder_project("~"), "~");
         assert_eq!(folder_project("/"), "/");
     }
@@ -4462,7 +5577,11 @@ fn folder_project(dir: &str) -> String {
         d => d,
     };
     let dir = dir.split_once("/.worktrees/").map_or(dir, |(repo, _)| repo);
-    dir.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(dir).to_string()
+    dir.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(dir)
+        .to_string()
 }
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
@@ -4474,7 +5593,11 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         let before = app.now;
         app.now = now();
         // A snooze ran out: back to its group.
-        if app.tasks.iter().any(|t| t.snoozed_until > before && t.snoozed_until <= app.now) {
+        if app
+            .tasks
+            .iter()
+            .any(|t| t.snoozed_until > before && t.snoozed_until <= app.now)
+        {
             app.refilter();
         }
         term.draw(|f| app.draw(f))?;
@@ -4483,7 +5606,11 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             || matches!(app.load, Load::Waiting)
             || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
             || app.tabs.iter().any(|t| t.state == State::Working);
-        let wait = if animate { Duration::from_millis(90) } else { Duration::from_millis(250) };
+        let wait = if animate {
+            Duration::from_millis(90)
+        } else {
+            Duration::from_millis(250)
+        };
         if !event::poll(wait)? {
             continue;
         }
@@ -4505,11 +5632,16 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 if let Some(text) = app.copied.take() {
                     use std::io::Write;
                     let mut out = io::stdout();
-                    let _ = out.write_all(scrollback::osc52(&text).as_bytes()).and_then(|()| out.flush());
+                    let _ = out
+                        .write_all(scrollback::osc52(&text).as_bytes())
+                        .and_then(|()| out.flush());
                 }
             }
             // cmd+k's `current`, and John's own pastes, for the reply box.
-            Event::Paste(text) if app.reply.is_some() || protocol::data(&text).is_some_and(|(k, _)| k == "current") => {
+            Event::Paste(text)
+                if app.reply.is_some()
+                    || protocol::data(&text).is_some_and(|(k, _)| k == "current") =>
+            {
                 app.paste(&text)
             }
             _ => {}
@@ -4534,7 +5666,9 @@ fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
     app.quick = quick;
-    app.excluded_raw = switchyard_core::config::read().map(|c| c.inbox.exclude).unwrap_or_default();
+    app.excluded_raw = switchyard_core::config::read()
+        .map(|c| c.inbox.exclude)
+        .unwrap_or_default();
     app.excluded = resolve_folders(&app.excluded_raw);
     if let Some(c) = current {
         app.set_current(c);
@@ -4549,8 +5683,14 @@ fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
 pub fn usage_json(local: bool) -> io::Result<()> {
     let mut collector = switchyard_core::usage::Collector::default();
     let json = if local {
-        let settings = switchyard_core::config::read().map(|c| c.usage).unwrap_or_default();
-        serde_json::to_string(&collector.local(&settings, &switchyard_core::rex::local_label(), now()))
+        let settings = switchyard_core::config::read()
+            .map(|c| c.usage)
+            .unwrap_or_default();
+        serde_json::to_string(&collector.local(
+            &settings,
+            &switchyard_core::rex::local_label(),
+            now(),
+        ))
     } else {
         serde_json::to_string(&collector.collect().summary())
     };
@@ -4564,7 +5704,8 @@ fn picker(mut app: App) -> io::Result<()> {
     // for the reply box's rounded corners.
     if let Some(cell) = chrome::detect(Duration::from_millis(300)) {
         app.cell = Some(cell);
-        app.corners = chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
+        app.corners =
+            chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
     }
     // No mouse capture, so the terminal's own selection and copy work. Kitty
     // key reporting makes the reply box's shift-Enter arrive as one
@@ -4581,7 +5722,11 @@ fn picker(mut app: App) -> io::Result<()> {
         let _ = term.draw(|f| app.draw(f));
         let _ = rx.recv();
     }
-    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste);
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
     if let Some(corners) = &app.corners {
         let _ = corners.delete(&mut io::stdout());
     }

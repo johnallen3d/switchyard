@@ -58,7 +58,9 @@ fn send(cmd: &str) -> Result<BufReader<UnixStream>, String> {
 fn request(req: Value) -> Result<BufReader<UnixStream>, String> {
     let path = socket_path().ok_or("no runtime directory for the server's socket")?;
     let mut stream = UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    stream.set_read_timeout(Some(REPLY_TIMEOUT)).map_err(|e| e.to_string())?;
+    stream
+        .set_read_timeout(Some(REPLY_TIMEOUT))
+        .map_err(|e| e.to_string())?;
     writeln!(stream, "{req}").map_err(|e| format!("switchyard-server: {e}"))?;
     Ok(BufReader::new(stream))
 }
@@ -68,7 +70,8 @@ fn read_reply(reader: &mut BufReader<UnixStream>) -> Result<Value, String> {
     match reader.read_line(&mut line) {
         Ok(0) => Err("switchyard-server hung up".into()),
         Ok(_) => {
-            let reply: Value = serde_json::from_str(&line).map_err(|e| format!("switchyard-server: {e}"))?;
+            let reply: Value =
+                serde_json::from_str(&line).map_err(|e| format!("switchyard-server: {e}"))?;
             match reply["error"].as_str() {
                 Some(e) => Err(format!("switchyard-server: {e}")),
                 None => Ok(reply),
@@ -87,15 +90,25 @@ pub fn snapshot() -> Result<Value, String> {
 /// `host`'s zoxide folders from the server's cache, one per line, or why
 /// not (no server, or it has no good listing for `host`).
 pub fn folders(host: &str) -> Result<String, String> {
-    let reply = read_reply(&mut request(serde_json::json!({ "cmd": "folders", "host": host }))?)?;
-    reply["folders"].as_str().map(String::from).ok_or_else(|| "switchyard-server: no folders".into())
+    let reply = read_reply(&mut request(
+        serde_json::json!({ "cmd": "folders", "host": host }),
+    )?)?;
+    reply["folders"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "switchyard-server: no folders".into())
 }
 
 /// The server's cached host probes for `project` (see the module docs), or
 /// why not.
 pub fn probes(project: &str) -> Result<Vec<Value>, String> {
-    let reply = read_reply(&mut request(serde_json::json!({ "cmd": "probes", "project": project }))?)?;
-    reply["probes"].as_array().cloned().ok_or_else(|| "switchyard-server: no probes".into())
+    let reply = read_reply(&mut request(
+        serde_json::json!({ "cmd": "probes", "project": project }),
+    )?)?;
+    reply["probes"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| "switchyard-server: no probes".into())
 }
 
 /// Ask the server to check the task registry now, after an action changed
@@ -114,8 +127,14 @@ pub fn subscribe() -> Result<Subscription, String> {
     // The first reply comes at once, so it gets the usual timeout ...
     let first = read_reply(&mut reader)?;
     // ... but updates come only on changes, and a quiet minute is normal.
-    reader.get_ref().set_read_timeout(None).map_err(|e| e.to_string())?;
-    Ok(Subscription { first: Some(first), reader: Some(reader) })
+    reader
+        .get_ref()
+        .set_read_timeout(None)
+        .map_err(|e| e.to_string())?;
+    Ok(Subscription {
+        first: Some(first),
+        reader: Some(reader),
+    })
 }
 
 pub struct Subscription {
@@ -153,7 +172,10 @@ impl Iterator for Subscription {
 ///   `live`, the picker keeps those tasks, as after the direct path's.
 pub fn pastes(snap: &Value) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
-    let hosts = snap["hosts"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let hosts = snap["hosts"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     if !hosts.is_empty() {
         let (mut rows, mut failed, mut first_error) = (String::new(), String::new(), None);
         let mut answered = false;
@@ -181,7 +203,10 @@ pub fn pastes(snap: &Value) -> Vec<(&'static str, String)> {
     let error = snap["tasks_error"].as_str();
     match &snap["tasks"] {
         Value::Array(_) => {
-            out.push((if checked { "tasks" } else { "live" }, snap["tasks"].to_string()));
+            out.push((
+                if checked { "tasks" } else { "live" },
+                snap["tasks"].to_string(),
+            ));
             if let (false, Some(e)) = (checked, error) {
                 out.push(("tasks-error", e.to_string()));
             }
@@ -198,7 +223,11 @@ pub fn pastes(snap: &Value) -> Vec<(&'static str, String)> {
 /// The rows' note that a host's tabs are missing or stale, kept to one
 /// row: tabs and newlines in the message become spaces.
 fn failed_row(host: &str, why: &str) -> String {
-    let why: String = why.trim().chars().map(|c| if c == '\t' || c == '\n' { ' ' } else { c }).collect();
+    let why: String = why
+        .trim()
+        .chars()
+        .map(|c| if c == '\t' || c == '\n' { ' ' } else { c })
+        .collect();
     format!("E\t{host}\t{why}\n")
 }
 
@@ -217,10 +246,16 @@ mod tests {
             "hosts": [host("local", "S\t-\tlocal\ts1\ta\n", Some(5), None), host("miller", "S\tx\tmiller\ts2\tb\n", Some(9), None)],
             "tasks": [{"window_id": "w"}], "tasks_checked": true, "tasks_error": null,
         });
-        assert_eq!(pastes(&snap), vec![
-            ("rows", "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n".to_string()),
-            ("tasks", r#"[{"window_id":"w"}]"#.to_string()),
-        ]);
+        assert_eq!(
+            pastes(&snap),
+            vec![
+                (
+                    "rows",
+                    "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n".to_string()
+                ),
+                ("tasks", r#"[{"window_id":"w"}]"#.to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -233,12 +268,19 @@ mod tests {
             ],
             "tasks": [], "tasks_checked": false, "tasks_error": null,
         });
-        assert_eq!(pastes(&snap), vec![
-            ("rows", "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n\
+        assert_eq!(
+            pastes(&snap),
+            vec![
+                (
+                    "rows",
+                    "S\t-\tlocal\ts1\ta\nS\tx\tmiller\ts2\tb\n\
                 E\tmiller\twatcher exited (1) ssh: gone\n\
-                E\tdrummer\tnot listed yet\n".to_string()),
-            ("live", "[]".to_string()),
-        ]);
+                E\tdrummer\tnot listed yet\n"
+                        .to_string()
+                ),
+                ("live", "[]".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -247,10 +289,13 @@ mod tests {
             "hosts": [host("local", "", None, Some("can't start rex")), host("miller", "", None, None)],
             "tasks": null, "tasks_checked": false, "tasks_error": "bad json",
         });
-        assert_eq!(pastes(&snap), vec![
-            ("error", "local: can't start rex".to_string()),
-            ("tasks-error", "bad json".to_string()),
-        ]);
+        assert_eq!(
+            pastes(&snap),
+            vec![
+                ("error", "local: can't start rex".to_string()),
+                ("tasks-error", "bad json".to_string()),
+            ]
+        );
         // A server that has only just started knows nothing yet.
         snap["hosts"][0]["error"] = Value::Null;
         snap["tasks_error"] = Value::Null;
@@ -264,10 +309,13 @@ mod tests {
             "hosts": [host("local", "", Some(1), None)],
             "tasks": [], "tasks_checked": false, "tasks_error": "ssh: timeout",
         });
-        assert_eq!(pastes(&snap), vec![
-            ("rows", String::new()),
-            ("live", "[]".to_string()),
-            ("tasks-error", "ssh: timeout".to_string()),
-        ]);
+        assert_eq!(
+            pastes(&snap),
+            vec![
+                ("rows", String::new()),
+                ("live", "[]".to_string()),
+                ("tasks-error", "ssh: timeout".to_string()),
+            ]
+        );
     }
 }

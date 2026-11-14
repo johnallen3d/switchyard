@@ -24,9 +24,17 @@ pub fn rex_json(host: &str, args: &[&str]) -> Result<serde_json::Value, String> 
     if host != local_label() {
         cmd.args(["-S", host]);
     }
-    let out = cmd.args(args).stdin(Stdio::null()).output().map_err(|e| format!("rex: {e}"))?;
+    let out = cmd
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rex: {e}"))?;
     if !out.status.success() {
-        return Err(format!("rex {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "rex {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("rex {}: {e}", args.join(" ")))
 }
@@ -45,7 +53,12 @@ pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
         c.arg("bash -s");
         c
     };
-    let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
     child.stdin.take()?.write_all(script.as_bytes()).ok()?;
     let out = child.wait_with_output().ok()?;
     // ssh exits 255 when it can't connect.
@@ -113,7 +126,11 @@ pub fn log(line: &str) {
         .unwrap_or_else(|_| home().join(".local/state"));
     let dir = state.join("rex");
     let _ = std::fs::create_dir_all(&dir);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("spawn.log")) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("spawn.log"))
+    {
         let _ = writeln!(f, "switchyard: {line}");
     }
 }
@@ -158,9 +175,17 @@ pub fn rex(host: &str, args: &[&str]) -> Result<(), String> {
     if host != local_label() {
         cmd.args(["-S", host]);
     }
-    let out = cmd.args(args).stdin(Stdio::null()).output().map_err(|e| format!("rex: {e}"))?;
+    let out = cmd
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("rex: {e}"))?;
     if !out.status.success() {
-        return Err(format!("rex {}: {}", args[..2.min(args.len())].join(" "), String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "rex {}: {}",
+            args[..2.min(args.len())].join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -172,8 +197,15 @@ pub fn host_home(host: &str) -> Result<String, String> {
     if host == local_label() {
         return Ok(home().display().to_string());
     }
-    let account = rex_json(host, &["api", "call", "server.whoami"])?["account"].as_str().unwrap_or_default().to_string();
-    Ok(if account.is_empty() { String::new() } else { format!("/home/{account}") })
+    let account = rex_json(host, &["api", "call", "server.whoami"])?["account"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    Ok(if account.is_empty() {
+        String::new()
+    } else {
+        format!("/home/{account}")
+    })
 }
 
 /// Show a tab in its host's Rex app, as the config's jumps do; with no
@@ -183,7 +215,11 @@ pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
     if host != local_label() {
         cmd.args(["-S", host]);
     }
-    let mut args = vec!["do".to_string(), "session.select".to_string(), format!("session_id={session}")];
+    let mut args = vec![
+        "do".to_string(),
+        "session.select".to_string(),
+        format!("session_id={session}"),
+    ];
     if !window.is_empty() {
         args.push(format!("window_id={window}"));
     }
@@ -193,7 +229,10 @@ pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
         .output()
         .map_err(|e| format!("rex: {e}"))?;
     if !out.status.success() {
-        return Err(format!("can't show the tab on {host}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "can't show the tab on {host}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }

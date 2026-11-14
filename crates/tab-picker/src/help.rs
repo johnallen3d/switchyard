@@ -10,12 +10,12 @@
 
 use nucleo_matcher::Matcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
-use ratatui::Frame;
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, str_width};
 use switchyard_ui::fuzzy::score_fields;
@@ -28,7 +28,13 @@ pub struct Section {
 
 impl Section {
     pub fn new(title: &'static str, keys: &[(&str, &str)]) -> Self {
-        Section { title, keys: keys.iter().map(|(k, d)| (k.to_string(), d.to_string())).collect() }
+        Section {
+            title,
+            keys: keys
+                .iter()
+                .map(|(k, d)| (k.to_string(), d.to_string()))
+                .collect(),
+        }
     }
 }
 
@@ -93,22 +99,36 @@ impl Help {
     pub fn draw(&mut self, f: &mut Frame, p: &Palette, area: Rect, sections: &[Section]) {
         let lines = self.lines(p, sections);
         let w = 64.min(area.width.saturating_sub(4));
-        let h = (lines.len() as u16 + 4).clamp(8, area.height.saturating_sub(2).max(8)).min(area.height);
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let h = (lines.len() as u16 + 4)
+            .clamp(8, area.height.saturating_sub(2).max(8))
+            .min(area.height);
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::new().fg(p.iris))
             .style(Style::new().bg(p.base))
-            .title(Span::styled(" Keys ", Style::new().fg(p.text).add_modifier(Modifier::BOLD)));
+            .title(Span::styled(
+                " Keys ",
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+            ));
         let inner = block.inner(r);
         f.render_widget(block, r);
         if inner.height < 3 {
             return;
         }
         let filter = Rect { height: 1, ..inner };
-        let body = Rect { y: inner.y + 2, height: inner.height - 2, ..inner };
+        let body = Rect {
+            y: inner.y + 2,
+            height: inner.height - 2,
+            ..inner
+        };
         let line = if self.typing || !self.filter.is_empty() {
             let mut spans = vec![
                 Span::styled(" / ", Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
@@ -134,7 +154,10 @@ impl Help {
             return f.render_widget(none, body);
         }
         let shown: Vec<Line> = lines.iter().skip(self.offset).take(h).cloned().collect();
-        let text = Rect { width: body.width.saturating_sub(1), ..body };
+        let text = Rect {
+            width: body.width.saturating_sub(1),
+            ..body
+        };
         f.render_widget(Paragraph::new(shown), text);
         if lines.len() > h {
             draw::scrollbar(f, p, body, self.offset, lines.len());
@@ -145,22 +168,37 @@ impl Help {
     /// with any, keys in one column.
     fn lines(&mut self, p: &Palette, sections: &[Section]) -> Vec<Line<'static>> {
         let pattern = Pattern::parse(&self.filter, CaseMatching::Smart, Normalization::Smart);
-        let col = sections.iter().flat_map(|s| &s.keys).map(|(k, _)| str_width(k)).max().unwrap_or(0);
+        let col = sections
+            .iter()
+            .flat_map(|s| &s.keys)
+            .map(|(k, _)| str_width(k))
+            .max()
+            .unwrap_or(0);
         let mut out = Vec::new();
         for s in sections {
-            let keys: Vec<_> = s.keys.iter().filter(|(k, d)| self.matches(&pattern, s.title, k, d)).collect();
+            let keys: Vec<_> = s
+                .keys
+                .iter()
+                .filter(|(k, d)| self.matches(&pattern, s.title, k, d))
+                .collect();
             if keys.is_empty() {
                 continue;
             }
             if !out.is_empty() {
                 out.push(Line::default());
             }
-            out.push(Line::styled(format!(" {}", s.title), Style::new().fg(p.iris).add_modifier(Modifier::BOLD)));
+            out.push(Line::styled(
+                format!(" {}", s.title),
+                Style::new().fg(p.iris).add_modifier(Modifier::BOLD),
+            ));
             for (k, d) in keys {
                 let pad = " ".repeat(col.saturating_sub(str_width(k)) + 2);
                 out.push(Line::from(vec![
                     Span::raw("   "),
-                    Span::styled(k.clone(), Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        k.clone(),
+                        Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
+                    ),
                     Span::raw(pad),
                     Span::styled(d.clone(), Style::new().fg(p.text)),
                 ]));
@@ -172,7 +210,8 @@ impl Help {
     /// Whether the filter fuzzily matches a binding's group, keys and
     /// action, taken together so words can match across them.
     fn matches(&mut self, pattern: &Pattern, title: &str, key: &str, does: &str) -> bool {
-        self.filter.is_empty() || score_fields(&mut self.matcher, pattern, &[title, key, does]).is_some()
+        self.filter.is_empty()
+            || score_fields(&mut self.matcher, pattern, &[title, key, does]).is_some()
     }
 }
 
@@ -197,12 +236,20 @@ mod tests {
         for c in "copy".chars() {
             press(&mut h, KeyCode::Char(c));
         }
-        let text: Vec<String> = h.lines(&p, &sections).iter().map(|l| l.to_string()).collect();
+        let text: Vec<String> = h
+            .lines(&p, &sections)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
         assert_eq!(text.len(), 2, "{text:?}");
         assert!(text[0].contains("Scrollback") && text[1].contains("copy"));
         // It matches fuzzily, across the key and its action.
         h.filter = "⌃x arcv".into();
-        let text: Vec<String> = h.lines(&p, &sections).iter().map(|l| l.to_string()).collect();
+        let text: Vec<String> = h
+            .lines(&p, &sections)
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
         assert!(text.len() == 2 && text[1].contains("archive"), "{text:?}");
         // A group's name matches all of it.
         h.filter = "picker".into();

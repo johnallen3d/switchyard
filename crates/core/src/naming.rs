@@ -22,7 +22,11 @@ pub fn name_problem(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("name the work");
     }
-    if name.starts_with(['/', '-', '.']) || name.ends_with(['/', '.']) || name.contains("//") || name.contains("..") {
+    if name.starts_with(['/', '-', '.'])
+        || name.ends_with(['/', '.'])
+        || name.contains("//")
+        || name.contains("..")
+    {
         return Some("not a valid branch name");
     }
     None

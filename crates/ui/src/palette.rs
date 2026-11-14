@@ -55,7 +55,10 @@ impl Palette {
             foam: color("9ccfd8").unwrap(),
             iris: color("c4a7e7").unwrap(),
         };
-        let names = switchyard_core::config::load().map(|c| &c.palette).into_iter().flatten();
+        let names = switchyard_core::config::load()
+            .map(|c| &c.palette)
+            .into_iter()
+            .flatten();
         for (name, value) in names {
             let Some(c) = color(value) else { continue };
             match name.trim() {

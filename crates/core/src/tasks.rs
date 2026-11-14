@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::links::{
-    Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo, parse_ref, pr_key, set_agent_links,
-    set_derived_items, set_derived_pr, tracker_or_fizzy, FIZZY_BOARD_SH,
+    FIZZY_BOARD_SH, Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo,
+    parse_ref, pr_key, set_agent_links, set_derived_items, set_derived_pr, tracker_or_fizzy,
 };
 use crate::rex::{home, host_bash, local_label, log, now};
 use crate::sessions::newest_session;
@@ -32,7 +32,9 @@ const LAUNCH_GRACE_SECS: u64 = 10 * 60;
 /// Whether an open task is still within its launch grace at `now`, when a
 /// missing worktree may not have been created yet.
 fn launching(task: &serde_json::Value, now: u64) -> bool {
-    task["created_at"].as_u64().is_some_and(|created| now.saturating_sub(created) < LAUNCH_GRACE_SECS)
+    task["created_at"]
+        .as_u64()
+        .is_some_and(|created| now.saturating_sub(created) < LAUNCH_GRACE_SECS)
 }
 
 pub fn tasks_path() -> PathBuf {
@@ -80,7 +82,10 @@ fn read_at(path: &Path) -> Result<(Vec<serde_json::Value>, bool), String> {
         Err(e) => format!("{}: {e}", path.display()),
     };
     let backup = backup_path(path);
-    match std::fs::read(&backup).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+    match std::fs::read(&backup)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+    {
         Some(tasks) => {
             note(&format!("{err}; using {}", backup.display()));
             Ok((tasks, true))
@@ -95,7 +100,10 @@ fn read_at(path: &Path) -> Result<(Vec<serde_json::Value>, bool), String> {
 /// file. With `backup`, the file replaced becomes the backup; pass false when
 /// it is the damaged file being repaired, so the good backup stays.
 fn save_at(path: &Path, tasks: &[serde_json::Value], backup: bool) -> Result<(), String> {
-    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let dir = path
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let tmp = path.with_extension(format!("json.{}", std::process::id()));
     let mut text = serde_json::to_string_pretty(tasks).map_err(|e| e.to_string())?;
@@ -118,7 +126,11 @@ fn save_at(path: &Path, tasks: &[serde_json::Value], backup: bool) -> Result<(),
 
 /// Write `bytes` to a new file at `path` and flush it to the disk.
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -140,11 +152,16 @@ fn link_over(from: &Path, to: &Path) -> io::Result<()> {
 /// through here, so two of them can't interleave: neither overwrites the
 /// other's save with a copy read before it. `f` must not touch the registry
 /// again (the lock is not reentrant); an error from `f` saves nothing.
-pub fn update_tasks<T>(f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>) -> Result<T, String> {
+pub fn update_tasks<T>(
+    f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>,
+) -> Result<T, String> {
     update_at(&tasks_path(), f)
 }
 
-fn update_at<T>(path: &Path, f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>) -> Result<T, String> {
+fn update_at<T>(
+    path: &Path,
+    f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>,
+) -> Result<T, String> {
     let _lock = lock_at(path)?;
     let (mut tasks, recovered) = read_at(path)?;
     let before = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
@@ -153,8 +170,15 @@ fn update_at<T>(path: &Path, f: impl FnOnce(&mut Vec<serde_json::Value>) -> Resu
         // Repair the damaged file from the backup, keeping it to look at.
         let damaged = path.with_extension(format!("json.damaged.{}", now()));
         match link_over(path, &damaged) {
-            Ok(()) => note(&format!("restored {} from its backup; the damaged file is {}", path.display(), damaged.display())),
-            Err(e) => note(&format!("restored {} from its backup; could not keep the damaged file: {e}", path.display())),
+            Ok(()) => note(&format!(
+                "restored {} from its backup; the damaged file is {}",
+                path.display(),
+                damaged.display()
+            )),
+            Err(e) => note(&format!(
+                "restored {} from its backup; could not keep the damaged file: {e}",
+                path.display()
+            )),
         }
         save_at(path, &tasks, false)?;
     } else if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
@@ -177,14 +201,18 @@ fn lock_at(path: &Path) -> Result<File, String> {
         .truncate(false)
         .open(&lock)
         .map_err(|e| format!("{}: {e}", lock.display()))?;
-    file.lock().map_err(|e| format!("{}: {e}", lock.display()))?;
+    file.lock()
+        .map_err(|e| format!("{}: {e}", lock.display()))?;
     Ok(file)
 }
 
 /// What identifies a task: its host, window and start, as JSON so that
 /// values of different types can't collide.
 fn task_key(task: &serde_json::Value) -> String {
-    format!("{}\t{}\t{}", task["host"], task["window_id"], task["created_at"])
+    format!(
+        "{}\t{}\t{}",
+        task["host"], task["window_id"], task["created_at"]
+    )
 }
 
 /// Whether `a` and `b` are the same task: the same host, window and start.
@@ -529,7 +557,10 @@ done <<'RSP_PAIRS'
                 "?" => None,
                 line if line == "-" || line.starts_with("-\t") => {
                     let fizzy = line.split('\t').nth(1).unwrap_or("").to_string();
-                    Some(Worktree { fizzy, ..Worktree::default() })
+                    Some(Worktree {
+                        fizzy,
+                        ..Worktree::default()
+                    })
                 }
                 line => {
                     let mut f = line.split('\t');
@@ -538,11 +569,26 @@ done <<'RSP_PAIRS'
                     let head = f.next().unwrap_or("").to_string();
                     let merged = f.next().unwrap_or("").to_string();
                     let origin = f.next().unwrap_or("").to_string();
-                    let links = f.next().unwrap_or("").split_whitespace().map(String::from).collect();
+                    let links = f
+                        .next()
+                        .unwrap_or("")
+                        .split_whitespace()
+                        .map(String::from)
+                        .collect();
                     let fixes = crate::links::fixed_refs(f.next().unwrap_or(""));
                     let fizzy = f.next().unwrap_or("").to_string();
                     let files = f.filter(|s| !s.is_empty()).map(String::from).collect();
-                    Some(Worktree { path, dirty, files, head, merged, origin, links, fixes, fizzy })
+                    Some(Worktree {
+                        path,
+                        dirty,
+                        files,
+                        head,
+                        merged,
+                        origin,
+                        links,
+                        fixes,
+                        fizzy,
+                    })
                 }
             })
             .collect(),
@@ -568,7 +614,6 @@ struct Worktree {
     fizzy: String,
 }
 
-
 /// The registry with each open task's live agent status from its host's Rex
 /// server, as `reconcile_tasks` gives it but without checking worktrees over
 /// SSH or ending anything, so the inbox can show tasks before that check.
@@ -581,7 +626,10 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
         .collect();
     hosts.sort();
     hosts.dedup();
-    let checks: Vec<_> = hosts.into_iter().map(|host| std::thread::spawn(move || host_windows(&host))).collect();
+    let checks: Vec<_> = hosts
+        .into_iter()
+        .map(|host| std::thread::spawn(move || host_windows(&host)))
+        .collect();
     let mut live: HashMap<String, TabStatus> = HashMap::new();
     for handle in checks {
         if let Ok(Some(windows)) = handle.join() {
@@ -615,8 +663,14 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
     let field = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
-    let checked = |t: &serde_json::Value| t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed");
-    let mut hosts: Vec<String> = tasks.iter().filter(|t| checked(t)).map(|t| field(t, "host")).collect();
+    let checked = |t: &serde_json::Value| {
+        t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed")
+    };
+    let mut hosts: Vec<String> = tasks
+        .iter()
+        .filter(|t| checked(t))
+        .map(|t| field(t, "host"))
+        .collect();
     hosts.sort();
     hosts.dedup();
     let checks: Vec<_> = hosts
@@ -644,8 +698,12 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     // Worktrees by HOST/WINDOW_ID.
     let mut dirty: HashMap<String, Worktree> = HashMap::new();
     for handle in checks {
-        let Ok((host, windows, worktrees)) = handle.join() else { continue };
-        let mine = tasks.iter_mut().filter(|t| checked(t) && t["host"].as_str() == Some(host.as_str()));
+        let Ok((host, windows, worktrees)) = handle.join() else {
+            continue;
+        };
+        let mine = tasks
+            .iter_mut()
+            .filter(|t| checked(t) && t["host"].as_str() == Some(host.as_str()));
         for (i, task) in mine.enumerate() {
             let window_id = task["window_id"].as_str().unwrap_or("").to_string();
             let window_id = window_id.as_str();
@@ -654,7 +712,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             let worktree = worktrees.as_ref().and_then(|w| w.get(i).cloned().flatten());
             if !task["ended_at"].is_null() {
                 match worktree {
-                    Some(w) if w.path.is_empty() => task["ended_reason"] = "worktree removed".into(),
+                    Some(w) if w.path.is_empty() => {
+                        task["ended_reason"] = "worktree removed".into()
+                    }
                     Some(w) => {
                         task["worktree"] = w.path.clone().into();
                         dirty.insert(key, w);
@@ -665,7 +725,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             }
             // Ended only when Rex positively lists the task's session
             // without its tab; see `HostWindows::tab_gone`.
-            let tab_gone = windows.as_ref().is_some_and(|w| w.tab_gone(&session_id, window_id));
+            let tab_gone = windows
+                .as_ref()
+                .is_some_and(|w| w.tab_gone(&session_id, window_id));
             if let Some(status) = windows.as_ref().and_then(|w| w.tabs.get(window_id)) {
                 live.insert(window_id.to_string(), status.clone());
             }
@@ -689,7 +751,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     }
     // Tasks that ended on their own just now keep their newest agent session
     // (after a /clear it is no longer the one spawn chose), for a resume.
-    let ended_now: Vec<usize> = (0..tasks.len()).filter(|&i| tasks[i]["ended_at"].as_u64() == Some(stamp)).collect();
+    let ended_now: Vec<usize> = (0..tasks.len())
+        .filter(|&i| tasks[i]["ended_at"].as_u64() == Some(stamp))
+        .collect();
     let found: Vec<_> = ended_now
         .iter()
         .map(|&i| {
@@ -711,7 +775,9 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         let key = format!("{}/{}", field(task, "host"), field(task, "window_id"));
         let worktree = dirty.get(&key).cloned();
         let repo = crate::folders::home_relative(&field(task, "repo"));
-        let project = projects.iter().find(|p| crate::folders::home_relative(p.path.trim_end_matches('/')) == repo);
+        let project = projects
+            .iter()
+            .find(|p| crate::folders::home_relative(p.path.trim_end_matches('/')) == repo);
         let remote = worktree
             .as_ref()
             .map(|w| w.origin.clone())
@@ -723,9 +789,15 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         let mut tracker = Tracker::new(&tracker_or_fizzy(catalog, board), &remote);
         if tracker.github.is_none() {
             tracker.github = task["links"].as_array().and_then(|links| {
-                links.iter().filter(|l| l["kind"] == "pr" && l["system"] == "github").find_map(|l| {
-                    l["ref"].as_str()?.split_once('#').map(|(repo, _)| repo.to_string())
-                })
+                links
+                    .iter()
+                    .filter(|l| l["kind"] == "pr" && l["system"] == "github")
+                    .find_map(|l| {
+                        l["ref"]
+                            .as_str()?
+                            .split_once('#')
+                            .map(|(repo, _)| repo.to_string())
+                    })
             });
         }
         plans.push((i, tracker, worktree));
@@ -752,7 +824,14 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             }
         }
         if let (Some(repo), false) = (&tracker.github, branch.is_empty()) {
-            lookups.push((*i, Lookup { profile: field(task, "profile"), repo: repo.clone(), branch }));
+            lookups.push((
+                *i,
+                Lookup {
+                    profile: field(task, "profile"),
+                    repo: repo.clone(),
+                    branch,
+                },
+            ));
         }
     }
     let prs = find_prs(&lookups.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>());
@@ -787,16 +866,34 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     // Ended tasks' links already name their repo or card account, so they
     // need no tracker.
     let asks = tasks.iter().enumerate().flat_map(|(i, task)| {
-        let tracker = plans.iter().find(|(k, _, _)| *k == i).map(|(_, t, _)| t.clone()).unwrap_or_default();
+        let tracker = plans
+            .iter()
+            .find(|(k, _, _)| *k == i)
+            .map(|(_, t, _)| t.clone())
+            .unwrap_or_default();
         let profile = field(task, "profile");
         let links = task["links"].as_array().cloned().unwrap_or_default();
-        links.into_iter().map(move |link| crate::titles::Ask { profile: profile.clone(), link, tracker: tracker.clone() })
+        links.into_iter().map(move |link| crate::titles::Ask {
+            profile: profile.clone(),
+            link,
+            tracker: tracker.clone(),
+        })
     });
     crate::titles::refresh(asks.collect());
     let cards = crate::cards::find_cards(tasks.iter().filter(|t| checked(t)));
     let live_prs: Vec<(String, String, Pr)> = live_prs
         .into_iter()
-        .map(|(i, repo, pr)| (format!("{}/{}", field(&tasks[i], "host"), field(&tasks[i], "window_id")), repo, pr))
+        .map(|(i, repo, pr)| {
+            (
+                format!(
+                    "{}/{}",
+                    field(&tasks[i], "host"),
+                    field(&tasks[i], "window_id")
+                ),
+                repo,
+                pr,
+            )
+        })
         .collect();
     let mut tasks = commit_checked_at(&tasks_path(), tasks, stamp)?;
     apply_live(&mut tasks, &live);
@@ -835,24 +932,38 @@ const INBOX_KEYS: [&str; 2] = ["pinned", "snoozed_until"];
 /// registry's end of a task is kept (an archive's reason, not "worktree
 /// removed" from a check that found the worktree gone), and tasks it has
 /// that the check didn't read are kept too. Returns the merged tasks.
-fn commit_checked_at(path: &Path, checked: Vec<serde_json::Value>, stamp: u64) -> Result<Vec<serde_json::Value>, String> {
+fn commit_checked_at(
+    path: &Path,
+    checked: Vec<serde_json::Value>,
+    stamp: u64,
+) -> Result<Vec<serde_json::Value>, String> {
     update_at(path, |fresh| {
         let mut merged = checked;
         let newer = by_key(fresh);
         carry_inbox_state(&mut merged, &newer);
         for task in merged.iter_mut() {
-            let Some(newer) = newer.get(&task_key(task)) else { continue };
+            let Some(newer) = newer.get(&task_key(task)) else {
+                continue;
+            };
             if !newer["ended_at"].is_null() {
                 task["ended_at"] = newer["ended_at"].clone();
                 task["ended_reason"] = newer["ended_reason"].clone();
             }
         }
         let checked: HashSet<String> = merged.iter().map(task_key).collect();
-        let launched: Vec<serde_json::Value> = fresh.iter().filter(|f| !checked.contains(&task_key(f))).cloned().collect();
+        let launched: Vec<serde_json::Value> = fresh
+            .iter()
+            .filter(|f| !checked.contains(&task_key(f)))
+            .cloned()
+            .collect();
         merged.extend(launched);
         // Pruned after the merge, so an old ended task the registry still
         // has doesn't come back once this check has dropped it.
-        merged.retain(|t| t["ended_at"].as_u64().is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS));
+        merged.retain(|t| {
+            t["ended_at"]
+                .as_u64()
+                .is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS)
+        });
         *fresh = merged.clone();
         Ok(merged)
     })
@@ -862,8 +973,12 @@ fn commit_checked_at(path: &Path, checked: Vec<serde_json::Value>, stamp: u64) -
 /// (see `by_key`), matching tasks by host, window and start.
 fn carry_inbox_state(tasks: &mut [serde_json::Value], fresh: &HashMap<String, &serde_json::Value>) {
     for task in tasks.iter_mut() {
-        let Some(newer) = fresh.get(&task_key(task)) else { continue };
-        let Some(obj) = task.as_object_mut() else { continue };
+        let Some(newer) = fresh.get(&task_key(task)) else {
+            continue;
+        };
+        let Some(obj) = task.as_object_mut() else {
+            continue;
+        };
         for key in INBOX_KEYS {
             match newer.get(key) {
                 Some(v) => obj.insert(key.into(), v.clone()),
@@ -890,7 +1005,10 @@ mod tests {
             serde_json::json!({"host":"h", "window_id":"b", "created_at":2, "pinned":true, "snoozed_until":9}),
         ];
         carry_inbox_state(&mut tasks, &by_key(&fresh));
-        assert_eq!(tasks[0], serde_json::json!({"host":"h", "window_id":"a", "created_at":1, "status":"x"}));
+        assert_eq!(
+            tasks[0],
+            serde_json::json!({"host":"h", "window_id":"a", "created_at":1, "status":"x"})
+        );
         assert_eq!(tasks[1]["snoozed_until"], 9);
         assert_eq!(tasks[1]["pinned"], true);
         // Gone from the later read (pruned or replaced): left alone.
@@ -913,9 +1031,16 @@ mod tests {
     fn a_fresh_or_wrong_server_closes_no_tabs() {
         // As a temporary XDG_RUNTIME_DIR's autostarted server answers:
         // nothing, or only its own new session.
-        for reply in ["", "S\tsession:fresh\n", "S\tsession:fresh\nwindow:9\t\t\t\n"] {
+        for reply in [
+            "",
+            "S\tsession:fresh\n",
+            "S\tsession:fresh\nwindow:9\t\t\t\n",
+        ] {
             let listed = HostWindows::parse(reply);
-            assert!(!listed.tab_gone("session:01a1db3e", "window:01a1db57"), "{reply:?}");
+            assert!(
+                !listed.tab_gone("session:01a1db3e", "window:01a1db57"),
+                "{reply:?}"
+            );
         }
     }
 
@@ -931,8 +1056,14 @@ mod tests {
 
     /// A registry file for one test, in a directory of its own.
     fn registry(name: &str) -> PathBuf {
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let dir = std::env::temp_dir().join(format!("switchyard-registry-{name}-{}-{unique}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "switchyard-registry-{name}-{}-{unique}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join("spawn-tasks.json")
     }
@@ -1077,17 +1208,27 @@ mod tests {
         // The next writer repairs the file from it and keeps the damaged one.
         record_at(&path, task("c", 3));
         assert_eq!(load_at(&path).unwrap(), [task("a", 1), task("c", 3)]);
-        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).is_ok());
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).is_ok()
+        );
         let dir = path.parent().unwrap();
         let damaged: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("spawn-tasks.json.damaged."))
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("spawn-tasks.json.damaged.")
+            })
             .collect();
         assert_eq!(damaged.len(), 1);
-        assert_eq!(std::fs::read_to_string(damaged[0].path()).unwrap(), "[{\"host\":");
+        assert_eq!(
+            std::fs::read_to_string(damaged[0].path()).unwrap(),
+            "[{\"host\":"
+        );
         // The repair didn't back up the damaged file over the good backup.
-        let backup: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(backup_path(&path)).unwrap()).unwrap();
+        let backup: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(backup_path(&path)).unwrap()).unwrap();
         assert_eq!(backup, [task("a", 1)]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1129,7 +1270,13 @@ mod tests {
         let merged = commit_checked_at(&path, checked, 10).unwrap();
         assert_eq!(merged.len(), 2);
         assert!(merged[0].get("pinned").is_none() && merged[0]["ended_at"].is_null());
-        assert_eq!((merged[1]["pinned"].clone(), merged[1]["ended_reason"].clone()), (true.into(), "archived".into()));
+        assert_eq!(
+            (
+                merged[1]["pinned"].clone(),
+                merged[1]["ended_reason"].clone()
+            ),
+            (true.into(), "archived".into())
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1137,7 +1284,14 @@ mod tests {
         let ok = Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1149,34 +1303,93 @@ mod tests {
 
     #[test]
     fn worktree_script_reports_head_merge_state_and_origin() {
-        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("switchyard-wt-{}-{unique}", std::process::id()));
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("switchyard-wt-{}-{unique}", std::process::id()));
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "--quiet", "-b", "main"]);
-        git(&repo, &["remote", "add", "origin", "git@github.com:o/r.git"]);
+        git(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:o/r.git"],
+        );
         git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "base"]);
         for b in ["fresh", "done", "open", "pulled", "rebasing"] {
-            git(&repo, &["worktree", "add", "--quiet", "-b", b, root.join(b).to_str().unwrap(), "main"]);
+            git(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    "--quiet",
+                    "-b",
+                    b,
+                    root.join(b).to_str().unwrap(),
+                    "main",
+                ],
+            );
         }
-        git(&root.join("done"), &["commit", "--quiet", "--allow-empty", "-m", "done"]);
+        git(
+            &root.join("done"),
+            &["commit", "--quiet", "--allow-empty", "-m", "done"],
+        );
         git(&repo, &["merge", "--quiet", "--ff-only", "done"]);
-        git(&root.join("open"), &["commit", "--quiet", "--allow-empty", "-m", "open\n\nFixes #9, closes o/r#10"]);
-        git(&repo, &["config", "--add", "branch.open.switchyard-link", "fizzy:5"]);
-        git(&repo, &["config", "--add", "branch.open.switchyard-link", "https://github.com/o/r/issues/3"]);
+        git(
+            &root.join("open"),
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "open\n\nFixes #9, closes o/r#10",
+            ],
+        );
+        git(
+            &repo,
+            &["config", "--add", "branch.open.switchyard-link", "fizzy:5"],
+        );
+        git(
+            &repo,
+            &[
+                "config",
+                "--add",
+                "branch.open.switchyard-link",
+                "https://github.com/o/r/issues/3",
+            ],
+        );
         // Origin's default branch moves on with someone else's fix, and a
         // branch with no commits of its own pulls it; local main lags.
-        git(&repo, &["commit", "--quiet", "--allow-empty", "-m", "other (#8)\n\nResolves #7"]);
+        git(
+            &repo,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                "other (#8)\n\nResolves #7",
+            ],
+        );
         git(&repo, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         git(&repo, &["reset", "--quiet", "--hard", "HEAD~1"]);
-        git(&root.join("pulled"), &["merge", "--quiet", "--ff-only", "origin/main"]);
+        git(
+            &root.join("pulled"),
+            &["merge", "--quiet", "--ff-only", "origin/main"],
+        );
         // Mid-rebase, a worktree is detached from its branch.
         git(&root.join("rebasing"), &["checkout", "--quiet", "--detach"]);
         std::fs::write(root.join("open/new.txt"), "x").unwrap();
-        std::fs::write(repo.join(".fizzy.yaml"), "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n").unwrap();
+        std::fs::write(
+            repo.join(".fizzy.yaml"),
+            "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n",
+        )
+        .unwrap();
         let r = repo.to_str().unwrap().to_string();
-        let mut pairs: Vec<(String, String, String)> =
-            ["fresh", "done", "open", "gone", "pulled"].iter().map(|b| (r.clone(), b.to_string(), String::new())).collect();
+        let mut pairs: Vec<(String, String, String)> = ["fresh", "done", "open", "gone", "pulled"]
+            .iter()
+            .map(|b| (r.clone(), b.to_string(), String::new()))
+            .collect();
         // Detached: found at the task's recorded worktree, and not without it.
         let rebasing = root.join("rebasing").to_str().unwrap().to_string();
         pairs.push((r.clone(), "rebasing".into(), rebasing.clone()));
@@ -1186,18 +1399,31 @@ mod tests {
         assert_eq!(w[0].merged, "new");
         assert_eq!(w[1].merged, "merged");
         assert_eq!(w[2].merged, "unmerged");
-        assert_eq!((w[2].dirty, w[2].files.clone()), (1, vec!["new.txt".to_string()]));
+        assert_eq!(
+            (w[2].dirty, w[2].files.clone()),
+            (1, vec!["new.txt".to_string()])
+        );
         assert_eq!(w[2].links, ["fizzy:5", "https://github.com/o/r/issues/3"]);
         assert_eq!(w[2].fixes, ["#9", "o/r#10"]);
         assert!(w[0].links.is_empty() && w[0].fixes.is_empty());
         assert!(w[3].path.is_empty());
         assert_eq!(w[4].merged, "new");
         assert!(w[4].fixes.is_empty(), "{:?}", w[4].fixes);
-        assert!(std::path::Path::new(&w[5].path) == std::fs::canonicalize(&rebasing).unwrap() || w[5].path == rebasing, "{}", w[5].path);
+        assert!(
+            std::path::Path::new(&w[5].path) == std::fs::canonicalize(&rebasing).unwrap()
+                || w[5].path == rebasing,
+            "{}",
+            w[5].path
+        );
         assert!(w[6].path.is_empty());
         // The repo's `.fizzy.yaml` board, with or without a worktree.
         assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
-        assert!(w[..3].iter().chain(&w[4..6]).all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git"));
+        assert!(
+            w[..3]
+                .iter()
+                .chain(&w[4..6])
+                .all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

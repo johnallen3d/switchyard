@@ -85,13 +85,23 @@ fn start_due(shared: &Arc<Shared>, local: &str) {
     let (folders, probes) = {
         let mut state = shared.lock();
         let mut folders = Vec::new();
-        for (host, l) in state.info.folders.iter_mut().filter(|(_, l)| l.due(now, FOLDERS_EVERY)) {
+        for (host, l) in state
+            .info
+            .folders
+            .iter_mut()
+            .filter(|(_, l)| l.due(now, FOLDERS_EVERY))
+        {
             l.running = true;
             l.wanted = false;
             folders.push(host.clone());
         }
         let mut probes = Vec::new();
-        for (host, l) in state.info.metrics.iter_mut().filter(|(_, l)| l.due(now, PROBE_EVERY)) {
+        for (host, l) in state
+            .info
+            .metrics
+            .iter_mut()
+            .filter(|(_, l)| l.due(now, PROBE_EVERY))
+        {
             l.running = true;
             l.wanted = false;
             probes.push(host.clone());
@@ -101,7 +111,11 @@ fn start_due(shared: &Arc<Shared>, local: &str) {
     for host in folders {
         let (shared, here) = (shared.clone(), host == local);
         thread::spawn(move || {
-            let got = if here { zoxide_here() } else { zoxide_on(&host) };
+            let got = if here {
+                zoxide_here()
+            } else {
+                zoxide_on(&host)
+            };
             if let Err(e) = &got {
                 crate::log(&format!("folders on {host}: {e}"));
             }
@@ -135,11 +149,19 @@ mod tests {
         };
         let mut config = Config {
             hosts: vec!["miller".into(), "drummer".into(), "omarchy".into()],
-            projects: vec![project("personal", &["config"]), project("personal", &[]), project("work", &[])],
+            projects: vec![
+                project("personal", &["config"]),
+                project("personal", &[]),
+                project("work", &[]),
+            ],
             ..Config::default()
         };
-        config.pools.insert("personal".into(), vec!["omarchy".into()]);
-        config.pools.insert("work".into(), vec!["miller".into(), "drummer".into()]);
+        config
+            .pools
+            .insert("personal".into(), vec!["omarchy".into()]);
+        config
+            .pools
+            .insert("work".into(), vec!["miller".into(), "drummer".into()]);
         let (folders, probes) = tracked(&config, "mac");
         assert_eq!(folders, ["mac", "miller", "drummer", "omarchy"]);
         // Single-host pools never get probed.

@@ -22,10 +22,16 @@ pub fn prompt_dir() -> PathBuf {
 }
 
 pub fn prune_prompts() {
-    let Ok(entries) = std::fs::read_dir(prompt_dir()) else { return };
+    let Ok(entries) = std::fs::read_dir(prompt_dir()) else {
+        return;
+    };
     let keep = Duration::from_secs(PROMPT_KEEP_SECS);
     for entry in entries.flatten() {
-        let old = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok());
         if old.is_some_and(|age| age > keep) {
             let _ = std::fs::remove_file(entry.path());
         }
@@ -39,9 +45,15 @@ pub fn parse_prompt_ref(r: &str) -> Result<(&str, &str), String> {
     let (label, id) = r.split_once(':').ok_or_else(bad)?;
     let label_ok = !label.is_empty()
         && !label.starts_with(['-', '.'])
-        && label.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
+        && label
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'));
     let id_ok = !id.is_empty() && id.chars().all(|c| c.is_ascii_digit() || c == '-');
-    if label_ok && id_ok { Ok((label, id)) } else { Err(bad()) }
+    if label_ok && id_ok {
+        Ok((label, id))
+    } else {
+        Err(bad())
+    }
 }
 
 /// The script reading or removing a prompt file on its host, for `host_bash`.
@@ -51,7 +63,8 @@ fn prompt_script(cmd: &str, id: &str) -> String {
 
 pub fn fetch_prompt(prompt_ref: &str) -> Result<String, String> {
     let (label, id) = parse_prompt_ref(prompt_ref)?;
-    let out = host_bash(label, &prompt_script("cat", id)).ok_or_else(|| format!("can't reach {label} for the prompt"))?;
+    let out = host_bash(label, &prompt_script("cat", id))
+        .ok_or_else(|| format!("can't reach {label} for the prompt"))?;
     if !out.status.success() {
         return Err(format!("prompt {id} is missing on {label}"));
     }
@@ -59,7 +72,9 @@ pub fn fetch_prompt(prompt_ref: &str) -> Result<String, String> {
 }
 
 pub fn discard_prompt(prompt_ref: &str) {
-    let Ok((label, id)) = parse_prompt_ref(prompt_ref) else { return };
+    let Ok((label, id)) = parse_prompt_ref(prompt_ref) else {
+        return;
+    };
     if !host_bash(label, &prompt_script("rm -f", id)).is_some_and(|o| o.status.success()) {
         log(&format!("could not remove prompt {id} on {label}"));
     }

@@ -18,7 +18,8 @@ use std::process::ExitCode;
 use switchyard_spawn::Kind;
 use switchyard_tabs::View;
 
-const USAGE: &str = "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW] [--quick]
+const USAGE: &str =
+    "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW] [--quick]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -114,7 +115,11 @@ fn float_new(args: &[&str]) -> ExitCode {
         _ => (Kind::Agent, args),
     };
     match rest {
-        ["--home", label, folders] => done(switchyard_spawn::float(kind, label.to_string(), folders.to_string())),
+        ["--home", label, folders] => done(switchyard_spawn::float(
+            kind,
+            label.to_string(),
+            folders.to_string(),
+        )),
         _ => usage_error(FLOAT_USAGE),
     }
 }
@@ -149,9 +154,20 @@ fn main() -> ExitCode {
         // The highlighted agent's transcript for the picker's preview, read
         // on the agent's host by what the config host found (see core's
         // transcript).
-        ["transcript", "--local", profile, harness, dir, agent_session, pid] => {
+        [
+            "transcript",
+            "--local",
+            profile,
+            harness,
+            dir,
+            agent_session,
+            pid,
+        ] => {
             let pid = pid.parse().unwrap_or(0);
-            println!("{}", switchyard_core::transcript::local(profile, harness, dir, agent_session, pid));
+            println!(
+                "{}",
+                switchyard_core::transcript::local(profile, harness, dir, agent_session, pid)
+            );
             ExitCode::SUCCESS
         }
         _ => usage_error(USAGE),

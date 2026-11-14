@@ -52,7 +52,10 @@ pub fn run(shared: Arc<Shared>, triggers: Receiver<&'static str>) {
         }
         shared.update(|s| s.set_tasks(got, true, Instant::now()));
         if started.elapsed() > Duration::from_secs(5) {
-            crate::log(&format!("tasks ({why}): checking took {:.1} s", started.elapsed().as_secs_f64()));
+            crate::log(&format!(
+                "tasks ({why}): checking took {:.1} s",
+                started.elapsed().as_secs_f64()
+            ));
         }
         why = match triggers.recv_timeout(EVERY) {
             Ok(why) => why,

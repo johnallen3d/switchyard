@@ -31,10 +31,15 @@ pub struct Asks {
 /// not one that still answers.
 pub fn listen(path: &Path) -> Result<UnixListener, String> {
     if UnixStream::connect(path).is_ok() {
-        return Err(format!("another switchyard-server is listening on {}", path.display()));
+        return Err(format!(
+            "another switchyard-server is listening on {}",
+            path.display()
+        ));
     }
     match std::fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(format!("{}: {e}", path.display())),
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            return Err(format!("{}: {e}", path.display()));
+        }
         _ => {}
     }
     let listener = UnixListener::bind(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -111,7 +116,11 @@ fn client(stream: UnixStream, shared: &Shared, asks: &Asks) -> io::Result<()> {
                 }
                 return Ok(());
             }
-            _ => writeln!(out, "{}", json!({ "error": format!("unknown request: {line}") }))?,
+            _ => writeln!(
+                out,
+                "{}",
+                json!({ "error": format!("unknown request: {line}") })
+            )?,
         }
     }
     Ok(())

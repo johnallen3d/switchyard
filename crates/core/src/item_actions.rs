@@ -47,23 +47,39 @@ pub enum Item {
     /// A Fizzy card: its account (from its URL) and number.
     Card { account: String, number: String },
     /// A GitHub PR: `owner/repo`, its number, and whether it is a draft.
-    Pr { repo: String, number: String, draft: bool },
+    Pr {
+        repo: String,
+        number: String,
+        draft: bool,
+    },
 }
 
 impl Item {
     /// The item a link names, when actions can be taken on it: a Fizzy card
     /// whose URL names its account, or a GitHub PR.
-    pub fn from_link(kind: &str, system: &str, reference: &str, url: &str, state: &str) -> Option<Item> {
+    pub fn from_link(
+        kind: &str,
+        system: &str,
+        reference: &str,
+        url: &str,
+        state: &str,
+    ) -> Option<Item> {
         let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
         match (kind, system) {
             ("card", "fizzy") => {
                 let account = fizzy_account(url)?;
-                digits(reference).then(|| Item::Card { account: account.into(), number: reference.into() })
+                digits(reference).then(|| Item::Card {
+                    account: account.into(),
+                    number: reference.into(),
+                })
             }
             ("pr", "github") => {
                 let (repo, number) = reference.split_once('#')?;
-                (repo.contains('/') && digits(number))
-                    .then(|| Item::Pr { repo: repo.into(), number: number.into(), draft: state == "draft" })
+                (repo.contains('/') && digits(number)).then(|| Item::Pr {
+                    repo: repo.into(),
+                    number: number.into(),
+                    draft: state == "draft",
+                })
             }
             _ => None,
         }
@@ -107,15 +123,25 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
             if body.trim().is_empty() {
                 return Err("an empty comment: nothing to post".into());
             }
-            let args = s(&["comment", "create", "--card", number, "--body", body, "--json"]);
-            Ok(("fizzy", args, vec![("FIZZY_PROFILE".into(), account.clone())]))
+            let args = s(&[
+                "comment", "create", "--card", number, "--body", body, "--json",
+            ]);
+            Ok((
+                "fizzy",
+                args,
+                vec![("FIZZY_PROFILE".into(), account.clone())],
+            ))
         }
-        (Action::Close, Item::Card { account, number }) => {
-            Ok(("fizzy", s(&["card", "close", number, "--json"]), vec![("FIZZY_PROFILE".into(), account.clone())]))
-        }
-        (Action::Ready, Item::Pr { repo, number, .. }) => {
-            Ok(("gh", s(&["pr", "ready", number, "-R", repo]), vec![("GH_PROMPT_DISABLED".into(), "1".into())]))
-        }
+        (Action::Close, Item::Card { account, number }) => Ok((
+            "fizzy",
+            s(&["card", "close", number, "--json"]),
+            vec![("FIZZY_PROFILE".into(), account.clone())],
+        )),
+        (Action::Ready, Item::Pr { repo, number, .. }) => Ok((
+            "gh",
+            s(&["pr", "ready", number, "-R", repo]),
+            vec![("GH_PROMPT_DISABLED".into(), "1".into())],
+        )),
         (action, item) => Err(format!("can't {} {}", action.verb(), item.name())),
     }
 }
@@ -143,8 +169,14 @@ pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<Str
 /// Run `cmd` with stdin closed, giving up after `timeout`. Its stdout, or
 /// on failure the reason: a Fizzy JSON error's message, else the last line
 /// of stderr (or stdout), or that the program isn't on PATH.
-pub(crate) fn run_bounded(cmd: &mut Command, program: &str, timeout: Duration) -> Result<String, String> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+pub(crate) fn run_bounded(
+    cmd: &mut Command,
+    program: &str,
+    timeout: Duration,
+) -> Result<String, String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => format!("{program}: not found on PATH"),
         _ => format!("{program}: {e}"),
@@ -158,8 +190,18 @@ pub(crate) fn run_bounded(cmd: &mut Command, program: &str, timeout: Duration) -
             s
         })
     };
-    let out = read(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = read(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let out = read(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let err = read(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -168,11 +210,17 @@ pub(crate) fn run_bounded(cmd: &mut Command, program: &str, timeout: Duration) -
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{program} took longer than {}s; gave up", timeout.as_secs()));
+                return Err(format!(
+                    "{program} took longer than {}s; gave up",
+                    timeout.as_secs()
+                ));
             }
         }
     };
-    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    let (out, err) = (
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    );
     if status.success() {
         return Ok(out);
     }
@@ -185,7 +233,13 @@ fn failure(program: &str, out: &str, err: &str) -> String {
     if let Some(msg) = json.as_ref().and_then(|v| v["error"].as_str()) {
         return format!("{program}: {msg}");
     }
-    let last = |s: &str| s.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(String::from);
+    let last = |s: &str| {
+        s.lines()
+            .rev()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .map(String::from)
+    };
     match last(err).or_else(|| last(out)) {
         Some(line) => format!("{program}: {line}"),
         None => format!("{program} failed"),
@@ -197,18 +251,35 @@ mod tests {
     use super::*;
 
     fn card() -> Item {
-        Item::Card { account: "6284043".into(), number: "1041".into() }
+        Item::Card {
+            account: "6284043".into(),
+            number: "1041".into(),
+        }
     }
 
     #[test]
     fn links_become_items_with_their_actions() {
-        let c = Item::from_link("card", "fizzy", "1041", "https://app.fizzy.do/6284043/cards/1041", "").unwrap();
+        let c = Item::from_link(
+            "card",
+            "fizzy",
+            "1041",
+            "https://app.fizzy.do/6284043/cards/1041",
+            "",
+        )
+        .unwrap();
         assert_eq!(c, card());
         assert_eq!(c.actions(), [Action::Comment, Action::Close]);
         assert_eq!(c.name(), "card 1041");
         // A card without its account in a URL can't say whose profile.
         assert_eq!(Item::from_link("card", "fizzy", "1041", "", ""), None);
-        let draft = Item::from_link("pr", "github", "o/r#57", "https://github.com/o/r/pull/57", "draft").unwrap();
+        let draft = Item::from_link(
+            "pr",
+            "github",
+            "o/r#57",
+            "https://github.com/o/r/pull/57",
+            "draft",
+        )
+        .unwrap();
         assert_eq!(draft.actions(), [Action::Ready]);
         assert_eq!(draft.name(), "PR o/r#57");
         let open = Item::from_link("pr", "github", "o/r#57", "u", "open").unwrap();
@@ -219,7 +290,10 @@ mod tests {
 
     #[test]
     fn fizzy_account_reads_card_urls_only() {
-        assert_eq!(fizzy_account("https://app.fizzy.do/6284043/cards/1159"), Some("6284043"));
+        assert_eq!(
+            fizzy_account("https://app.fizzy.do/6284043/cards/1159"),
+            Some("6284043")
+        );
         assert_eq!(fizzy_account("https://app.fizzy.do/6284043/boards/x"), None);
         assert_eq!(fizzy_account("https://github.com/o/r/pull/1"), None);
     }
@@ -232,16 +306,42 @@ mod tests {
         assert_eq!(env, [("FIZZY_PROFILE".to_string(), "6284043".to_string())]);
 
         let (_, args, env) = plan(Action::Comment, &card(), "looks good; shipping").unwrap();
-        assert_eq!(args, ["comment", "create", "--card", "1041", "--body", "looks good; shipping", "--json"]);
+        assert_eq!(
+            args,
+            [
+                "comment",
+                "create",
+                "--card",
+                "1041",
+                "--body",
+                "looks good; shipping",
+                "--json"
+            ]
+        );
         assert_eq!(env[0].1, "6284043");
         assert!(plan(Action::Comment, &card(), "  \n").is_err());
 
-        let pr = Item::Pr { repo: "o/r".into(), number: "57".into(), draft: true };
+        let pr = Item::Pr {
+            repo: "o/r".into(),
+            number: "57".into(),
+            draft: true,
+        };
         let (program, args, _) = plan(Action::Ready, &pr, "").unwrap();
-        assert_eq!((program, args.as_slice()), ("gh", ["pr", "ready", "57", "-R", "o/r"].map(String::from).as_slice()));
+        assert_eq!(
+            (program, args.as_slice()),
+            (
+                "gh",
+                ["pr", "ready", "57", "-R", "o/r"]
+                    .map(String::from)
+                    .as_slice()
+            )
+        );
 
         // Actions only fit their items.
-        assert_eq!(plan(Action::Ready, &card(), "").unwrap_err(), "can't mark ready card 1041");
+        assert_eq!(
+            plan(Action::Ready, &card(), "").unwrap_err(),
+            "can't mark ready card 1041"
+        );
         assert!(plan(Action::Close, &pr, "").is_err());
     }
 
@@ -254,14 +354,24 @@ mod tests {
 
         let mut sh = Command::new("sh");
         sh.args(["-c", "echo partial; echo 'no such PR' >&2; exit 1"]);
-        assert_eq!(run_bounded(&mut sh, "gh", TIMEOUT).unwrap_err(), "gh: no such PR");
+        assert_eq!(
+            run_bounded(&mut sh, "gh", TIMEOUT).unwrap_err(),
+            "gh: no such PR"
+        );
         let mut ok = Command::new("sh");
         ok.args(["-c", "echo done"]);
         assert_eq!(run_bounded(&mut ok, "sh", TIMEOUT).unwrap(), "done\n");
         let mut slow = Command::new("sh");
         slow.args(["-c", "sleep 5"]);
-        assert!(run_bounded(&mut slow, "fizzy", Duration::from_millis(200)).unwrap_err().contains("gave up"));
+        assert!(
+            run_bounded(&mut slow, "fizzy", Duration::from_millis(200))
+                .unwrap_err()
+                .contains("gave up")
+        );
         let mut missing = Command::new("switchyard-no-such-program");
-        assert_eq!(run_bounded(&mut missing, "fizzy", TIMEOUT).unwrap_err(), "fizzy: not found on PATH");
+        assert_eq!(
+            run_bounded(&mut missing, "fizzy", TIMEOUT).unwrap_err(),
+            "fizzy: not found on PATH"
+        );
     }
 }

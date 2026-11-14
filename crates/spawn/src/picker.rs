@@ -27,8 +27,9 @@ use std::time::{Duration, Instant};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use ratatui::crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
@@ -143,7 +144,9 @@ fn folder_rows(
                 continue;
             }
             if filtering {
-                let Some((score, mut h)) = score_fields(matcher, pattern, &[&f.display]) else { continue };
+                let Some((score, mut h)) = score_fields(matcher, pattern, &[&f.display]) else {
+                    continue;
+                };
                 hits.insert(Item::Folder(j), (h.swap_remove(0), Vec::new()));
                 keep_best(best, score, Item::Folder(j));
             }
@@ -237,7 +240,13 @@ struct App {
 }
 
 impl App {
-    fn new(kind: Kind, projects: Vec<Project>, home: String, home_folders: String, dev: Vec<String>) -> Self {
+    fn new(
+        kind: Kind,
+        projects: Vec<Project>,
+        home: String,
+        home_folders: String,
+        dev: Vec<String>,
+    ) -> Self {
         let mut groups: Vec<String> = Vec::new();
         for p in &projects {
             if !groups.contains(&p.profile) {
@@ -325,8 +334,12 @@ impl App {
             return;
         }
         self.loads.insert(host.clone(), Load::Waiting);
-        let (tx, here, home, home_folders) =
-            (self.tx.clone(), self.here.clone(), self.home.clone(), self.home_folders.clone());
+        let (tx, here, home, home_folders) = (
+            self.tx.clone(),
+            self.here.clone(),
+            self.home.clone(),
+            self.home_folders.clone(),
+        );
         std::thread::spawn(move || {
             let r = folders::list(&host, &here, &home, &home_folders);
             let _ = tx.send((host, r));
@@ -355,14 +368,21 @@ impl App {
     fn sync_commands(&mut self) {
         while let Ok((probe, got)) = self.commands_rx.try_recv() {
             let list = got.unwrap_or_else(|e| {
-                log(&format!("slash commands for {} on {}: {e}", probe.2, probe.0));
+                log(&format!(
+                    "slash commands for {} on {}: {e}",
+                    probe.2, probe.0
+                ));
                 Vec::new()
             });
             self.commands.insert(probe, Some(list));
             // Take them now if they are for the current probe.
             self.commands_for = None;
         }
-        let probe = if self.kind == Kind::Agent { self.probe() } else { None };
+        let probe = if self.kind == Kind::Agent {
+            self.probe()
+        } else {
+            None
+        };
         if probe == self.commands_for {
             return;
         }
@@ -398,11 +418,15 @@ impl App {
         while let Ok((path, got)) = self.items_rx.try_recv() {
             let list = got.unwrap_or_else(|e| {
                 log(&format!("open work items for {path}: {e}"));
-                OpenItems { noun: "items", items: Vec::new() }
+                OpenItems {
+                    noun: "items",
+                    items: Vec::new(),
+                }
             });
             self.open_items.insert(path, Some(list));
         }
-        if self.kind == Kind::Agent && self.focus == Focus::Item
+        if self.kind == Kind::Agent
+            && self.focus == Focus::Item
             && let Some(project) = self.project()
             && !self.open_items.contains_key(&project.path)
         {
@@ -420,12 +444,15 @@ impl App {
     /// Whether the highlighted project's open items are being listed, for
     /// the spinner.
     fn listing_items(&self) -> bool {
-        self.project().is_some_and(|p| matches!(self.open_items.get(&p.path), Some(None)))
+        self.project()
+            .is_some_and(|p| matches!(self.open_items.get(&p.path), Some(None)))
     }
 
     /// The highlighted project's open work items, once listed.
     fn item_list(&self) -> Option<&OpenItems> {
-        self.project().and_then(|p| self.open_items.get(&p.path)).and_then(Option::as_ref)
+        self.project()
+            .and_then(|p| self.open_items.get(&p.path))
+            .and_then(Option::as_ref)
     }
 
     /// Match the listed items against the field's text, by number and title:
@@ -444,7 +471,9 @@ impl App {
         }
         let showing = self.kind == Kind::Agent && self.focus == Focus::Item && self.item_menu;
         let list = match self.item_list() {
-            Some(list) if showing && !list.items.iter().any(|i| i.url == query) => list.items.clone(),
+            Some(list) if showing && !list.items.iter().any(|i| i.url == query) => {
+                list.items.clone()
+            }
             _ => Vec::new(),
         };
         let query = query.trim_start_matches('#');
@@ -456,14 +485,18 @@ impl App {
                 continue;
             }
             let number = item.number.to_string();
-            if let Some((score, mut hits)) = score_fields(&mut self.matcher, &pattern, &[&number, &item.title]) {
+            if let Some((score, mut hits)) =
+                score_fields(&mut self.matcher, &pattern, &[&number, &item.title])
+            {
                 scored.push((score, i, hits.swap_remove(1)));
             }
         }
         // Best first, in listed order among equals.
         scored.sort_by(|a, b| b.0.cmp(&a.0));
         self.item_hits = scored.into_iter().map(|(_, i, h)| (i, h)).collect();
-        self.item_selected = self.item_selected.min(self.item_hits.len().saturating_sub(1));
+        self.item_selected = self
+            .item_selected
+            .min(self.item_hits.len().saturating_sub(1));
     }
 
     /// The item highlighted in the showing work item menu.
@@ -560,7 +593,9 @@ impl App {
     /// The highlighted project's or folder's path, as the session or agent
     /// work uses it (a catalog path may start with ~/).
     fn target_path(&self) -> Option<String> {
-        self.project().map(|p| p.path.clone()).or_else(|| self.folder().map(|f| f.path.clone()))
+        self.project()
+            .map(|p| p.path.clone())
+            .or_else(|| self.folder().map(|f| f.path.clone()))
     }
 
     fn refilter(&mut self) {
@@ -597,7 +632,11 @@ impl App {
             self.rows.extend(matched.into_iter().map(Item::Project));
         }
         let host = self.listed().to_string();
-        let catalog: HashSet<String> = self.projects.iter().map(|p| folders::home_relative(&p.path)).collect();
+        let catalog: HashSet<String> = self
+            .projects
+            .iter()
+            .map(|p| folders::home_relative(&p.path))
+            .collect();
         let rows = folder_rows(
             self.loads.get(&host),
             &catalog,
@@ -608,7 +647,11 @@ impl App {
             &mut best,
         );
         self.rows.extend(rows);
-        let want = if filtering { best.map(|(_, i)| i) } else { prev };
+        let want = if filtering {
+            best.map(|(_, i)| i)
+        } else {
+            prev
+        };
         self.selected = want
             .and_then(|w| self.rows.iter().position(|i| *i == w))
             .or_else(|| self.rows.iter().position(selectable));
@@ -647,7 +690,11 @@ impl App {
     /// Catalog work may use its auto pool; a folder only exists on the
     /// host whose folders are listed.
     fn agent_host(&self) -> &str {
-        if self.folder().is_some() { self.listed() } else { &self.hosts[self.host] }
+        if self.folder().is_some() {
+            self.listed()
+        } else {
+            &self.hosts[self.host]
+        }
     }
 
     /// The work name as typed.
@@ -697,7 +744,9 @@ impl App {
     /// What Enter would do, as the config's title protocol expects; empty
     /// while the form is incomplete or the prompt couldn't be saved.
     fn pick(&self) -> String {
-        let Some(path) = self.target_path() else { return String::new() };
+        let Some(path) = self.target_path() else {
+            return String::new();
+        };
         match self.kind {
             Kind::Session => format!("session/{}/{}", hex(self.listed()), hex(&path)),
             Kind::Agent => {
@@ -713,7 +762,9 @@ impl App {
                     hex(&name),
                     HARNESSES[self.harness]
                 );
-                let Some(prompt_ref) = self.prompt.saved_ref() else { return String::new() };
+                let Some(prompt_ref) = self.prompt.saved_ref() else {
+                    return String::new();
+                };
                 let item = self.item_text();
                 if !item.is_empty() {
                     pick = format!("{pick}/{}/{}", hex(prompt_ref), hex(&item));
@@ -759,10 +810,12 @@ impl App {
                 self.refilter();
             }
             Focus::Name => {
-                self.name.insert_str(text.chars().filter_map(name_char).collect::<String>());
+                self.name
+                    .insert_str(text.chars().filter_map(name_char).collect::<String>());
             }
             Focus::Item => {
-                self.item.insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
+                self.item
+                    .insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
                 self.item_menu = true;
             }
             Focus::Prompt => self.prompt.paste(&text),
@@ -815,7 +868,9 @@ impl App {
             }
             // As in a shell, ctrl-c in the prompt throws its text away (ctrl-z
             // brings it back); with nothing to clear, it closes the picker.
-            KeyCode::Char('c') if ctrl && self.focus == Focus::Prompt && !self.prompt.is_empty() => {
+            KeyCode::Char('c')
+                if ctrl && self.focus == Focus::Prompt && !self.prompt.is_empty() =>
+            {
                 self.prompt.clear();
             }
             // Escape (or ctrl-c outside a non-empty prompt) closes, but a
@@ -897,7 +952,9 @@ impl App {
                 // Rex's mode takes plain Enter to act, so a newline is alt- or
                 // shift-Enter (or arrives in a paste).
                 Focus::Prompt => match k.code {
-                    KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => self.focus = Focus::Item,
+                    KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => {
+                        self.focus = Focus::Item
+                    }
                     _ => self.prompt.key(k),
                 },
             },
@@ -916,8 +973,18 @@ impl App {
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
         let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
-        let prompt_rows = if agent { self.prompt.rows(inner.width, PROMPT_MIN_ROWS, PROMPT_MAX_ROWS).min(spare.max(1)) } else { 0 };
-        let form_rows = if agent { 3 + prompt_rows + PROMPT_CHROME_ROWS } else { 2 };
+        let prompt_rows = if agent {
+            self.prompt
+                .rows(inner.width, PROMPT_MIN_ROWS, PROMPT_MAX_ROWS)
+                .min(spare.max(1))
+        } else {
+            0
+        };
+        let form_rows = if agent {
+            3 + prompt_rows + PROMPT_CHROME_ROWS
+        } else {
+            2
+        };
         let [search, rule1, _, body, _, rule2, _, form, _, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(1),
@@ -959,21 +1026,43 @@ impl App {
         if rows == 0 || fields.width < 12 {
             return;
         }
-        let area = Rect { x: fields.x, y: fields.y - rows, width: fields.width, height: rows };
+        let area = Rect {
+            x: fields.x,
+            y: fields.y - rows,
+            width: fields.width,
+            height: rows,
+        };
         f.render_widget(Clear, area);
         let first = self.item_selected.saturating_sub(rows as usize - 1);
         let w = area.width as usize;
-        let number_w = self.item_hits.iter().map(|(i, _)| list.items[*i].number.to_string().len()).max().unwrap_or(1) + 1;
-        for (n, (i, hits)) in self.item_hits.iter().enumerate().skip(first).take(rows as usize) {
+        let number_w = self
+            .item_hits
+            .iter()
+            .map(|(i, _)| list.items[*i].number.to_string().len())
+            .max()
+            .unwrap_or(1)
+            + 1;
+        for (n, (i, hits)) in self
+            .item_hits
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(rows as usize)
+        {
             let item = &list.items[*i];
             let selected = n == self.item_selected;
             let bg = if selected { p.hl_med } else { p.surface };
             let mut spans = vec![
-                Span::styled(if selected { "▎" } else { " " }, Style::new().fg(p.iris).bg(bg)),
+                Span::styled(
+                    if selected { "▎" } else { " " },
+                    Style::new().fg(p.iris).bg(bg),
+                ),
                 Span::styled(" ", Style::new().bg(bg)),
                 Span::styled(
                     format!("{:>number_w$}  ", format!("#{}", item.number)),
-                    Style::new().fg(if selected { p.foam } else { p.subtle }).bg(bg),
+                    Style::new()
+                        .fg(if selected { p.foam } else { p.subtle })
+                        .bg(bg),
                 ),
             ];
             let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
@@ -982,11 +1071,28 @@ impl App {
             } else {
                 Style::new().fg(p.text).bg(bg)
             };
-            let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
-            spans.extend(highlight(&item.title, hits, w.saturating_sub(used + 1), false, plain, hl));
+            let hl = Style::new()
+                .fg(p.rose)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            spans.extend(highlight(
+                &item.title,
+                hits,
+                w.saturating_sub(used + 1),
+                false,
+                plain,
+                hl,
+            ));
             let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            spans.push(Span::styled(" ".repeat(w.saturating_sub(used)), Style::new().bg(bg)));
-            let row = Rect { y: area.y + (n - first) as u16, height: 1, ..area };
+            spans.push(Span::styled(
+                " ".repeat(w.saturating_sub(used)),
+                Style::new().bg(bg),
+            ));
+            let row = Rect {
+                y: area.y + (n - first) as u16,
+                height: 1,
+                ..area
+            };
             f.render_widget(Line::from(spans), row);
         }
     }
@@ -995,17 +1101,42 @@ impl App {
         let p = &self.p;
         let focused = self.focus == Focus::Project;
         let typing = !self.query.is_empty();
-        draw::search(f, p, area, &self.query, "Search projects and folders", focused, focused);
+        draw::search(
+            f,
+            p,
+            area,
+            &self.query,
+            "Search projects and folders",
+            focused,
+            focused,
+        );
         let total = self.projects.len();
-        let shown = self.rows.iter().filter(|r| matches!(r, Item::Project(_))).count();
+        let shown = self
+            .rows
+            .iter()
+            .filter(|r| matches!(r, Item::Project(_)))
+            .count();
         let mut right = Vec::new();
         if typing {
             right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
-            right.push(Span::styled(format!(" of {total} projects  "), Style::new().fg(p.muted)));
+            right.push(Span::styled(
+                format!(" of {total} projects  "),
+                Style::new().fg(p.muted),
+            ));
         } else {
-            right.push(Span::styled(format!("{total} projects  "), Style::new().fg(p.muted)));
+            right.push(Span::styled(
+                format!("{total} projects  "),
+                Style::new().fg(p.muted),
+            ));
         }
-        right.extend(pill(vec![Span::styled(self.listed().to_string(), Style::new().fg(p.foam))], p.overlay, p.base));
+        right.extend(pill(
+            vec![Span::styled(
+                self.listed().to_string(),
+                Style::new().fg(p.foam),
+            )],
+            p.overlay,
+            p.base,
+        ));
         right.push(Span::raw(" "));
         f.render_widget(Line::from(right).right_aligned(), area);
     }
@@ -1022,9 +1153,16 @@ impl App {
             self.offset = draw::keep_in_view(self.offset, sel, h, header_above);
         }
         let overflow = self.rows.len() > h && h > 0;
-        let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
+        let list = Rect {
+            width: area.width.saturating_sub(if overflow { 2 } else { 0 }),
+            ..area
+        };
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
-            let r = Rect { y: area.y + (i - self.offset) as u16, height: 1, ..list };
+            let r = Rect {
+                y: area.y + (i - self.offset) as u16,
+                height: 1,
+                ..list
+            };
             let last = !self.rows.get(i + 1).is_some_and(selectable);
             self.draw_row(f, r, row, self.selected == Some(i), last);
         }
@@ -1039,8 +1177,14 @@ impl App {
             vec![
                 Line::styled(ICON_REPO, Style::new().fg(p.hl_high)),
                 Line::from(""),
-                Line::styled(format!("No projects or folders on {}", self.listed()), Style::new().fg(p.subtle)),
-                Line::styled("Add some to agent-projects/projects.toml", Style::new().fg(p.muted)),
+                Line::styled(
+                    format!("No projects or folders on {}", self.listed()),
+                    Style::new().fg(p.subtle),
+                ),
+                Line::styled(
+                    "Add some to agent-projects/projects.toml",
+                    Style::new().fg(p.muted),
+                ),
             ]
         } else {
             vec![
@@ -1069,7 +1213,10 @@ impl App {
         } else {
             Span::styled(" ", Style::new().bg(bg))
         };
-        let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let hl = Style::new()
+            .fg(p.rose)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         // Folders are not agent work's to run in: muted when agent work is
         // the kind.
         let folder_ok = self.kind == Kind::Session;
@@ -1081,27 +1228,47 @@ impl App {
                     edge,
                     Span::styled(ICON_GROUP, Style::new().fg(p.subtle).bg(bg)),
                     Span::styled("  ", Style::new().bg(bg)),
-                    Span::styled(group.clone(), Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        group.clone(),
+                        Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD),
+                    ),
                 ];
                 f.render_widget(Line::from(spans), r);
                 let text = format!("{n} project{}", if n == 1 { "" } else { "s" });
-                let mut right = pill(vec![Span::styled(text, Style::new().fg(p.subtle))], p.overlay, bg);
+                let mut right = pill(
+                    vec![Span::styled(text, Style::new().fg(p.subtle))],
+                    p.overlay,
+                    bg,
+                );
                 right.push(Span::styled(" ", Style::new().bg(bg)));
                 f.render_widget(Line::from(right).right_aligned(), r);
             }
             Item::Folders => {
                 let (text, color) = match self.loads.get(self.listed()) {
                     Some(Load::Ready(_)) => {
-                        let n = self.rows.iter().filter(|i| matches!(i, Item::Folder(_))).count();
-                        (format!("{n} folder{}", if n == 1 { "" } else { "s" }), p.muted)
+                        let n = self
+                            .rows
+                            .iter()
+                            .filter(|i| matches!(i, Item::Folder(_)))
+                            .count();
+                        (
+                            format!("{n} folder{}", if n == 1 { "" } else { "s" }),
+                            p.muted,
+                        )
                     }
                     Some(Load::Failed(err)) => (err.clone(), p.love),
-                    _ => (format!("{} listing…", SPINNER[tick(self.started) % SPINNER.len()]), p.foam),
+                    _ => (
+                        format!("{} listing…", SPINNER[tick(self.started) % SPINNER.len()]),
+                        p.foam,
+                    ),
                 };
                 let spans = vec![
                     Span::styled(" ", Style::new().bg(p.base)),
                     Span::styled(ICON_FOLDER, Style::new().fg(p.subtle)),
-                    Span::styled(format!("  Folders on {}", self.listed()), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        format!("  Folders on {}", self.listed()),
+                        Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+                    ),
                 ];
                 f.render_widget(Line::from(spans), r);
                 let mut right = vec![Span::styled(text, Style::new().fg(color))];
@@ -1125,18 +1292,34 @@ impl App {
                     edge,
                     Span::styled(" ", Style::new().bg(bg)),
                     Span::styled(guide, Style::new().fg(p.hl_med).bg(bg)),
-                    Span::styled(ICON_REPO, Style::new().fg(if selected { p.iris } else { p.muted }).bg(bg)),
+                    Span::styled(
+                        ICON_REPO,
+                        Style::new()
+                            .fg(if selected { p.iris } else { p.muted })
+                            .bg(bg),
+                    ),
                     Span::styled(" ", Style::new().bg(bg)),
                 ];
-                spans.extend(highlight(&project.name, &name_hits, name_room, false, name_style, hl));
+                spans.extend(highlight(
+                    &project.name,
+                    &name_hits,
+                    name_room,
+                    false,
+                    name_style,
+                    hl,
+                ));
                 f.render_widget(Line::from(spans), r);
-                let path_style = Style::new().fg(if selected { p.subtle } else { p.muted }).bg(bg);
+                let path_style = Style::new()
+                    .fg(if selected { p.subtle } else { p.muted })
+                    .bg(bg);
                 let mut path = highlight(&project.path, &path_hits, path_w, true, path_style, hl);
                 path.push(Span::styled(" ", Style::new().bg(bg)));
                 f.render_widget(Line::from(path).right_aligned(), r);
             }
             Item::Folder(j) => {
-                let Some(folder) = self.folder_at(*j) else { return };
+                let Some(folder) = self.folder_at(*j) else {
+                    return;
+                };
                 let hits = self.hits.get(item).map(|h| h.0.clone()).unwrap_or_default();
                 let on = if folder_ok { p.subtle } else { p.muted };
                 let text = if selected && folder_ok {
@@ -1147,7 +1330,12 @@ impl App {
                 let mut spans = vec![
                     edge,
                     Span::styled(" ", Style::new().bg(bg)),
-                    Span::styled(ICON_FOLDER, Style::new().fg(if selected { p.iris } else { p.muted }).bg(bg)),
+                    Span::styled(
+                        ICON_FOLDER,
+                        Style::new()
+                            .fg(if selected { p.iris } else { p.muted })
+                            .bg(bg),
+                    ),
                     Span::styled("  ", Style::new().bg(bg)),
                 ];
                 let lead: usize = spans.iter().map(|s| str_width(&s.content)).sum();
@@ -1175,7 +1363,11 @@ impl App {
             Span::styled(if focused { "▎" } else { " " }, Style::new().fg(p.iris)),
             Span::styled(
                 format!("{:<width$}", "Name", width = label_w as usize - 1),
-                if focused { Style::new().fg(p.iris).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) },
+                if focused {
+                    Style::new().fg(p.iris).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(p.subtle)
+                },
             ),
         ];
         let name = self.name_text();
@@ -1184,22 +1376,35 @@ impl App {
         }
         f.render_widget(Line::from(spans), name_row);
         // Right-aligned hint, shortened or dropped so it never covers the name.
-        let room = (name_row.width as usize).saturating_sub(label_w as usize + str_width(&name) + 2);
+        let room =
+            (name_row.width as usize).saturating_sub(label_w as usize + str_width(&name) + 2);
         let (candidates, color) = match name_problem(&name) {
             Some(problem) if !name.is_empty() => (vec![format!("{problem} ")], p.love),
             Some(_) => match self.names_from() {
-                Some(from) => (vec![format!("named on ⏎ from the {from} "), "named on ⏎ ".into()], p.muted),
+                Some(from) => (
+                    vec![format!("named on ⏎ from the {from} "), "named on ⏎ ".into()],
+                    p.muted,
+                ),
                 None => (vec![], p.muted),
             },
             None => {
                 let (branch, slug) = branch_and_slug(&name);
-                (vec![format!("{branch} · .worktrees/{slug} "), format!("{branch} ")], p.muted)
+                (
+                    vec![
+                        format!("{branch} · .worktrees/{slug} "),
+                        format!("{branch} "),
+                    ],
+                    p.muted,
+                )
             }
         };
         let hint = candidates.into_iter().find(|h| str_width(h) <= room);
         let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
         if let Some(hint) = hint {
-            f.render_widget(Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(), name_row);
+            f.render_widget(
+                Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(),
+                name_row,
+            );
         }
         if focused || !name.is_empty() {
             let field = Rect {
@@ -1209,7 +1414,8 @@ impl App {
             };
             self.name.set_style(Style::new().fg(p.text).bg(p.base));
             self.name.set_placeholder_text("api-work, fix/login …");
-            self.name.set_placeholder_style(Style::new().fg(p.muted).bg(p.base));
+            self.name
+                .set_placeholder_style(Style::new().fg(p.muted).bg(p.base));
             f.render_widget(&self.name, field);
             if focused {
                 place_cursor(f, &self.name, field);
@@ -1218,7 +1424,13 @@ impl App {
 
         self.draw_item(f, item_row, label_w);
         if self.focus == Focus::Item && !self.item_hits.is_empty() {
-            self.item_card = Some((Rect { height: 2, ..name_row }, self.list_area));
+            self.item_card = Some((
+                Rect {
+                    height: 2,
+                    ..name_row
+                },
+                self.list_area,
+            ));
         }
         self.draw_prompt(f, card, prompt_rows);
     }
@@ -1231,7 +1443,11 @@ impl App {
             Span::styled(if focused { "▎" } else { " " }, Style::new().fg(p.iris)),
             Span::styled(
                 format!("{:<width$}", "Work item", width = label_w as usize - 1),
-                if focused { Style::new().fg(p.iris).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) },
+                if focused {
+                    Style::new().fg(p.iris).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(p.subtle)
+                },
             ),
         ];
         let item = self.typed_item();
@@ -1246,10 +1462,20 @@ impl App {
         let listing = self.listing_items();
         let open = self.item_list().map_or(0, |l| l.items.len());
         let (hints, color): (Vec<String>, Color) = match (self.chosen_item(), self.project()) {
-            (Some(chosen), _) => (vec![format!("⏎ #{} · ⇥ fill ", chosen.number), format!("#{} ", chosen.number)], p.foam),
-            (None, _) if focused && listing => {
-                (vec![format!("{} listing open items ", SPINNER[tick(self.started) % SPINNER.len()])], p.muted)
-            }
+            (Some(chosen), _) => (
+                vec![
+                    format!("⏎ #{} · ⇥ fill ", chosen.number),
+                    format!("#{} ", chosen.number),
+                ],
+                p.foam,
+            ),
+            (None, _) if focused && listing => (
+                vec![format!(
+                    "{} listing open items ",
+                    SPINNER[tick(self.started) % SPINNER.len()]
+                )],
+                p.muted,
+            ),
             (None, _) if focused && item.is_empty() && open > 0 => {
                 let noun = self.item_list().map_or("items", |l| l.noun);
                 (vec![format!("↓ {open} open {noun} "), "↓ ".into()], p.muted)
@@ -1263,13 +1489,22 @@ impl App {
         let hint = hints.into_iter().find(|h| str_width(h) <= room);
         let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
         if let Some(hint) = hint {
-            f.render_widget(Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(), row);
+            f.render_widget(
+                Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(),
+                row,
+            );
         }
         if focused || !item.is_empty() {
-            let field = Rect { x: row.x + label_w, width: row.width.saturating_sub(label_w + hint_w), ..row };
+            let field = Rect {
+                x: row.x + label_w,
+                width: row.width.saturating_sub(label_w + hint_w),
+                ..row
+            };
             self.item.set_style(Style::new().fg(p.text).bg(p.base));
-            self.item.set_placeholder_text("optional: #42, ENG-123, an issue or card URL");
-            self.item.set_placeholder_style(Style::new().fg(p.muted).bg(p.base));
+            self.item
+                .set_placeholder_text("optional: #42, ENG-123, an issue or card URL");
+            self.item
+                .set_placeholder_style(Style::new().fg(p.muted).bg(p.base));
             f.render_widget(&self.item, field);
             if focused {
                 place_cursor(f, &self.item, field);
@@ -1280,14 +1515,18 @@ impl App {
     /// A plain session's form: the folder it opens and the chips.
     fn draw_session(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
-        let [line, chips] = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
+        let [line, chips] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area);
         let spans = match self.target_path() {
             Some(path) => vec![
                 Span::styled("  Folder  ", Style::new().fg(p.subtle)),
                 Span::styled(folders::home_relative(&path), Style::new().fg(p.text)),
                 Span::styled(format!("  on {}", self.listed()), Style::new().fg(p.muted)),
             ],
-            None => vec![Span::styled("  Pick a project or folder", Style::new().fg(p.muted))],
+            None => vec![Span::styled(
+                "  Pick a project or folder",
+                Style::new().fg(p.muted),
+            )],
         };
         f.render_widget(Line::from(spans), line);
         let (left, right) = self.chips(p.base);
@@ -1306,16 +1545,23 @@ impl App {
         let p = self.p;
         let focused = self.focus == Focus::Prompt;
         let fill = if focused { p.overlay } else { p.surface };
-        self.prompt.set_placeholder("What should the agent do? (optional)");
+        self.prompt
+            .set_placeholder("What should the agent do? (optional)");
         if focused {
             self.prompt_card = Some((card, f.area()));
         }
-        let Some((chips_area, skip)) = self.prompt.draw(f, &p, card, rows, focused, self.corners.as_ref()) else {
+        let Some((chips_area, skip)) =
+            self.prompt
+                .draw(f, &p, card, rows, focused, self.corners.as_ref())
+        else {
             return;
         };
         let (left, mut right) = self.chips(fill);
         if skip > 0 {
-            right.insert(0, Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted)));
+            right.insert(
+                0,
+                Span::styled(format!("+{skip} lines above  "), Style::new().fg(p.muted)),
+            );
         }
         let left_w: usize = left.iter().map(|s| str_width(&s.content)).sum();
         let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
@@ -1336,36 +1582,76 @@ impl App {
         let host_text = match (host, self.project()) {
             (AUTO, _) if self.kind == Kind::Session => self.here.clone(),
             (AUTO, Some(project)) => {
-                let hosts: Vec<String> =
-                    pool(project).iter().map(|h| if h == CONFIG { "Mac".to_string() } else { h.clone() }).collect();
-                if hosts.len() == 1 { hosts[0].clone() } else { format!("least busy of {}", hosts.join(", ")) }
+                let hosts: Vec<String> = pool(project)
+                    .iter()
+                    .map(|h| {
+                        if h == CONFIG {
+                            "Mac".to_string()
+                        } else {
+                            h.clone()
+                        }
+                    })
+                    .collect();
+                if hosts.len() == 1 {
+                    hosts[0].clone()
+                } else {
+                    format!("least busy of {}", hosts.join(", "))
+                }
             }
             (AUTO, None) => self.listed().to_string(),
             (h, _) => h.to_string(),
         };
         let mut left = pill(
-            vec![Span::styled("\u{f048b} ", Style::new().fg(p.iris)), Span::styled(host_text, changed(host != AUTO))],
+            vec![
+                Span::styled("\u{f048b} ", Style::new().fg(p.iris)),
+                Span::styled(host_text, changed(host != AUTO)),
+            ],
             chip_bg,
             fill,
         );
         if self.kind == Kind::Agent {
             left.push(Span::raw(" "));
             left.extend(pill(
-                vec![Span::styled(HARNESSES[self.harness].to_string(), changed(self.harness != 0))],
+                vec![Span::styled(
+                    HARNESSES[self.harness].to_string(),
+                    changed(self.harness != 0),
+                )],
                 chip_bg,
                 fill,
             ));
         }
         if let Some(project) = self.project() {
-            let color = if project.profile == "work" { p.gold } else { p.foam };
+            let color = if project.profile == "work" {
+                p.gold
+            } else {
+                p.foam
+            };
             left.push(Span::raw(" "));
-            left.extend(pill(vec![Span::styled(project.profile.clone(), Style::new().fg(color))], chip_bg, fill));
+            left.extend(pill(
+                vec![Span::styled(
+                    project.profile.clone(),
+                    Style::new().fg(color),
+                )],
+                chip_bg,
+                fill,
+            ));
         }
         let ready = !self.pick().is_empty();
-        let (send_bg, send_fg) = if ready { (p.pine, p.text) } else { (chip_bg, p.muted) };
-        let label = if self.kind == Kind::Agent { "⏎ spawn" } else { "⏎ open" };
+        let (send_bg, send_fg) = if ready {
+            (p.pine, p.text)
+        } else {
+            (chip_bg, p.muted)
+        };
+        let label = if self.kind == Kind::Agent {
+            "⏎ spawn"
+        } else {
+            "⏎ open"
+        };
         let right = pill(
-            vec![Span::styled(label, Style::new().fg(send_fg).add_modifier(Modifier::BOLD))],
+            vec![Span::styled(
+                label,
+                Style::new().fg(send_fg).add_modifier(Modifier::BOLD),
+            )],
             send_bg,
             fill,
         );
@@ -1377,7 +1663,10 @@ impl App {
         if let Some((msg, failed)) = &self.note {
             let spans = vec![
                 Span::raw(" "),
-                Span::styled(msg.clone(), Style::new().fg(if *failed { p.love } else { p.pine })),
+                Span::styled(
+                    msg.clone(),
+                    Style::new().fg(if *failed { p.love } else { p.pine }),
+                ),
             ];
             f.render_widget(Line::from(spans), area);
             return;
@@ -1415,13 +1704,21 @@ impl App {
                     hints.push(("⌃S", "plain session", p.subtle));
                 }
                 Kind::Session => {
-                    let open_label = if ready { "open" } else { "open (pick a folder)" };
+                    let open_label = if ready {
+                        "open"
+                    } else {
+                        "open (pick a folder)"
+                    };
                     hints.push(("⏎", open_label, if ready { p.pine } else { p.muted }));
                     hints.push(("⌃S", "agent work", p.subtle));
                 }
             }
             hints.push(("⌃O", "host", p.subtle));
-            let esc = if self.focus == Focus::Item && !self.item_hits.is_empty() { "hide items" } else { "close" };
+            let esc = if self.focus == Focus::Item && !self.item_hits.is_empty() {
+                "hide items"
+            } else {
+                "close"
+            };
             hints.push(("esc", esc, p.subtle));
         }
         let (spans, _) = draw::hints(p, &hints, area.width as usize);
@@ -1437,15 +1734,27 @@ fn item_char(c: char) -> bool {
 /// Run the picker. `home` and `home_folders` are the config host's label and
 /// zoxide folders when the float passes them in; standalone, the picker
 /// lists this host's own.
-pub fn run_picker(kind: Kind, home: String, home_folders: String, standalone: bool) -> io::Result<()> {
+pub fn run_picker(
+    kind: Kind,
+    home: String,
+    home_folders: String,
+    standalone: bool,
+) -> io::Result<()> {
     prune_prompts();
-    let mut app = App::new(kind, catalog().map_err(io::Error::other)?, home, home_folders, dev_hosts());
+    let mut app = App::new(
+        kind,
+        catalog().map_err(io::Error::other)?,
+        home,
+        home_folders,
+        dev_hosts(),
+    );
     app.standalone = standalone;
     let mut term = ratatui::init();
     // Raw mode is on and nothing has read stdin yet: ask about graphics now.
     app.cell = chrome::detect(Duration::from_millis(300));
     if let Some(cell) = app.cell {
-        app.corners = chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
+        app.corners =
+            chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
     }
     // No mouse capture, so the terminal's own selection and copy work. Kitty
     // key reporting makes shift-Enter arrive as one crossterm can decode;
@@ -1457,7 +1766,12 @@ pub fn run_picker(kind: Kind, home: String, home_folders: String, standalone: bo
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
     let result = picker_loop(&mut term, &mut app);
-    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableBracketedPaste, DisableFocusChange);
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableFocusChange
+    );
     if let Some(corners) = &app.corners {
         let _ = corners.delete(&mut io::stdout());
     }
@@ -1531,12 +1845,23 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
     let item = app.item_text();
     let host = app.agent_host().to_string();
     let label = folders::home_relative(&path);
-    app.note = Some((match names_from {
-        Some(from) => format!("Naming from the {from} and spawning in {label} on {host}…"),
-        None => format!("Spawning {label}/{name} on {host}…"),
-    }, false));
+    app.note = Some((
+        match names_from {
+            Some(from) => format!("Naming from the {from} and spawning in {label} on {host}…"),
+            None => format!("Spawning {label}/{name} on {host}…"),
+        },
+        false,
+    ));
     term.draw(|f| app.draw(f))?;
-    match launch(&host, &path, &name, HARNESSES[app.harness], prompt_ref.as_deref(), Some(item.as_str()).filter(|i| !i.is_empty()), None) {
+    match launch(
+        &host,
+        &path,
+        &name,
+        HARNESSES[app.harness],
+        prompt_ref.as_deref(),
+        Some(item.as_str()).filter(|i| !i.is_empty()),
+        None,
+    ) {
         // Launched: close even if the tab can't be shown, so a second Enter
         // doesn't spawn the work twice.
         Ok((host, session, window)) => {
@@ -1559,7 +1884,10 @@ fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool
         return Ok(false);
     };
     let host = app.listed().to_string();
-    app.note = Some((format!("Opening {} on {host}…", folders::home_relative(&path)), false));
+    app.note = Some((
+        format!("Opening {} on {host}…", folders::home_relative(&path)),
+        false,
+    ));
     term.draw(|f| app.draw(f))?;
     match folders::open(&host, &path) {
         Ok(session) => {
@@ -1567,7 +1895,9 @@ fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool
             Ok(true)
         }
         Err(e) => {
-            log(&format!("standalone session in {path} on {host} failed: {e}"));
+            log(&format!(
+                "standalone session in {path} on {host} failed: {e}"
+            ));
             app.note = Some((e, true));
             Ok(false)
         }
@@ -1581,7 +1911,11 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.sync_items();
         term.draw(|f| app.draw(f))?;
         app.report()?;
-        let wait = if app.waiting() || app.listing_items() { Duration::from_millis(90) } else { Duration::from_millis(250) };
+        let wait = if app.waiting() || app.listing_items() {
+            Duration::from_millis(90)
+        } else {
+            Duration::from_millis(250)
+        };
         if !event::poll(wait)? {
             continue;
         }
@@ -1613,18 +1947,19 @@ fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let before = app.prompt.field.lines().join("\n");
     let standalone = app.standalone;
     let fills = [app.p.overlay, app.p.surface];
-    let edited = prompt_box::edit_in_editor(term, &app.prompt, &mut app.corners, app.cell, fills, || {
-        // The mode would take the editor's Enter as the action.
-        if !standalone {
-            let _ = Command::new("rex")
-                .args(["do", "client.mode.exit_all"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-        }
-        let _ = execute!(io::stdout(), DisableFocusChange);
-    });
+    let edited =
+        prompt_box::edit_in_editor(term, &app.prompt, &mut app.corners, app.cell, fills, || {
+            // The mode would take the editor's Enter as the action.
+            if !standalone {
+                let _ = Command::new("rex")
+                    .args(["do", "client.mode.exit_all"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            let _ = execute!(io::stdout(), DisableFocusChange);
+        });
     let _ = execute!(io::stdout(), EnableFocusChange);
     app.away = true;
     app.rearm_mode();
@@ -1642,14 +1977,30 @@ mod tests {
     use super::*;
 
     fn app() -> App {
-        let mut app = App::new(Kind::Agent, vec![Project {
-            profile: "personal".into(), path: "~/catalog/repo".into(),
-            clone_url: "unused".into(), name: "repo".into(), hosts: vec![], tracker: String::new(),
-        }], "config-host".into(), String::new(), vec!["folder-host".into()]);
+        let mut app = App::new(
+            Kind::Agent,
+            vec![Project {
+                profile: "personal".into(),
+                path: "~/catalog/repo".into(),
+                clone_url: "unused".into(),
+                name: "repo".into(),
+                hosts: vec![],
+                tracker: String::new(),
+            }],
+            "config-host".into(),
+            String::new(),
+            vec!["folder-host".into()],
+        );
         // Supply deterministic folders; no prompts, tasks or tabs are written.
         app.here = "picker-host".into();
-        app.loads.insert("picker-host".into(), Load::Ready(folders::parse("/repos/local")));
-        app.loads.insert("folder-host".into(), Load::Ready(folders::parse("/repos/remote")));
+        app.loads.insert(
+            "picker-host".into(),
+            Load::Ready(folders::parse("/repos/local")),
+        );
+        app.loads.insert(
+            "folder-host".into(),
+            Load::Ready(folders::parse("/repos/remote")),
+        );
         app.name.insert_str("folder-work");
         app.refilter();
         app
@@ -1660,9 +2011,21 @@ mod tests {
         let mut app = app();
         app.query = "local".into();
         app.refilter();
-        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}", hex("picker-host"), hex("/repos/local"), hex("folder-work"), HARNESSES[0]));
+        assert_eq!(
+            app.pick(),
+            format!(
+                "agent/{}/{}/{}/{}",
+                hex("picker-host"),
+                hex("/repos/local"),
+                hex("folder-work"),
+                HARNESSES[0]
+            )
+        );
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(!app.launch_requested, "float still dispatches Enter through Lua");
+        assert!(
+            !app.launch_requested,
+            "float still dispatches Enter through Lua"
+        );
         app.standalone = true;
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.launch_requested);
@@ -1676,7 +2039,17 @@ mod tests {
         app.refilter();
         app.prompt.field.insert_str("do the work");
         app.prompt.file_ref = "picker-host:test-prompt".into();
-        assert_eq!(app.pick(), format!("agent/{}/{}/{}/{}/{}", hex("folder-host"), hex("/repos/remote"), hex("folder-work"), HARNESSES[0], hex(&app.prompt.file_ref)));
+        assert_eq!(
+            app.pick(),
+            format!(
+                "agent/{}/{}/{}/{}/{}",
+                hex("folder-host"),
+                hex("/repos/remote"),
+                hex("folder-work"),
+                HARNESSES[0],
+                hex(&app.prompt.file_ref)
+            )
+        );
         app.prompt.saved_ok = false;
         assert!(app.pick().is_empty());
     }
@@ -1686,7 +2059,13 @@ mod tests {
         let mut app = app();
         app.query = "local".into();
         app.refilter();
-        let base = format!("agent/{}/{}/{}/{}", hex("picker-host"), hex("/repos/local"), hex("folder-work"), HARNESSES[0]);
+        let base = format!(
+            "agent/{}/{}/{}/{}",
+            hex("picker-host"),
+            hex("/repos/local"),
+            hex("folder-work"),
+            HARNESSES[0]
+        );
         app.focus = Focus::Item;
         app.paste(" #42 x");
         assert_eq!(app.item_text(), "#42x", "spaces never reach the item");
@@ -1696,7 +2075,10 @@ mod tests {
         assert!(app.has_draft());
         app.prompt.field.insert_str("do the work");
         app.prompt.file_ref = "picker-host:test-prompt".into();
-        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42")));
+        assert_eq!(
+            app.pick(),
+            format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42"))
+        );
         app.focus = Focus::Name;
         app.next_focus(true);
         assert!(app.focus == Focus::Item);
@@ -1710,14 +2092,22 @@ mod tests {
         app.name.clear();
         assert_eq!(app.names_from(), None);
         assert!(app.pick().is_empty(), "nothing to name it from");
-        let base = format!("agent/{}/{}//{}", hex("picker-host"), hex("/repos/local"), HARNESSES[0]);
+        let base = format!(
+            "agent/{}/{}//{}",
+            hex("picker-host"),
+            hex("/repos/local"),
+            HARNESSES[0]
+        );
         app.prompt.field.insert_str("do the work");
         app.prompt.file_ref = "picker-host:test-prompt".into();
         assert_eq!(app.names_from(), Some("prompt"));
         assert_eq!(app.pick(), format!("{base}/{}", hex(&app.prompt.file_ref)));
         app.item.insert_str("#42");
         assert_eq!(app.names_from(), Some("work item"));
-        assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42")));
+        assert_eq!(
+            app.pick(),
+            format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42"))
+        );
         app.name.insert_str("typed");
         assert_eq!(app.names_from(), None, "a typed name wins");
     }
@@ -1734,20 +2124,43 @@ mod tests {
         app.refilter();
         app.name.clear();
         // Listed already, so no CLI runs.
-        let card = |n: u64, title: &str| OpenItem { number: n, title: title.into(), url: format!("https://app.fizzy.do/1/cards/{n}") };
-        app.open_items.insert("~/catalog/repo".into(), Some(OpenItems {
-            noun: "cards", items: vec![card(1158, "Spawn from a card"), card(1157, "Work item titles")],
-        }));
+        let card = |n: u64, title: &str| OpenItem {
+            number: n,
+            title: title.into(),
+            url: format!("https://app.fizzy.do/1/cards/{n}"),
+        };
+        app.open_items.insert(
+            "~/catalog/repo".into(),
+            Some(OpenItems {
+                noun: "cards",
+                items: vec![
+                    card(1158, "Spawn from a card"),
+                    card(1157, "Work item titles"),
+                ],
+            }),
+        );
         app.focus = Focus::Item;
         app.sync_items();
         assert!(app.item_hits.is_empty(), "the menu waits to be asked for");
-        assert!(app.pick().is_empty(), "nothing chosen, nothing to name it from");
+        assert!(
+            app.pick().is_empty(),
+            "nothing chosen, nothing to name it from"
+        );
         key(&mut app, KeyCode::Down);
         assert_eq!(app.item_hits.len(), 2);
         key(&mut app, KeyCode::Down);
-        let base = format!("agent/{}/{}//{}", hex(AUTO), hex("~/catalog/repo"), HARNESSES[0]);
+        let base = format!(
+            "agent/{}/{}//{}",
+            hex(AUTO),
+            hex("~/catalog/repo"),
+            HARNESSES[0]
+        );
         let url = "https://app.fizzy.do/1/cards/1157";
-        assert_eq!(app.pick(), format!("{base}//{}", hex(url)), "Enter takes the highlighted item");
+        assert_eq!(
+            app.pick(),
+            format!("{base}//{}", hex(url)),
+            "Enter takes the highlighted item"
+        );
         // Typing filters by title or number; Tab fills the field and closes.
         app.paste("spawn");
         app.sync_items();
@@ -1781,10 +2194,19 @@ mod tests {
         let mut app = app();
         app.query = "repo".into();
         app.refilter();
-        app.open_items.insert("~/catalog/repo".into(), Some(OpenItems { noun: "issues", items: Vec::new() }));
+        app.open_items.insert(
+            "~/catalog/repo".into(),
+            Some(OpenItems {
+                noun: "issues",
+                items: Vec::new(),
+            }),
+        );
         app.focus = Focus::Item;
         key(&mut app, KeyCode::Down);
-        assert!(app.focus == Focus::Prompt, "with nothing listed, ↓ still moves on");
+        assert!(
+            app.focus == Focus::Prompt,
+            "with nothing listed, ↓ still moves on"
+        );
     }
 
     #[test]
@@ -1799,6 +2221,9 @@ mod tests {
         app.name.clear();
         assert!(app.pick().is_empty());
         app.kind = Kind::Session;
-        assert_eq!(app.pick(), format!("session/{}/{}", hex("picker-host"), hex("/repos/local")));
+        assert_eq!(
+            app.pick(),
+            format!("session/{}/{}", hex("picker-host"), hex("/repos/local"))
+        );
     }
 }

@@ -41,7 +41,10 @@ fn uploads(text: &str) -> Vec<Upload> {
         }
         let (word, len) = shell_word(rest);
         if word.starts_with('/') && word.contains(UPLOADS) && !word.ends_with('/') {
-            found.push(Upload { span: i..i + len, path: word });
+            found.push(Upload {
+                span: i..i + len,
+                path: word,
+            });
         }
         i += len.max(1);
     }
@@ -122,7 +125,13 @@ pub fn carry(from: &str, to: &str, text: &str) -> Result<String, String> {
 fn copy_name(path: &str, n: usize) -> String {
     let safe: String = name(path)
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let safe = safe.trim_start_matches(['.', '-']);
     // Keep the end, where the extension is.
@@ -178,10 +187,14 @@ fn write(host: &str, file: &str, bytes: &[u8]) -> Result<String, String> {
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(bytes).map_err(|e| failed(e.to_string()))?;
     }
-    let out = child.wait_with_output().map_err(|e| failed(e.to_string()))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| failed(e.to_string()))?;
     let path = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.status.success() || !path.starts_with('/') {
-        return Err(failed(String::from_utf8_lossy(&out.stderr).trim().to_string()));
+        return Err(failed(
+            String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        ));
     }
     Ok(path)
 }
@@ -214,7 +227,10 @@ mod tests {
 
     #[test]
     fn carry_keeps_text_without_uploads() {
-        assert_eq!(carry("nowhere", "nowhere", "just text").unwrap(), "just text");
+        assert_eq!(
+            carry("nowhere", "nowhere", "just text").unwrap(),
+            "just text"
+        );
     }
 
     #[test]

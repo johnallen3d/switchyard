@@ -6,7 +6,11 @@ use nucleo_matcher::{Matcher, Utf32Str};
 /// Score `fields` against `pattern` as one haystack, which keeps multi-word
 /// queries working across fields, and split the hit positions back out per
 /// field (character indices within each).
-pub fn score_fields(matcher: &mut Matcher, pattern: &Pattern, fields: &[&str]) -> Option<(u32, Vec<Vec<usize>>)> {
+pub fn score_fields(
+    matcher: &mut Matcher,
+    pattern: &Pattern,
+    fields: &[&str],
+) -> Option<(u32, Vec<Vec<usize>>)> {
     let hay = fields.join("  ");
     let mut buf = Vec::new();
     let score = pattern.score(Utf32Str::new(&hay, &mut buf), matcher)?;

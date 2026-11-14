@@ -12,7 +12,10 @@ use crate::rex::{home, host_bash, sh_quote};
 /// A random (v4) UUID, the form Claude requires for `--session-id`.
 pub fn new_session_id() -> String {
     let mut b = [0u8; 16];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| io::Read::read_exact(&mut f, &mut b)).is_err() {
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| io::Read::read_exact(&mut f, &mut b))
+        .is_err()
+    {
         // Not expected; fall back on the clock and pid.
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -24,25 +27,47 @@ pub fn new_session_id() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..32]
+    )
 }
 
 /// The harness's session directory for `worktree` under `profile`, on this
 /// host: Claude's `$CLAUDE_CONFIG_DIR/projects/<path, non-alphanumerics as
 /// ->`, Pi's `$PI_CODING_AGENT_DIR/sessions/--<path, / as ->--`.
 pub(crate) fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathBuf {
-    let work = if profile == "work" { work_env().unwrap_or_default() } else { Vec::new() };
+    let work = if profile == "work" {
+        work_env().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let var = |k: &str| {
-        work.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone()).or_else(|| std::env::var(k).ok())
+        work.iter()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+            .or_else(|| std::env::var(k).ok())
     };
     if harness == "pi" {
-        let root = var("PI_CODING_AGENT_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".config/pi"));
-        let flat = worktree.trim_start_matches('/').replace(['/', '\\', ':'], "-");
+        let root = var("PI_CODING_AGENT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".config/pi"));
+        let flat = worktree
+            .trim_start_matches('/')
+            .replace(['/', '\\', ':'], "-");
         root.join("sessions").join(format!("--{flat}--"))
     } else {
-        let root =
-            var("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| home().join(".config/claude-personal"));
-        let flat: String = worktree.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+        let root = var("CLAUDE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home().join(".config/claude-personal"));
+        let flat: String = worktree
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
         root.join("projects").join(flat)
     }
 }
@@ -104,9 +129,15 @@ pub fn work_env() -> Result<Vec<(String, String)>, String> {
         .output()
         .map_err(|e| format!("mise: {e}"))?;
     if !out.status.success() {
-        return Err(format!("mise env: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "mise env: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     let env: serde_json::Map<String, serde_json::Value> =
         serde_json::from_slice(&out.stdout).map_err(|e| format!("mise env: {e}"))?;
-    Ok(env.into_iter().filter_map(|(k, v)| Some((k, v.as_str()?.to_string()))).collect())
+    Ok(env
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
+        .collect())
 }

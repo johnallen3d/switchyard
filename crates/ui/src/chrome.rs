@@ -30,7 +30,12 @@ pub enum Corner {
     BottomRight,
 }
 
-const CORNERS: [Corner; 4] = [Corner::TopLeft, Corner::TopRight, Corner::BottomLeft, Corner::BottomRight];
+const CORNERS: [Corner; 4] = [
+    Corner::TopLeft,
+    Corner::TopRight,
+    Corner::BottomLeft,
+    Corner::BottomRight,
+];
 
 /// The placeholder with the row-0 and column-0 diacritics: each image is
 /// one cell.
@@ -63,7 +68,10 @@ impl Corners {
     pub fn new(cell: CellSize, fills: &[Color], out: &mut impl Write) -> io::Result<Self> {
         let mut ids = HashMap::new();
         let mut id = FIRST_ID;
-        let cell = CellSize { width: cell.width * SUPERSAMPLE, height: cell.height * SUPERSAMPLE };
+        let cell = CellSize {
+            width: cell.width * SUPERSAMPLE,
+            height: cell.height * SUPERSAMPLE,
+        };
         for &fill in fills {
             let Some(rgb) = rgb(fill) else { continue };
             for corner in CORNERS {
@@ -81,11 +89,22 @@ impl Corners {
 
     /// Show `corner` of a box filled `fill` at (x, y), over `behind`. False
     /// when that fill has no image, so the caller can fall back.
-    pub fn put(&self, buf: &mut Buffer, x: u16, y: u16, corner: Corner, fill: Color, behind: Color) -> bool {
-        let Some(id) = rgb(fill).and_then(|rgb| self.ids.get(&(corner, rgb))) else { return false };
+    pub fn put(
+        &self,
+        buf: &mut Buffer,
+        x: u16,
+        y: u16,
+        corner: Corner,
+        fill: Color,
+        behind: Color,
+    ) -> bool {
+        let Some(id) = rgb(fill).and_then(|rgb| self.ids.get(&(corner, rgb))) else {
+            return false;
+        };
         let ink = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
         if let Some(cell) = buf.cell_mut((x, y)) {
-            cell.set_symbol(PLACEHOLDER).set_style(Style::new().fg(ink).bg(behind));
+            cell.set_symbol(PLACEHOLDER)
+                .set_style(Style::new().fg(ink).bg(behind));
         }
         true
     }
@@ -119,11 +138,23 @@ fn rasterize(corner: Corner, (r, g, b): (u8, u8, u8), cell: CellSize) -> Vec<u8>
     let mut px = Vec::with_capacity((cell.width * cell.height * 4) as usize);
     for y in 0..cell.height {
         for x in 0..cell.width {
-            let fx = if flip_x { w - (x as f64 + 0.5) } else { x as f64 + 0.5 };
-            let fy = if flip_y { h - (y as f64 + 0.5) } else { y as f64 + 0.5 };
+            let fx = if flip_x {
+                w - (x as f64 + 0.5)
+            } else {
+                x as f64 + 0.5
+            };
+            let fy = if flip_y {
+                h - (y as f64 + 0.5)
+            } else {
+                y as f64 + 0.5
+            };
             // Signed distance to the box edge, negative inside.
             let (dx, dy) = (cx - fx, cy - fy);
-            let d = if dx > 0.0 && dy > 0.0 { dx.hypot(dy) - radius } else { dx.max(dy) - radius };
+            let d = if dx > 0.0 && dy > 0.0 {
+                dx.hypot(dy) - radius
+            } else {
+                dx.max(dy) - radius
+            };
             let alpha = (0.5 - d).clamp(0.0, 1.0);
             px.extend([r, g, b, (alpha * 255.0).round() as u8]);
         }
@@ -155,7 +186,10 @@ pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for group in bytes.chunks(3) {
-        let n = group.iter().enumerate().fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+        let n = group
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
         for i in 0..4 {
             if i <= group.len() {
                 s.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -177,7 +211,8 @@ pub fn detect(timeout: Duration) -> Option<CellSize> {
     let mut out = io::stdout();
     // A graphics query, the cell size, then primary device attributes, which
     // every terminal answers, and answers last.
-    out.write_all(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c").ok()?;
+    out.write_all(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[16t\x1b[c")
+        .ok()?;
     out.flush().ok()?;
     let reply = read_reply(timeout);
     if !reply.contains("\x1b_Gi=31;OK") {
@@ -201,7 +236,11 @@ fn read_reply(timeout: Duration) -> String {
         if left.is_zero() {
             break;
         }
-        let mut fd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+        let mut fd = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: one valid pollfd for the duration of the call.
         if unsafe { libc::poll(&mut fd, 1, left.as_millis() as libc::c_int) } <= 0 {
             break;
@@ -212,7 +251,10 @@ fn read_reply(timeout: Duration) -> String {
             Ok(n) => got.extend_from_slice(&chunk[..n]),
         }
         let text = String::from_utf8_lossy(&got);
-        if text.rfind("\x1b[?").is_some_and(|i| text[i..].contains('c')) {
+        if text
+            .rfind("\x1b[?")
+            .is_some_and(|i| text[i..].contains('c'))
+        {
             break;
         }
     }

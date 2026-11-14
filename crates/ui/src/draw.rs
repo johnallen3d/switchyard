@@ -18,17 +18,30 @@ pub fn str_width(s: &str) -> usize {
 /// Drop the query's last word, as ctrl-w does in a shell.
 pub fn delete_word(s: &mut String) {
     let trimmed = s.trim_end();
-    let cut = trimmed.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+    let cut = trimmed
+        .rfind(char::is_whitespace)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     s.truncate(cut);
 }
 
 /// Fill the float and draw its rounded frame: `title` in iris, then `extra`
 /// spans, on the left, and the `shortcut` that opens it, if any, on the right.
 /// Returns the area inside, less `margin`.
-pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
+pub fn frame(
+    f: &mut Frame,
+    p: &Palette,
+    title: &str,
+    extra: Vec<Span<'static>>,
+    shortcut: &str,
+    margin: Margin,
+) -> Rect {
     let mut left = vec![
         Span::styled(" ", Style::new().bg(p.base)),
-        Span::styled(title.to_string(), Style::new().fg(p.iris).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title.to_string(),
+            Style::new().fg(p.iris).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(" ", Style::new().bg(p.base)),
     ];
     left.extend(extra);
@@ -36,16 +49,29 @@ pub fn frame(f: &mut Frame, p: &Palette, title: &str, extra: Vec<Span<'static>>,
 }
 
 /// [`frame`] with the title's spans given whole.
-pub fn frame_spans(f: &mut Frame, p: &Palette, left: Vec<Span<'static>>, shortcut: &str, margin: Margin) -> Rect {
+pub fn frame_spans(
+    f: &mut Frame,
+    p: &Palette,
+    left: Vec<Span<'static>>,
+    shortcut: &str,
+    margin: Margin,
+) -> Rect {
     let area = f.area();
-    f.buffer_mut().set_style(area, Style::new().bg(p.base).fg(p.text));
+    f.buffer_mut()
+        .set_style(area, Style::new().bg(p.base).fg(p.text));
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(p.hl_med).bg(p.base))
         .title_top(Line::from(left).left_aligned())
         .style(Style::new().bg(p.base));
     if !shortcut.is_empty() {
-        block = block.title_top(Line::from(Span::styled(format!(" {shortcut} "), Style::new().fg(p.muted))).right_aligned());
+        block = block.title_top(
+            Line::from(Span::styled(
+                format!(" {shortcut} "),
+                Style::new().fg(p.muted),
+            ))
+            .right_aligned(),
+        );
     }
     let inner = block.inner(area).inner(margin);
     f.render_widget(block, area);
@@ -54,13 +80,27 @@ pub fn frame_spans(f: &mut Frame, p: &Palette, left: Vec<Span<'static>>, shortcu
 
 /// A horizontal rule across `area`.
 pub fn rule(f: &mut Frame, p: &Palette, area: Rect) {
-    f.render_widget(Line::styled("─".repeat(area.width as usize), Style::new().fg(p.overlay)), area);
+    f.render_widget(
+        Line::styled("─".repeat(area.width as usize), Style::new().fg(p.overlay)),
+        area,
+    );
 }
 
 /// The search line: an icon (iris when `active`), the query or a muted
 /// `placeholder`, and the terminal cursor after the query when `cursor`.
-pub fn search(f: &mut Frame, p: &Palette, area: Rect, query: &str, placeholder: &str, active: bool, cursor: bool) {
-    let prompt = Span::styled(format!(" {ICON_SEARCH}  "), Style::new().fg(if active { p.iris } else { p.subtle }));
+pub fn search(
+    f: &mut Frame,
+    p: &Palette,
+    area: Rect,
+    query: &str,
+    placeholder: &str,
+    active: bool,
+    cursor: bool,
+) {
+    let prompt = Span::styled(
+        format!(" {ICON_SEARCH}  "),
+        Style::new().fg(if active { p.iris } else { p.subtle }),
+    );
     let prompt_w = str_width(&prompt.content) as u16;
     let text = if query.is_empty() {
         Span::styled(placeholder.to_string(), Style::new().fg(p.muted))
@@ -82,7 +122,14 @@ pub fn centered(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
         if y >= area.y + area.height {
             break;
         }
-        f.render_widget(line.centered(), Rect { y, height: 1, ..area });
+        f.render_widget(
+            line.centered(),
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
+        );
     }
 }
 
@@ -156,12 +203,19 @@ pub fn pill(spans: Vec<Span<'static>>, bg: Color, on: Color) -> Vec<Span<'static
 
 /// Footer key hints (key, label, key colour), as many as fit in `width`
 /// after a leading space; also returns the columns used.
-pub fn hints(p: &Palette, hints: &[(&str, &str, Color)], width: usize) -> (Vec<Span<'static>>, usize) {
+pub fn hints(
+    p: &Palette,
+    hints: &[(&str, &str, Color)],
+    width: usize,
+) -> (Vec<Span<'static>>, usize) {
     let mut spans = vec![Span::raw(" ")];
     let mut used = 1;
     for &(k, label, key) in hints {
         let hint = [
-            Span::styled(k.to_string(), Style::new().fg(key).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                k.to_string(),
+                Style::new().fg(key).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(format!(" {label}"), Style::new().fg(p.muted)),
             Span::raw("   "),
         ];
@@ -177,7 +231,14 @@ pub fn hints(p: &Palette, hints: &[(&str, &str, Color)], width: usize) -> (Vec<S
 
 /// Spans for `text` fitted to `room` columns, with matched characters
 /// styled `hl`. `keep_end` truncates from the left (for paths).
-pub fn highlight(text: &str, hits: &[usize], room: usize, keep_end: bool, base: Style, hl: Style) -> Vec<Span<'static>> {
+pub fn highlight(
+    text: &str,
+    hits: &[usize],
+    room: usize,
+    keep_end: bool,
+    base: Style,
+    hl: Style,
+) -> Vec<Span<'static>> {
     let chars: Vec<(char, bool)> = text
         .chars()
         .enumerate()
@@ -190,8 +251,11 @@ pub fn highlight(text: &str, hits: &[usize], room: usize, keep_end: bool, base: 
     } else if room > 0 {
         let budget = room - 1;
         let mut used = 0;
-        let iter: Box<dyn Iterator<Item = &(char, bool)>> =
-            if keep_end { Box::new(chars.iter().rev()) } else { Box::new(chars.iter()) };
+        let iter: Box<dyn Iterator<Item = &(char, bool)>> = if keep_end {
+            Box::new(chars.iter().rev())
+        } else {
+            Box::new(chars.iter())
+        };
         for &(c, h) in iter {
             let w = c.width().unwrap_or(0);
             if used + w > budget {
@@ -212,7 +276,10 @@ pub fn highlight(text: &str, hits: &[usize], room: usize, keep_end: bool, base: 
     let mut cur = false;
     for (c, h) in kept {
         if h != cur && !buf.is_empty() {
-            spans.push(Span::styled(std::mem::take(&mut buf), if cur { hl } else { base }));
+            spans.push(Span::styled(
+                std::mem::take(&mut buf),
+                if cur { hl } else { base },
+            ));
         }
         cur = h;
         buf.push(c);

@@ -35,7 +35,14 @@ fn local(t: u64) -> Local {
     // SAFETY: localtime_r only writes the tm it is given.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&secs, &mut tm) };
-    Local { year: tm.tm_year, month: tm.tm_mon, day: tm.tm_mday, hour: tm.tm_hour, min: tm.tm_min, weekday: tm.tm_wday }
+    Local {
+        year: tm.tm_year,
+        month: tm.tm_mon,
+        day: tm.tm_mday,
+        hour: tm.tm_hour,
+        min: tm.tm_min,
+        weekday: tm.tm_wday,
+    }
 }
 
 /// The time at `hour:min` local, `days` after `base`'s day (mktime
@@ -60,13 +67,17 @@ fn duration(s: &str) -> Option<u64> {
         return None;
     }
     while !rest.is_empty() {
-        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         if digits == 0 {
             return None;
         }
         let n: u64 = rest[..digits].parse().ok()?;
         rest = rest[digits..].trim_start();
-        let unit = rest.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(rest.len());
+        let unit = rest
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(rest.len());
         let secs = match &rest[..unit] {
             "m" | "min" | "mins" | "minute" | "minutes" => 60,
             "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
@@ -95,7 +106,11 @@ fn clock(s: &str) -> Option<(u32, u32)> {
         Some(_) => return None,
         None => (s, "0"),
     };
-    if h.is_empty() || h.len() > 2 || !h.bytes().all(|b| b.is_ascii_digit()) || !m.bytes().all(|b| b.is_ascii_digit()) {
+    if h.is_empty()
+        || h.len() > 2
+        || !h.bytes().all(|b| b.is_ascii_digit())
+        || !m.bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     let (mut hour, min): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
@@ -117,9 +132,19 @@ fn clock(s: &str) -> Option<(u32, u32)> {
 
 /// `tue`, `tuesday`: 0 for Sunday to 6.
 fn weekday(s: &str) -> Option<i32> {
-    let full = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+    let full = [
+        "sunday",
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+    ];
     let alt = ["sun", "mon", "tues", "wed", "thur", "fri", "sat"];
-    (0..7).find(|&i| s == DAYS[i] || s == full[i] || s == alt[i] || (i == 4 && s == "thurs")).map(|i| i as i32)
+    (0..7)
+        .find(|&i| s == DAYS[i] || s == full[i] || s == alt[i] || (i == 4 && s == "thurs"))
+        .map(|i| i as i32)
 }
 
 /// When a snooze typed at `now` ends, or why it can't be read.
@@ -215,7 +240,9 @@ pub fn describe(until: u64, now: u64) -> String {
             format!("{}{} {time}", day[..1].to_uppercase(), &day[1..])
         }
         _ => {
-            const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            const MONTHS: [&str; 12] = [
+                "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            ];
             format!("{} {} {time}", MONTHS[u.month as usize], u.day)
         }
     }
@@ -241,13 +268,21 @@ mod tests {
     #[test]
     fn bad_input_says_why() {
         assert!(parse("", NOW).unwrap_err().contains("Try"));
-        assert!(parse("soon", NOW).unwrap_err().contains("Can't read “soon”"));
+        assert!(
+            parse("soon", NOW)
+                .unwrap_err()
+                .contains("Can't read “soon”")
+        );
         assert!(parse("0m", NOW).is_err());
         assert!(parse("2x", NOW).is_err());
         assert!(parse("400d", NOW).unwrap_err().contains("year"));
         assert!(parse("25:00", NOW).is_err());
         assert!(parse("13pm", NOW).is_err());
-        assert!(parse("tomorrow noonish", NOW).unwrap_err().contains("noonish"));
+        assert!(
+            parse("tomorrow noonish", NOW)
+                .unwrap_err()
+                .contains("noonish")
+        );
         assert!(parse("today", NOW).is_err());
     }
 
@@ -263,7 +298,14 @@ mod tests {
 
     #[test]
     fn clock_times_and_days_land_ahead_at_the_time() {
-        for input in ["9am", "17:00", "tomorrow", "tomorrow 2pm", "fri", "monday 4:30pm"] {
+        for input in [
+            "9am",
+            "17:00",
+            "tomorrow",
+            "tomorrow 2pm",
+            "fri",
+            "monday 4:30pm",
+        ] {
             let until = parse(input, NOW).unwrap_or_else(|e| panic!("{input}: {e}"));
             assert!(until > NOW && until - NOW <= 8 * 86400, "{input}");
         }

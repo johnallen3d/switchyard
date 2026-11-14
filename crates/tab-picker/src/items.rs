@@ -37,7 +37,9 @@ impl Entry {
 
     /// How a note or confirmation names it.
     fn name(&self) -> String {
-        self.item.as_ref().map_or_else(|| self.link.short(), Item::name)
+        self.item
+            .as_ref()
+            .map_or_else(|| self.link.short(), Item::name)
     }
 }
 
@@ -47,7 +49,10 @@ pub enum Mode {
     /// Typing a comment for the highlighted card.
     Comment(String),
     /// Asking whether to run `action` (with a comment's `body`).
-    Confirm { action: Action, body: String },
+    Confirm {
+        action: Action,
+        body: String,
+    },
 }
 
 pub struct Items {
@@ -70,7 +75,11 @@ pub enum Outcome {
     /// Open the URL in the browser here.
     Open(String),
     /// Run the confirmed action on the item.
-    Run { action: Action, item: Item, body: String },
+    Run {
+        action: Action,
+        item: Item,
+        body: String,
+    },
     /// Why the key does nothing here, for the footer.
     Refuse(String),
 }
@@ -87,15 +96,33 @@ fn action_key(a: Action) -> (&'static str, &'static str) {
 impl Items {
     /// The float over a task's links (those with a URL, most likely first;
     /// see model's `chooser_links`), or None when it has none.
-    pub fn new(key: (String, String), label: String, profile: String, links: Vec<Link>) -> Option<Items> {
+    pub fn new(
+        key: (String, String),
+        label: String,
+        profile: String,
+        links: Vec<Link>,
+    ) -> Option<Items> {
         let entries: Vec<Entry> = links
             .into_iter()
             .map(|link| {
-                let item = Item::from_link(&link.kind, &link.system, &link.reference, &link.url, &link.state);
+                let item = Item::from_link(
+                    &link.kind,
+                    &link.system,
+                    &link.reference,
+                    &link.url,
+                    &link.state,
+                );
                 Entry { link, item }
             })
             .collect();
-        (!entries.is_empty()).then_some(Items { key, label, profile, entries, selected: 0, mode: Mode::List })
+        (!entries.is_empty()).then_some(Items {
+            key,
+            label,
+            profile,
+            entries,
+            selected: 0,
+            mode: Mode::List,
+        })
     }
 
     fn entry(&self) -> &Entry {
@@ -113,7 +140,10 @@ impl Items {
                     KeyCode::Char('c') if ctrl => return Outcome::Stay,
                     KeyCode::Enter if text.trim().is_empty() => {}
                     KeyCode::Enter => {
-                        self.mode = Mode::Confirm { action: Action::Comment, body: text.trim().to_string() };
+                        self.mode = Mode::Confirm {
+                            action: Action::Comment,
+                            body: text.trim().to_string(),
+                        };
                         return Outcome::Stay;
                     }
                     KeyCode::Char('u') if ctrl => text.clear(),
@@ -148,11 +178,20 @@ impl Items {
         let want = |a: Action, me: &mut Items| {
             let e = me.entry();
             if e.actions().contains(&a) {
-                me.mode = if a == Action::Comment { Mode::Comment(String::new()) } else { Mode::Confirm { action: a, body: String::new() } };
+                me.mode = if a == Action::Comment {
+                    Mode::Comment(String::new())
+                } else {
+                    Mode::Confirm {
+                        action: a,
+                        body: String::new(),
+                    }
+                };
                 return Outcome::Stay;
             }
             let why = match a {
-                Action::Comment | Action::Close if e.link.kind == "card" => format!("{}: its URL names no Fizzy account", e.name()),
+                Action::Comment | Action::Close if e.link.kind == "card" => {
+                    format!("{}: its URL names no Fizzy account", e.name())
+                }
                 Action::Comment => format!("{} isn't a card: c comments on Fizzy cards", e.name()),
                 Action::Close => format!("{} isn't a card: x closes Fizzy cards", e.name()),
                 Action::Ready if e.link.kind == "pr" => format!("{} isn't a draft", e.name()),
@@ -189,7 +228,11 @@ impl Items {
     /// After a failed run: back to the list, or to a comment's text so it
     /// isn't lost.
     pub fn failed(&mut self, action: Action, body: String) {
-        self.mode = if action == Action::Comment { Mode::Comment(body) } else { Mode::List };
+        self.mode = if action == Action::Comment {
+            Mode::Comment(body)
+        } else {
+            Mode::List
+        };
     }
 
     /// The footer's hints while the float is open.
@@ -209,7 +252,9 @@ impl Items {
     /// What the float's bottom line asks, for confirmations: "Close card
     /// 1041?" or "Post a comment on card 1041: “…”?".
     pub fn question(&self) -> Option<String> {
-        let Mode::Confirm { action, body } = &self.mode else { return None };
+        let Mode::Confirm { action, body } = &self.mode else {
+            return None;
+        };
         let name = self.entry().name();
         Some(match action {
             Action::Comment => format!("Post a comment on {name}: “{body}”?"),
@@ -223,7 +268,12 @@ impl Items {
     pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
         let row_text = |e: &Entry| {
             let acts: Vec<&str> = e.actions().into_iter().map(|a| action_key(a).0).collect();
-            (e.link.short(), e.link.badge_state(), acts.join(" "), e.link.url.clone())
+            (
+                e.link.short(),
+                e.link.badge_state(),
+                acts.join(" "),
+                e.link.url.clone(),
+            )
         };
         let title = format!(" Work items · {} ", self.label);
         let want = self
@@ -231,14 +281,27 @@ impl Items {
             .iter()
             .map(|e| {
                 let (short, state, acts, url) = row_text(e);
-                str_width(&short) + state.as_ref().map_or(0, |(s, _)| str_width(s) + 1) + str_width(&acts) + str_width(&url) + 8
+                str_width(&short)
+                    + state.as_ref().map_or(0, |(s, _)| str_width(s) + 1)
+                    + str_width(&acts)
+                    + str_width(&url)
+                    + 8
             })
-            .chain([str_width(&title) + 4, self.question().map_or(0, |q| str_width(&q) + 16), 56])
+            .chain([
+                str_width(&title) + 4,
+                self.question().map_or(0, |q| str_width(&q) + 16),
+                56,
+            ])
             .max()
             .unwrap_or(0);
         let w = (want as u16 + 2).min(area.width);
         let h = (self.entries.len() as u16 + 4).min(area.height);
-        let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+        let r = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 2,
+            width: w,
+            height: h,
+        };
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -252,9 +315,17 @@ impl Items {
             let (short, state, acts, url) = row_text(e);
             let selected = i == self.selected;
             let bg = if selected { p.overlay } else { p.base };
-            let row = Rect { y: inner.y + i as u16, height: 1, ..inner };
+            let row = Rect {
+                y: inner.y + i as u16,
+                height: 1,
+                ..inner
+            };
             f.buffer_mut().set_style(row, Style::new().bg(bg));
-            let edge = if selected { Span::styled("▎", Style::new().fg(p.iris).bg(bg)) } else { Span::styled(" ", Style::new().bg(bg)) };
+            let edge = if selected {
+                Span::styled("▎", Style::new().fg(p.iris).bg(bg))
+            } else {
+                Span::styled(" ", Style::new().bg(bg))
+            };
             let mut style = Style::new().fg(p.text).bg(bg);
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
@@ -271,21 +342,41 @@ impl Items {
                 spans.push(Span::styled(format!(" {text}"), Style::new().fg(fg).bg(bg)));
             }
             if !acts.is_empty() {
-                spans.push(Span::styled(format!("  [{acts}]"), Style::new().fg(p.gold).bg(bg)));
+                spans.push(Span::styled(
+                    format!("  [{acts}]"),
+                    Style::new().fg(p.gold).bg(bg),
+                ));
             }
-            spans.push(Span::styled(format!("  {url}"), Style::new().fg(p.muted).bg(bg)));
+            spans.push(Span::styled(
+                format!("  {url}"),
+                Style::new().fg(p.muted).bg(bg),
+            ));
             f.render_widget(Line::from(spans), row);
         }
         if inner.height < 2 {
             return;
         }
-        let bottom = Rect { y: inner.bottom() - 1, height: 1, ..inner };
-        let key = |k: &str| Span::styled(k.to_string(), Style::new().fg(p.text).add_modifier(Modifier::BOLD));
+        let bottom = Rect {
+            y: inner.bottom() - 1,
+            height: 1,
+            ..inner
+        };
+        let key = |k: &str| {
+            Span::styled(
+                k.to_string(),
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+            )
+        };
         let muted = |s: &str| Span::styled(s.to_string(), Style::new().fg(p.muted));
         let line = match &self.mode {
             Mode::List => {
                 let mut spans = vec![Span::raw(" ")];
-                for (i, (k, d)) in self.hints().into_iter().filter(|(k, _)| *k != "?").enumerate() {
+                for (i, (k, d)) in self
+                    .hints()
+                    .into_iter()
+                    .filter(|(k, _)| *k != "?")
+                    .enumerate()
+                {
                     if i > 0 {
                         spans.push(muted(" · "));
                     }
@@ -295,11 +386,17 @@ impl Items {
             }
             Mode::Comment(text) => Line::from(vec![
                 muted(&format!(" comment on {}: ", self.entry().name())),
-                Span::styled(text.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    text.clone(),
+                    Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("▏", Style::new().fg(p.iris)),
             ]),
             Mode::Confirm { .. } => Line::from(vec![
-                Span::styled(format!(" {} ", self.question().unwrap_or_default()), Style::new().fg(p.love).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!(" {} ", self.question().unwrap_or_default()),
+                    Style::new().fg(p.love).add_modifier(Modifier::BOLD),
+                ),
                 key("⏎"),
                 muted(" yes · "),
                 key("esc"),
@@ -315,16 +412,47 @@ mod tests {
     use super::*;
 
     fn link(kind: &str, system: &str, reference: &str, url: &str, state: &str) -> Link {
-        Link { kind: kind.into(), system: system.into(), reference: reference.into(), url: url.into(), state: state.into(), ..Link::default() }
+        Link {
+            kind: kind.into(),
+            system: system.into(),
+            reference: reference.into(),
+            url: url.into(),
+            state: state.into(),
+            ..Link::default()
+        }
     }
 
     fn items() -> Items {
         let links = vec![
-            link("pr", "github", "o/r#57", "https://github.com/o/r/pull/57", "draft"),
-            link("card", "fizzy", "1041", "https://app.fizzy.do/6284043/cards/1041", ""),
-            link("issue", "github", "o/r#3", "https://github.com/o/r/issues/3", ""),
+            link(
+                "pr",
+                "github",
+                "o/r#57",
+                "https://github.com/o/r/pull/57",
+                "draft",
+            ),
+            link(
+                "card",
+                "fizzy",
+                "1041",
+                "https://app.fizzy.do/6284043/cards/1041",
+                "",
+            ),
+            link(
+                "issue",
+                "github",
+                "o/r#3",
+                "https://github.com/o/r/issues/3",
+                "",
+            ),
         ];
-        Items::new(("s".into(), "w".into()), "demo/task".into(), "personal".into(), links).unwrap()
+        Items::new(
+            ("s".into(), "w".into()),
+            "demo/task".into(),
+            "personal".into(),
+            links,
+        )
+        .unwrap()
     }
 
     fn press(i: &mut Items, code: KeyCode) -> Outcome {
@@ -339,13 +467,24 @@ mod tests {
 
     #[test]
     fn no_links_no_float() {
-        assert!(Items::new(("s".into(), "w".into()), "t".into(), "personal".into(), vec![]).is_none());
+        assert!(
+            Items::new(
+                ("s".into(), "w".into()),
+                "t".into(),
+                "personal".into(),
+                vec![]
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn enter_opens_and_nothing_mutates_without_a_confirmation() {
         let mut i = items();
-        assert_eq!(press(&mut i, KeyCode::Enter), Outcome::Open("https://github.com/o/r/pull/57".into()));
+        assert_eq!(
+            press(&mut i, KeyCode::Enter),
+            Outcome::Open("https://github.com/o/r/pull/57".into())
+        );
         // r on the draft PR asks first, naming it.
         assert_eq!(press(&mut i, KeyCode::Char('r')), Outcome::Stay);
         assert_eq!(i.question().unwrap(), "Mark PR o/r#57 ready for review?");
@@ -353,21 +492,47 @@ mod tests {
         assert_eq!(press(&mut i, KeyCode::Char('q')), Outcome::Stay);
         assert_eq!(i.mode, Mode::List);
         press(&mut i, KeyCode::Char('r'));
-        let pr = Item::Pr { repo: "o/r".into(), number: "57".into(), draft: true };
-        assert_eq!(press(&mut i, KeyCode::Char('y')), Outcome::Run { action: Action::Ready, item: pr, body: String::new() });
+        let pr = Item::Pr {
+            repo: "o/r".into(),
+            number: "57".into(),
+            draft: true,
+        };
+        assert_eq!(
+            press(&mut i, KeyCode::Char('y')),
+            Outcome::Run {
+                action: Action::Ready,
+                item: pr,
+                body: String::new()
+            }
+        );
     }
 
     #[test]
     fn actions_refuse_items_they_dont_fit() {
         let mut i = items();
-        assert!(matches!(press(&mut i, KeyCode::Char('x')), Outcome::Refuse(w) if w.contains("isn't a card")));
+        assert!(
+            matches!(press(&mut i, KeyCode::Char('x')), Outcome::Refuse(w) if w.contains("isn't a card"))
+        );
         press(&mut i, KeyCode::Down);
-        assert!(matches!(press(&mut i, KeyCode::Char('r')), Outcome::Refuse(w) if w.contains("isn't a PR")));
+        assert!(
+            matches!(press(&mut i, KeyCode::Char('r')), Outcome::Refuse(w) if w.contains("isn't a PR"))
+        );
         press(&mut i, KeyCode::Down);
-        assert!(matches!(press(&mut i, KeyCode::Char('c')), Outcome::Refuse(w) if w == "#3 isn't a card: c comments on Fizzy cards"));
+        assert!(
+            matches!(press(&mut i, KeyCode::Char('c')), Outcome::Refuse(w) if w == "#3 isn't a card: c comments on Fizzy cards")
+        );
         assert_eq!(i.mode, Mode::List);
-        let mut open = Items::new(("s".into(), "w".into()), "t".into(), "p".into(), vec![link("pr", "github", "o/r#1", "u", "open")]).unwrap();
-        assert_eq!(press(&mut open, KeyCode::Char('r')), Outcome::Refuse("PR o/r#1 isn't a draft".into()));
+        let mut open = Items::new(
+            ("s".into(), "w".into()),
+            "t".into(),
+            "p".into(),
+            vec![link("pr", "github", "o/r#1", "u", "open")],
+        )
+        .unwrap();
+        assert_eq!(
+            press(&mut open, KeyCode::Char('r')),
+            Outcome::Refuse("PR o/r#1 isn't a draft".into())
+        );
     }
 
     #[test]
@@ -380,8 +545,18 @@ mod tests {
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
         assert_eq!(i.mode, Mode::List);
         press(&mut i, KeyCode::Char('x'));
-        let card = Item::Card { account: "6284043".into(), number: "1041".into() };
-        assert_eq!(press(&mut i, KeyCode::Enter), Outcome::Run { action: Action::Close, item: card, body: String::new() });
+        let card = Item::Card {
+            account: "6284043".into(),
+            number: "1041".into(),
+        };
+        assert_eq!(
+            press(&mut i, KeyCode::Enter),
+            Outcome::Run {
+                action: Action::Close,
+                item: card,
+                body: String::new()
+            }
+        );
     }
 
     #[test]
@@ -394,12 +569,17 @@ mod tests {
         assert_eq!(i.mode, Mode::Comment(String::new()));
         typed(&mut i, "rx ready ");
         press(&mut i, KeyCode::Enter);
-        assert_eq!(i.question().unwrap(), "Post a comment on card 1041: “rx ready”?");
+        assert_eq!(
+            i.question().unwrap(),
+            "Post a comment on card 1041: “rx ready”?"
+        );
         // No goes back to the text, which a failed run also keeps.
         press(&mut i, KeyCode::Esc);
         assert_eq!(i.mode, Mode::Comment("rx ready".into()));
         press(&mut i, KeyCode::Enter);
-        let Outcome::Run { action, body, .. } = press(&mut i, KeyCode::Enter) else { panic!("no run") };
+        let Outcome::Run { action, body, .. } = press(&mut i, KeyCode::Enter) else {
+            panic!("no run")
+        };
         i.failed(action, body);
         assert_eq!(i.mode, Mode::Comment("rx ready".into()));
         // Escape leaves the comment, then the float.

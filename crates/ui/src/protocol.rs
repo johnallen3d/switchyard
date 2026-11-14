@@ -23,7 +23,10 @@ pub struct Title {
 
 impl Title {
     pub fn new(prefix: &'static str) -> Self {
-        Title { prefix, reported: None }
+        Title {
+            prefix,
+            reported: None,
+        }
     }
 
     pub fn report(&mut self, pick: String) -> io::Result<()> {
@@ -48,6 +51,8 @@ pub fn hex(s: &str) -> String {
 }
 
 pub fn unhex(s: &str) -> String {
-    let bytes: Vec<u8> = (0..s.len() / 2).filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+    let bytes: Vec<u8> = (0..s.len() / 2)
+        .filter_map(|i| u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok())
+        .collect();
     String::from_utf8_lossy(&bytes).into_owned()
 }

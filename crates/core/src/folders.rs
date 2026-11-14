@@ -60,7 +60,10 @@ pub fn zoxide_on(host: &str) -> Result<String, String> {
 pub fn parse(text: &str) -> Vec<Folder> {
     text.lines()
         .filter(|l| !l.is_empty())
-        .map(|l| Folder { path: l.to_string(), display: home_relative(l) })
+        .map(|l| Folder {
+            path: l.to_string(),
+            display: home_relative(l),
+        })
         .collect()
 }
 
@@ -68,7 +71,10 @@ pub fn parse(text: &str) -> Vec<Folder> {
 pub fn home_relative(dir: &str) -> String {
     for root in ["/home/", "/Users/"] {
         if let Some(rest) = dir.strip_prefix(root) {
-            let rest = rest.split_once('/').map(|(_, r)| format!("/{r}")).unwrap_or_default();
+            let rest = rest
+                .split_once('/')
+                .map(|(_, r)| format!("/{r}"))
+                .unwrap_or_default();
             return format!("~{rest}");
         }
     }
@@ -91,10 +97,17 @@ pub fn open(host: &str, dir: &str) -> Result<String, String> {
     };
     let name = dir.trim_end_matches('/').rsplit('/').next().unwrap_or(&dir);
     let sessions = rex_json(host, &["ls", "--json"])?;
-    let found = sessions["sessions"].as_array().into_iter().flatten().find(|s| s["label"].as_str() == Some(name));
+    let found = sessions["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["label"].as_str() == Some(name));
     if let Some(id) = found.and_then(|s| s["session_id"].as_str()) {
         return Ok(id.to_string());
     }
     let created = rex_json(host, &["new", name, "-c", &dir, "--json"])?;
-    created["session_id"].as_str().map(String::from).ok_or_else(|| "rex new: no session_id".to_string())
+    created["session_id"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "rex new: no session_id".to_string())
 }

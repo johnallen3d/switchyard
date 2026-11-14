@@ -90,7 +90,10 @@ pub fn load() -> Result<&'static Config, String> {
 pub fn read() -> Result<Config, String> {
     let path = path();
     let text = std::fs::read_to_string(&path).map_err(|e| {
-        format!("can't read {} ({e}); Home Manager writes it, so activate this host's configuration", path.display())
+        format!(
+            "can't read {} ({e}); Home Manager writes it, so activate this host's configuration",
+            path.display()
+        )
     })?;
     toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }

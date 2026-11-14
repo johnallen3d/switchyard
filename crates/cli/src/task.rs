@@ -66,27 +66,51 @@ pub fn main(args: &[&str]) -> ExitCode {
         }
         ["open", host, dir] => out(folders::open(host, dir)),
         // An empty PROMPT_REF stands for none when a WORK_ITEM follows it.
-        ["launch", host, path, name, harness, rest @ ..] if rest.len() <= 2 => out(
-            launch(host, path, name, harness, rest.first().copied().filter(|r| !r.is_empty()), rest.get(1).copied(), None)
-                .map(|(host, session, window)| format!("{host}\t{session}\t{window}")),
-        ),
+        ["launch", host, path, name, harness, rest @ ..] if rest.len() <= 2 => out(launch(
+            host,
+            path,
+            name,
+            harness,
+            rest.first().copied().filter(|r| !r.is_empty()),
+            rest.get(1).copied(),
+            None,
+        )
+        .map(|(host, session, window)| format!("{host}\t{session}\t{window}"))),
         ["run", profile, path, name, harness, clone_url] => {
             switchyard_spawn::run(profile, path, name, harness, clone_url, None, "")
         }
-        ["run", profile, path, name, harness, clone_url, session, mode @ ("new" | "resume"), prompt @ ..]
-            if prompt.len() <= 1 =>
-        {
-            switchyard_spawn::run(profile, path, name, harness, clone_url, Some((session, mode)), prompt.first().copied().unwrap_or(""))
-        }
+        [
+            "run",
+            profile,
+            path,
+            name,
+            harness,
+            clone_url,
+            session,
+            mode @ ("new" | "resume"),
+            prompt @ ..,
+        ] if prompt.len() <= 1 => switchyard_spawn::run(
+            profile,
+            path,
+            name,
+            harness,
+            clone_url,
+            Some((session, mode)),
+            prompt.first().copied().unwrap_or(""),
+        ),
         ["list"] => out(reconcile_tasks().map(|t| format!("{}\n", serde_json::Value::from(t)))),
-        ["list", "--live"] => out(live_tasks().map(|t| format!("{}\n", serde_json::Value::from(t)))),
+        ["list", "--live"] => {
+            out(live_tasks().map(|t| format!("{}\n", serde_json::Value::from(t))))
+        }
         ["act", action, host, session, window, rest @ ..] if rest.len() <= 1 => {
             let result = match (*action, rest) {
                 ("snooze", [until]) => match until.parse() {
                     Ok(until) => actions::snooze(window, until),
                     Err(_) => Err(format!("snooze: UNTIL must be Unix seconds, not {until}")),
                 },
-                ("message", [prompt_ref]) => actions::message_ref(host, session, window, prompt_ref),
+                ("message", [prompt_ref]) => {
+                    actions::message_ref(host, session, window, prompt_ref)
+                }
                 ("message", []) => Err("message takes a PROMPT_REF".into()),
                 (_, []) => actions::act(action, host, session, window),
                 _ => Err(format!("{action} takes no UNTIL")),

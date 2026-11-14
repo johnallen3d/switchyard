@@ -85,7 +85,11 @@ impl Preview {
         if self.drawn.as_ref().is_none_or(|(w, _)| *w != width) {
             self.drawn = Some((width, render(entries, width as usize, p)));
         }
-        Ok(self.drawn.as_ref().map(|(_, d)| d.lines.as_slice()).unwrap_or_default())
+        Ok(self
+            .drawn
+            .as_ref()
+            .map(|(_, d)| d.lines.as_slice())
+            .unwrap_or_default())
     }
 
     /// The markdown lines `a..=b` (as last drawn) came from: for each entry
@@ -97,13 +101,23 @@ impl Preview {
         let entries = self.entries.as_ref().ok()?;
         let (_, drawn) = self.drawn.as_ref()?;
         let mut spans: Vec<(usize, Range<usize>)> = Vec::new();
-        for (e, r) in drawn.from.get(a..=b.min(drawn.from.len().checked_sub(1)?))?.iter().flatten() {
+        for (e, r) in drawn
+            .from
+            .get(a..=b.min(drawn.from.len().checked_sub(1)?))?
+            .iter()
+            .flatten()
+        {
             match spans.last_mut() {
-                Some((last, span)) if last == e => *span = span.start.min(r.start)..span.end.max(r.end),
+                Some((last, span)) if last == e => {
+                    *span = span.start.min(r.start)..span.end.max(r.end)
+                }
                 _ => spans.push((*e, r.clone())),
             }
         }
-        let parts: Vec<&str> = spans.iter().map(|(e, r)| entries[*e].1[r.clone()].trim_end()).collect();
+        let parts: Vec<&str> = spans
+            .iter()
+            .map(|(e, r)| entries[*e].1[r.clone()].trim_end())
+            .collect();
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 }
@@ -112,15 +126,28 @@ impl Preview {
 pub fn parse(body: &str) -> Option<Preview> {
     let (header, json) = body.split_once('\n')?;
     let mut f = header.splitn(3, '/');
-    let pane = Pane { target: f.next()?.into(), session: f.next()?.into(), window: f.next()?.trim_end().into() };
+    let pane = Pane {
+        target: f.next()?.into(),
+        session: f.next()?.into(),
+        window: f.next()?.trim_end().into(),
+    };
     let v = serde_json::from_str::<serde_json::Value>(json);
     let agent = v.as_ref().ok().and_then(|v| {
         let a = &v["agent"];
         let f = |k: &str| a[k].as_str().map(String::from);
-        Some(Agent { host: f("host")?, profile: f("profile")?, harness: f("harness")?, dir: f("dir")? })
+        Some(Agent {
+            host: f("host")?,
+            profile: f("profile")?,
+            harness: f("harness")?,
+            dir: f("dir")?,
+        })
     });
     let tokens = v.as_ref().ok().and_then(|v| v["tokens"].as_u64());
-    let model = v.as_ref().ok().and_then(|v| v["model"].as_str()).map(String::from);
+    let model = v
+        .as_ref()
+        .ok()
+        .and_then(|v| v["model"].as_str())
+        .map(String::from);
     let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -128,12 +155,24 @@ pub fn parse(body: &str) -> Option<Preview> {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|e| (e["kind"].as_str().unwrap_or("").to_string(), e["text"].as_str().unwrap_or("").to_string()))
+                .map(|e| {
+                    (
+                        e["kind"].as_str().unwrap_or("").to_string(),
+                        e["text"].as_str().unwrap_or("").to_string(),
+                    )
+                })
                 .collect()),
         },
         Err(_) => Err("unreadable transcript".to_string()),
     };
-    Some(Preview { pane, agent, tokens, model, entries, drawn: None })
+    Some(Preview {
+        pane,
+        agent,
+        tokens,
+        model,
+        entries,
+        drawn: None,
+    })
 }
 
 /// A model as the reply box's foot shows it: Claude's without the family
@@ -166,8 +205,16 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
     let room = width.saturating_sub(2).max(1);
     for (e, (kind, text)) in entries.iter().enumerate() {
         let (mark, mark_style, style) = match kind.as_str() {
-            "user" => ("› ", Style::new().fg(p.iris).add_modifier(Modifier::BOLD), Style::new().fg(p.iris)),
-            "ask" => ("? ", Style::new().fg(p.gold).add_modifier(Modifier::BOLD), Style::new().fg(p.gold)),
+            "user" => (
+                "› ",
+                Style::new().fg(p.iris).add_modifier(Modifier::BOLD),
+                Style::new().fg(p.iris),
+            ),
+            "ask" => (
+                "? ",
+                Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
+                Style::new().fg(p.gold),
+            ),
             "tool" => ("· ", Style::new().fg(p.muted), Style::new().fg(p.subtle)),
             _ => ("● ", Style::new().fg(p.pine), Style::new().fg(p.text)),
         };
@@ -176,16 +223,26 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
         }
         last = kind;
         if kind == "tool" {
-            let line = Line::from(vec![Span::styled(mark, mark_style), Span::styled(clip_width(text, room), style)]);
+            let line = Line::from(vec![
+                Span::styled(mark, mark_style),
+                Span::styled(clip_width(text, room), style),
+            ]);
             out.push(line, Some((e, 0..text.len())));
             continue;
         }
         let mut first = true;
         for (row, from) in markdown(text, room, p) {
-            let lead = if first { Span::styled(mark, mark_style) } else { Span::raw("  ") };
+            let lead = if first {
+                Span::styled(mark, mark_style)
+            } else {
+                Span::raw("  ")
+            };
             first = false;
             let row_style = style.patch(row.style);
-            let body = row.spans.into_iter().map(|s| Span::styled(s.content, row_style.patch(s.style)));
+            let body = row
+                .spans
+                .into_iter()
+                .map(|s| Span::styled(s.content, row_style.patch(s.style)));
             let mut line = Line::from(std::iter::once(lead).chain(body).collect::<Vec<_>>());
             if kind == "user" {
                 // A full-width band; on the line, so the scrollback cursor
@@ -206,21 +263,27 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
 /// line goes between blocks, except between the items of a tight list.
 /// Rules are drawn across the width.
 fn markdown(text: &str, width: usize, p: &Palette) -> Vec<(Line<'static>, Option<Range<usize>>)> {
-    let options = tui_markdown::Options::new(Sheet(*p)).table_width(width.min(u16::MAX as usize) as u16);
+    let options =
+        tui_markdown::Options::new(Sheet(*p)).table_width(width.min(u16::MAX as usize) as u16);
     let mut out = Vec::new();
     let mut prev: Option<Range<usize>> = None;
     for (range, rule) in blocks(text) {
         if let Some(prev) = &prev {
             let gap_from = prev.start + text[prev.clone()].trim_end().len();
             let gap = text.get(gap_from..range.start).unwrap_or("");
-            let tight = gap.matches('\n').count() < 2 && is_item(&text[prev.clone()]) && is_item(&text[range.clone()]);
+            let tight = gap.matches('\n').count() < 2
+                && is_item(&text[prev.clone()])
+                && is_item(&text[range.clone()]);
             if !tight {
                 out.push((Line::default(), None));
             }
         }
         prev = Some(range.clone());
         if rule {
-            out.push((Line::styled("─".repeat(width), Style::new().fg(p.muted)), Some(range)));
+            out.push((
+                Line::styled("─".repeat(width), Style::new().fg(p.muted)),
+                Some(range),
+            ));
             continue;
         }
         let mut lines = tui_markdown::from_str_with_options(&text[range.clone()], &options).lines;
@@ -231,9 +294,16 @@ fn markdown(text: &str, width: usize, p: &Palette) -> Vec<(Line<'static>, Option
         for l in lines.into_iter().skip(lead) {
             let base = l.style;
             let line = Line::from(
-                l.spans.into_iter().map(|s| Span::styled(s.content.into_owned(), base.patch(s.style))).collect::<Vec<_>>(),
+                l.spans
+                    .into_iter()
+                    .map(|s| Span::styled(s.content.into_owned(), base.patch(s.style)))
+                    .collect::<Vec<_>>(),
             );
-            out.extend(wrap_line(line, width).into_iter().map(|row| (row, Some(range.clone()))));
+            out.extend(
+                wrap_line(line, width)
+                    .into_iter()
+                    .map(|row| (row, Some(range.clone()))),
+            );
         }
     }
     if out.is_empty() {
@@ -302,7 +372,11 @@ struct Sheet(Palette);
 impl tui_markdown::StyleSheet for Sheet {
     fn heading(&self, level: u8) -> Style {
         let s = Style::new().fg(self.0.iris).add_modifier(Modifier::BOLD);
-        if level == 1 { s.add_modifier(Modifier::UNDERLINED) } else { s }
+        if level == 1 {
+            s.add_modifier(Modifier::UNDERLINED)
+        } else {
+            s
+        }
     }
     fn heading_marker(&self, _level: u8) -> &str {
         ""
@@ -314,10 +388,14 @@ impl tui_markdown::StyleSheet for Sheet {
         ""
     }
     fn link(&self) -> Style {
-        Style::new().fg(self.0.foam).add_modifier(Modifier::UNDERLINED)
+        Style::new()
+            .fg(self.0.foam)
+            .add_modifier(Modifier::UNDERLINED)
     }
     fn blockquote(&self) -> Style {
-        Style::new().fg(self.0.subtle).add_modifier(Modifier::ITALIC)
+        Style::new()
+            .fg(self.0.subtle)
+            .add_modifier(Modifier::ITALIC)
     }
     fn heading_meta(&self) -> Style {
         Style::new().fg(self.0.muted)
@@ -376,14 +454,21 @@ fn hang(text: &str, width: usize) -> usize {
     let spaces = text.chars().take_while(|c| *c == ' ').count();
     let rest = &text[spaces..];
     let digits = rest.chars().take_while(char::is_ascii_digit).count();
-    let marker = if rest.starts_with("- ") || rest.starts_with("* ") || rest.starts_with("+ ") || rest.starts_with("> ") {
+    let marker = if rest.starts_with("- ")
+        || rest.starts_with("* ")
+        || rest.starts_with("+ ")
+        || rest.starts_with("> ")
+    {
         2
     } else if digits > 0 && (rest[digits..].starts_with(". ") || rest[digits..].starts_with(") ")) {
         digits + 2
     } else {
         0
     };
-    [spaces + marker, spaces].into_iter().find(|n| n * 2 <= width).unwrap_or(0)
+    [spaces + marker, spaces]
+        .into_iter()
+        .find(|n| n * 2 <= width)
+        .unwrap_or(0)
 }
 
 /// `line` wrapped by word to `width` columns, keeping its spans' styles.
@@ -397,8 +482,11 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
         return vec![line];
     }
     let base = line.style;
-    let chars: Vec<(char, Style)> =
-        line.spans.iter().flat_map(|s| s.content.chars().map(move |c| (c, base.patch(s.style)))).collect();
+    let chars: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, base.patch(s.style))))
+        .collect();
     let text: String = chars.iter().map(|(c, _)| *c).collect();
     let indent = hang(&text, width);
 
@@ -416,7 +504,9 @@ pub fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
             i += 1;
             continue;
         }
-        let end = (i..chars.len()).find(|&j| chars[j].0 == ' ').unwrap_or(chars.len());
+        let end = (i..chars.len())
+            .find(|&j| chars[j].0 == ' ')
+            .unwrap_or(chars.len());
         let word = &chars[i..end];
         let word_w: usize = word.iter().map(|(c, _)| char_width(*c)).sum();
         let gap_w = gap.len();
@@ -515,7 +605,10 @@ pub fn follow(wants: Receiver<Option<Pane>>, tx: Sender<String>) {
             continue;
         };
         let json = switchyard_core::transcript::fetch(&pane.target, &pane.session, &pane.window);
-        if tx.send(format!("{DATA}preview\n{}\n{json}", pane.header())).is_err() {
+        if tx
+            .send(format!("{DATA}preview\n{}\n{json}", pane.header()))
+            .is_err()
+        {
             return;
         }
         last = Some(Instant::now());
@@ -548,7 +641,18 @@ mod tests {
         let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
         let p = Palette::load();
         let lines: Vec<String> = pv.lines(14, &p).unwrap().iter().map(text).collect();
-        assert_eq!(lines, ["› Fix it      ", "", "· Bash: Run t…", "· Read: /a/ve…", "", "● Done and", "  tested"]);
+        assert_eq!(
+            lines,
+            [
+                "› Fix it      ",
+                "",
+                "· Bash: Run t…",
+                "· Read: /a/ve…",
+                "",
+                "● Done and",
+                "  tested"
+            ]
+        );
     }
 
     #[test]
@@ -596,13 +700,35 @@ mod tests {
         let rows: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(
             rows,
-            ["● Plan", "  ", "  Some bold, slanted and code.", "  ", "  - one", "  - two", "  ", "  1. first", "  ", "  fn main() {}"]
+            [
+                "● Plan",
+                "  ",
+                "  Some bold, slanted and code.",
+                "  ",
+                "  - one",
+                "  - two",
+                "  ",
+                "  1. first",
+                "  ",
+                "  fn main() {}"
+            ]
         );
-        let style_of = |row: usize, word: &str| lines[row].spans.iter().find(|s| s.content.contains(word)).unwrap().style;
+        let style_of = |row: usize, word: &str| {
+            lines[row]
+                .spans
+                .iter()
+                .find(|s| s.content.contains(word))
+                .unwrap()
+                .style
+        };
         assert_eq!(style_of(0, "Plan").fg, Some(p.iris));
         assert!(style_of(0, "Plan").add_modifier.contains(Modifier::BOLD));
         assert!(style_of(2, "bold").add_modifier.contains(Modifier::BOLD));
-        assert!(style_of(2, "slanted").add_modifier.contains(Modifier::ITALIC));
+        assert!(
+            style_of(2, "slanted")
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
         assert_eq!(style_of(2, "code").fg, Some(p.foam));
         assert_eq!(style_of(2, "Some").fg, Some(p.text));
         assert_eq!(style_of(9, "fn main").fg, Some(p.foam));
@@ -617,7 +743,10 @@ mod tests {
         assert!(rows.iter().any(|r| r.contains("│ Name")), "{rows:?}");
         assert!(rows.iter().all(|r| str_width(r) <= 24), "{rows:?}");
         // A cell too wide for the pane wraps inside the table.
-        assert!(rows.iter().filter(|r| r.contains('│')).count() > 2, "{rows:?}");
+        assert!(
+            rows.iter().filter(|r| r.contains('│')).count() > 2,
+            "{rows:?}"
+        );
         assert_eq!(lines[0].spans[1].style.fg, Some(Palette::load().muted));
     }
 
@@ -627,17 +756,33 @@ mod tests {
         let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
         let p = Palette::load();
         let lines = pv.lines(20, &p).unwrap();
-        assert_eq!(lines.iter().map(text).collect::<Vec<_>>(), ["› one two           "]);
-        assert!(lines[0].spans.iter().any(|s| s.content == "two" && s.style.add_modifier.contains(Modifier::ITALIC)));
+        assert_eq!(
+            lines.iter().map(text).collect::<Vec<_>>(),
+            ["› one two           "]
+        );
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.content == "two" && s.style.add_modifier.contains(Modifier::ITALIC))
+        );
         // On a full-width band, in their own colour.
         assert_eq!(lines[0].style.bg, Some(p.overlay));
-        assert!(lines[0].spans.iter().any(|s| s.content == "one" && s.style.fg == Some(p.iris)));
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|s| s.content == "one" && s.style.fg == Some(p.iris))
+        );
     }
 
     #[test]
     fn rules_span_the_pane_and_lists_keep_their_spacing_and_numbers() {
         let rows = |md: &str| agent(md, 12).iter().map(text).collect::<Vec<_>>();
-        assert_eq!(rows("a\n\n---\n\nb"), ["● a", "  ", "  ──────────", "  ", "  b"]);
+        assert_eq!(
+            rows("a\n\n---\n\nb"),
+            ["● a", "  ", "  ──────────", "  ", "  b"]
+        );
         assert_eq!(rows("- one\n- two"), ["● - one", "  - two"]);
         assert_eq!(rows("- one\n\n- two"), ["● - one", "  ", "  - two"]);
         assert_eq!(rows("1. a\n2. b"), ["● 1. a", "  2. b"]);
@@ -651,14 +796,28 @@ mod tests {
             { "kind": "user", "text": "do `it`" },
         ]});
         let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
-        let rows: Vec<String> = pv.lines(30, &Palette::load()).unwrap().iter().map(text).collect();
+        let rows: Vec<String> = pv
+            .lines(30, &Palette::load())
+            .unwrap()
+            .iter()
+            .map(text)
+            .collect();
         let at = |s: &str| rows.iter().position(|r| r.contains(s)).unwrap();
         // One line of a table copies the table.
-        assert_eq!(pv.source(at("│ 1"), at("│ 1")).unwrap(), "| a | b |\n|---|---|\n| 1 | 2 |");
-        assert_eq!(pv.source(at("bold"), at("bold")).unwrap(), "Some **bold** text.");
+        assert_eq!(
+            pv.source(at("│ 1"), at("│ 1")).unwrap(),
+            "| a | b |\n|---|---|\n| 1 | 2 |"
+        );
+        assert_eq!(
+            pv.source(at("bold"), at("bold")).unwrap(),
+            "Some **bold** text."
+        );
         assert_eq!(pv.source(at("- y"), at("- y")).unwrap(), "- `y`");
         // Across turns: each entry's part, a blank line apart.
-        assert_eq!(pv.source(at("- x"), rows.len() - 1).unwrap(), "- x\n- `y`\n\ndo `it`");
+        assert_eq!(
+            pv.source(at("- x"), rows.len() - 1).unwrap(),
+            "- x\n- `y`\n\ndo `it`"
+        );
         // The blank line between turns copies nothing.
         assert_eq!(pv.source(at("- y") + 1, at("- y") + 1), None);
     }
@@ -666,9 +825,16 @@ mod tests {
     #[test]
     fn styled_wrapping_keeps_styles_and_hangs_list_items() {
         let bold = Style::new().add_modifier(Modifier::BOLD);
-        let line = Line::from(vec![Span::raw("- a "), Span::styled("bold word", bold), Span::raw(" then more")]);
+        let line = Line::from(vec![
+            Span::raw("- a "),
+            Span::styled("bold word", bold),
+            Span::raw(" then more"),
+        ]);
         let rows = wrap_line(line, 10);
-        assert_eq!(rows.iter().map(text).collect::<Vec<_>>(), ["- a bold", "  word", "  then", "  more"]);
+        assert_eq!(
+            rows.iter().map(text).collect::<Vec<_>>(),
+            ["- a bold", "  word", "  then", "  more"]
+        );
         assert!(rows.iter().all(|r| r.width() <= 10));
         assert_eq!(rows[0].spans.last().unwrap(), &Span::styled("bold", bold));
         assert_eq!(rows[1].spans[1], Span::styled("word", bold));
@@ -676,12 +842,21 @@ mod tests {
         let row = Line::from("│ a   │ b │");
         assert_eq!(wrap_line(row.clone(), 20), [row]);
         // Wide characters count two columns.
-        assert_eq!(wrap_line(Line::from("主机主机 x"), 4).iter().map(text).collect::<Vec<_>>(), ["主机", "主机", "x"]);
+        assert_eq!(
+            wrap_line(Line::from("主机主机 x"), 4)
+                .iter()
+                .map(text)
+                .collect::<Vec<_>>(),
+            ["主机", "主机", "x"]
+        );
     }
 
     #[test]
     fn a_failed_fetch_says_why() {
         let mut pv = parse("6869/s/w\n{\"error\":\"no agent in this tab\"}").unwrap();
-        assert_eq!(pv.lines(20, &Palette::load()).unwrap_err(), "no agent in this tab");
+        assert_eq!(
+            pv.lines(20, &Palette::load()).unwrap_err(),
+            "no agent in this tab"
+        );
     }
 }

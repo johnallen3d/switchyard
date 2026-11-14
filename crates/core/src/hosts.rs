@@ -24,7 +24,12 @@ pub fn catalog() -> Result<Vec<Project>, String> {
         .projects
         .iter()
         .map(|p| {
-            let name = p.path.trim_end_matches('/').rsplit('/').next().unwrap_or(&p.path);
+            let name = p
+                .path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&p.path);
             Project {
                 profile: p.profile.clone(),
                 path: p.path.clone(),
@@ -62,12 +67,21 @@ pub fn pool_in(config: &config::Config, hosts: &[String], profile: &str) -> Vec<
     if !hosts.is_empty() {
         return hosts.to_vec();
     }
-    config.pools.get(profile).filter(|hosts| !hosts.is_empty()).cloned().unwrap_or_else(|| config.hosts.clone())
+    config
+        .pools
+        .get(profile)
+        .filter(|hosts| !hosts.is_empty())
+        .cloned()
+        .unwrap_or_else(|| config.hosts.clone())
 }
 
 /// A pool entry as a Rex host label; only called on the config host.
 pub fn resolve(host: &str) -> String {
-    if host == CONFIG { local_label() } else { host.to_string() }
+    if host == CONFIG {
+        local_label()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Agents busy on a host (panes reporting working or blocked) and whether it
@@ -110,7 +124,10 @@ fn parse_metrics(text: &str) -> Option<Metrics> {
     let load1: f64 = lines.next()?.split_whitespace().next()?.parse().ok()?;
     let cpus: f64 = lines.next()?.trim().parse().ok()?;
     let mem_kib: f64 = lines.next()?.split_whitespace().nth(1)?.parse().ok()?;
-    Some(Metrics { load: load1 / cpus.max(1.0), mem_gib: mem_kib / 1024.0 / 1024.0 })
+    Some(Metrics {
+        load: load1 / cpus.max(1.0),
+        mem_gib: mem_kib / 1024.0 / 1024.0,
+    })
 }
 
 /// Load per CPU and free memory of `host` over SSH (by its Rex label, as
@@ -127,7 +144,8 @@ pub fn metrics(host: &str) -> Result<Metrics, String> {
     if out.status.code() == Some(255) {
         return Err(format!("couldn't reach {host}"));
     }
-    parse_metrics(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| format!("no load or memory from {host}"))
+    parse_metrics(&String::from_utf8_lossy(&out.stdout))
+        .ok_or_else(|| format!("no load or memory from {host}"))
 }
 
 #[derive(Debug, PartialEq)]
@@ -149,7 +167,15 @@ impl Probe {
     pub fn new(host: &str, m: Metrics, agents: u32, warm: bool) -> Probe {
         let score = m.load + 0.5 * agents as f64 - if warm { 0.25 } else { 0.0 }
             + if m.mem_gib < 4.0 { 1.0 } else { 0.0 };
-        Probe { host: host.to_string(), score, load: m.load, mem_gib: m.mem_gib, agents, warm, cached: false }
+        Probe {
+            host: host.to_string(),
+            score,
+            load: m.load,
+            mem_gib: m.mem_gib,
+            agents,
+            warm,
+            cached: false,
+        }
     }
 }
 
@@ -158,7 +184,14 @@ impl Probe {
 fn probe(host: &str, project: &str) -> Option<Probe> {
     let m = metrics(host).ok()?;
     let rex = Command::new("rex")
-        .args(["-S", host, "do", "-e", PROBE_SCRIPT, &format!("project={project}")])
+        .args([
+            "-S",
+            host,
+            "do",
+            "-e",
+            PROBE_SCRIPT,
+            &format!("project={project}"),
+        ])
         .stdin(Stdio::null())
         .output()
         .ok()
@@ -186,7 +219,10 @@ fn cached_probe(entry: Option<&serde_json::Value>) -> Option<Option<Probe>> {
     if !e["error"].is_null() {
         return Some(None);
     }
-    let m = Metrics { load: e["load"].as_f64()?, mem_gib: e["mem_gib"].as_f64()? };
+    let m = Metrics {
+        load: e["load"].as_f64()?,
+        mem_gib: e["mem_gib"].as_f64()?,
+    };
     let agents = u32::try_from(e["agents"].as_u64()?).ok()?;
     let mut p = Probe::new(e["host"].as_str()?, m, agents, e["warm"].as_bool()?);
     p.cached = true;
@@ -196,7 +232,11 @@ fn cached_probe(entry: Option<&serde_json::Value>) -> Option<Option<Probe>> {
 /// Probes for `hosts`: switchyard-server's where fresh (`use_cache`), the
 /// rest measured now, in parallel. Unreachable hosts are left out.
 fn probe_all(hosts: &[String], project: &str, use_cache: bool) -> Vec<Probe> {
-    let cached = if use_cache { crate::server::probes(project).unwrap_or_default() } else { Vec::new() };
+    let cached = if use_cache {
+        crate::server::probes(project).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let entry = |host: &str| cached.iter().find(|e| e["host"].as_str() == Some(host));
     let mut probes = Vec::new();
     let mut handles = Vec::new();
@@ -228,7 +268,9 @@ pub fn choose(project: &Project, use_cache: bool) -> Result<(String, String), St
     let hosts: Vec<String> = hosts.iter().map(|h| resolve(h)).collect();
     let mut probes = probe_all(&hosts, &project.name, use_cache);
     probes.sort_by(|a, b| a.score.total_cmp(&b.score));
-    let best = probes.first().ok_or_else(|| format!("no host for {} is reachable", project.name))?;
+    let best = probes
+        .first()
+        .ok_or_else(|| format!("no host for {} is reachable", project.name))?;
     let why = probes
         .iter()
         .map(|p| {
@@ -256,17 +298,30 @@ mod tests {
 
     #[test]
     fn metrics_are_per_cpu_load_and_free_gib() {
-        let m = parse_metrics("3.20 2.10 1.00 2/900 12345\n16\nMemAvailable:   33554432 kB\n").unwrap();
-        assert_eq!(m, Metrics { load: 0.2, mem_gib: 32.0 });
+        let m =
+            parse_metrics("3.20 2.10 1.00 2/900 12345\n16\nMemAvailable:   33554432 kB\n").unwrap();
+        assert_eq!(
+            m,
+            Metrics {
+                load: 0.2,
+                mem_gib: 32.0
+            }
+        );
         assert_eq!(parse_metrics("3.20 2.10 1.00 2/900 12345\n"), None);
     }
 
     #[test]
     fn scores_prefer_idle_warm_hosts_with_memory() {
-        let m = Metrics { load: 0.5, mem_gib: 32.0 };
+        let m = Metrics {
+            load: 0.5,
+            mem_gib: 32.0,
+        };
         assert_eq!(Probe::new("a", m, 2, false).score, 1.5);
         assert_eq!(Probe::new("a", m, 0, true).score, 0.25);
-        assert_eq!(Probe::new("a", Metrics { mem_gib: 2.0, ..m }, 0, false).score, 1.5);
+        assert_eq!(
+            Probe::new("a", Metrics { mem_gib: 2.0, ..m }, 0, false).score,
+            1.5
+        );
     }
 
     #[test]
@@ -302,7 +357,11 @@ mod tests {
                 let started = std::time::Instant::now();
                 let choice = choose(project, use_cache);
                 let ms = started.elapsed().as_millis();
-                eprintln!("{} {} {ms} ms: {choice:?}", project.name, if use_cache { "cached" } else { "live" });
+                eprintln!(
+                    "{} {} {ms} ms: {choice:?}",
+                    project.name,
+                    if use_cache { "cached" } else { "live" }
+                );
             }
         }
     }

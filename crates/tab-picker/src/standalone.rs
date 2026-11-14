@@ -20,9 +20,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+use switchyard_core::item_actions::{self, Action, Item};
 use switchyard_core::rex::{local_label, log, select};
 use switchyard_core::tasks::{live_tasks, reconcile_tasks};
-use switchyard_core::item_actions::{self, Action, Item};
 use switchyard_core::{actions, server};
 use switchyard_ui::protocol::{DATA, unhex};
 
@@ -112,8 +112,11 @@ impl Feed {
             thread::spawn(move || {
                 let mut collector = switchyard_core::usage::Collector::default();
                 loop {
-                    let body = serde_json::to_string(&collector.collect().summary()).unwrap_or_default();
-                    if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() { return; }
+                    let body =
+                        serde_json::to_string(&collector.collect().summary()).unwrap_or_default();
+                    if usage_tx.send(format!("{DATA}usage\n{body}")).is_err() {
+                        return;
+                    }
                     thread::sleep(switchyard_core::usage::REFRESH);
                 }
             });
@@ -136,7 +139,12 @@ impl Feed {
 
 /// Forward the server's snapshots for as long as it answers, then say so
 /// (a poke, which starts a direct fetch at once) and try again every RETRY.
-fn follow_server(mut sub: Option<server::Subscription>, tx: Sender<String>, poke: Sender<()>, on_server: Arc<AtomicBool>) {
+fn follow_server(
+    mut sub: Option<server::Subscription>,
+    tx: Sender<String>,
+    poke: Sender<()>,
+    on_server: Arc<AtomicBool>,
+) {
     loop {
         if let Some(sub) = sub.take() {
             on_server.store(true, Ordering::Relaxed);
@@ -164,7 +172,9 @@ fn send_pastes(tx: &Sender<String>, snap: &serde_json::Value) -> bool {
         pastes.retain(|(kind, _)| !matches!(*kind, "live" | "tasks" | "tasks-error"));
         pastes.push(("tasks-error", NO_REGISTRY.into()));
     }
-    pastes.into_iter().all(|(kind, body)| tx.send(format!("{DATA}{kind}\n{body}")).is_ok())
+    pastes
+        .into_iter()
+        .all(|(kind, body)| tx.send(format!("{DATA}{kind}\n{body}")).is_ok())
 }
 
 const NO_REGISTRY: &str = "the task registry is on the Mac";
@@ -219,9 +229,16 @@ fn fetch_tasks(tx: &Sender<String>) -> bool {
         return tx.send(format!("{DATA}tasks-error\n{NO_REGISTRY}")).is_ok();
     }
     for kind in ["live", "tasks"] {
-        let got = if kind == "live" { live_tasks() } else { reconcile_tasks() };
+        let got = if kind == "live" {
+            live_tasks()
+        } else {
+            reconcile_tasks()
+        };
         let (msg, failed) = match got {
-            Ok(tasks) => (format!("{DATA}{kind}\n{}", serde_json::Value::from(tasks)), false),
+            Ok(tasks) => (
+                format!("{DATA}{kind}\n{}", serde_json::Value::from(tasks)),
+                false,
+            ),
             Err(e) => (format!("{DATA}tasks-error\n{e}"), true),
         };
         if tx.send(msg).is_err() {
@@ -262,7 +279,11 @@ pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Pick {
         action: action.to_string(),
-        host: if host == "-" { local_label() } else { unhex(host) },
+        host: if host == "-" {
+            local_label()
+        } else {
+            unhex(host)
+        },
         session: session.to_string(),
         window: window.to_string(),
     })
@@ -290,12 +311,18 @@ pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
 
 /// Send `text` to the agent in the pick's tab, as if typed there.
 pub fn message(p: &Pick, text: &str) -> Result<String, String> {
-    logged("message", actions::message(&p.host, &p.session, &p.window, text))
+    logged(
+        "message",
+        actions::message(&p.host, &p.session, &p.window, text),
+    )
 }
 
 /// Resume an ended task in a new tab and show it.
 pub fn resume(p: &Pick) -> Result<(), String> {
-    let out = logged("resume", actions::act("resume", &p.host, &p.session, &p.window))?;
+    let out = logged(
+        "resume",
+        actions::act("resume", &p.host, &p.session, &p.window),
+    )?;
     let mut f = out.trim_end().splitn(3, '\t');
     match (f.next(), f.next(), f.next()) {
         (Some(h), Some(s), Some(w)) => select(h, s, w),
@@ -306,14 +333,20 @@ pub fn resume(p: &Pick) -> Result<(), String> {
 /// Open the pick's task's main work item in the browser here (the
 /// standalone picker runs where John is); Ok is the URL.
 pub fn open_link(p: &Pick) -> Result<String, String> {
-    let url = actions::act("link", &p.host, &p.session, &p.window)?.trim().to_string();
+    let url = actions::act("link", &p.host, &p.session, &p.window)?
+        .trim()
+        .to_string();
     open_url(&url)?;
     Ok(url)
 }
 
 /// Open `url` in the browser here.
 pub fn open_url(url: &str) -> Result<(), String> {
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
     let status = std::process::Command::new(opener)
         .arg(url)
         .stdin(std::process::Stdio::null())
@@ -330,14 +363,25 @@ pub fn open_url(url: &str) -> Result<(), String> {
 /// Run a work item action from the ctrl-r float (see core's
 /// `item_actions`); after it, forget the item's cached state (a marked PR,
 /// a closed card) and have switchyard-server check again.
-pub fn item_action(action: Action, item: &Item, body: &str, profile: &str, url: &str) -> Result<String, String> {
-    let r = logged(action.verb(), item_actions::run(action, item, body, profile));
+pub fn item_action(
+    action: Action,
+    item: &Item,
+    body: &str,
+    profile: &str,
+    url: &str,
+) -> Result<String, String> {
+    let r = logged(
+        action.verb(),
+        item_actions::run(action, item, body, profile),
+    );
     if r.is_ok() {
         match (action, item) {
             (Action::Ready, _) => switchyard_core::links::forget_pr(url),
             // A closed card's column and state are cached for a few minutes
             // (see core's cards); the next refresh should ask Fizzy at once.
-            (Action::Close, Item::Card { account, number }) => switchyard_core::cards::forget(account, number),
+            (Action::Close, Item::Card { account, number }) => {
+                switchyard_core::cards::forget(account, number)
+            }
             _ => {}
         }
         server::refresh();

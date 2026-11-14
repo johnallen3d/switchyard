@@ -34,9 +34,9 @@ mod watch;
 
 use std::collections::HashMap;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -120,11 +120,25 @@ fn serve() -> Result<(), String> {
     let (closed, triggers) = mpsc::channel();
     let (hosts, hosts_changed) = mpsc::channel();
     let (wake, wakes) = mpsc::channel();
-    let events = Events { closed: closed.clone(), hosts };
-    let asks = socket::Asks { refresh: closed.clone(), folders: wake };
-    let mcp = switchyard_core::config::read().map(|c| c.mcp).unwrap_or_default();
+    let events = Events {
+        closed: closed.clone(),
+        hosts,
+    };
+    let asks = socket::Asks {
+        refresh: closed.clone(),
+        folders: wake,
+    };
+    let mcp = switchyard_core::config::read()
+        .map(|c| c.mcp)
+        .unwrap_or_default();
     if mcp.enabled {
-        mcp::start(mcp::Endpoint { shared: shared.clone(), refresh: closed.clone() }, mcp.port);
+        mcp::start(
+            mcp::Endpoint {
+                shared: shared.clone(),
+                refresh: closed.clone(),
+            },
+            mcp.port,
+        );
     }
     {
         let shared = shared.clone();
@@ -151,7 +165,10 @@ fn list_servers() -> Result<Vec<String>, String> {
         .output()
         .map_err(|e| format!("rex: {e}"))?;
     if !out.status.success() {
-        return Err(format!("rex.servers(): {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "rex.servers(): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("rex.servers(): {e}"))
 }
@@ -167,7 +184,9 @@ fn manage_hosts(shared: Arc<Shared>, events: Events, changed: Receiver<()>) {
         }
         // Without the list, keep the watchers there are (at least local's).
         let names: Vec<String> = match &listed {
-            Ok(servers) => std::iter::once("local".to_string()).chain(servers.iter().cloned()).collect(),
+            Ok(servers) => std::iter::once("local".to_string())
+                .chain(servers.iter().cloned())
+                .collect(),
             Err(_) if watchers.is_empty() => vec!["local".to_string()],
             Err(_) => watchers.keys().cloned().collect(),
         };
@@ -192,7 +211,11 @@ fn manage_hosts(shared: Arc<Shared>, events: Events, changed: Receiver<()>) {
                 thread::spawn(move || watch::supervise(shared, name, events, stop));
             }
         }
-        let wait = if listed.is_ok() { Duration::from_secs(600) } else { Duration::from_secs(30) };
+        let wait = if listed.is_ok() {
+            Duration::from_secs(600)
+        } else {
+            Duration::from_secs(30)
+        };
         match changed.recv_timeout(wait) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,

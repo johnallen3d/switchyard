@@ -3,9 +3,9 @@
 
 use crate::autoname::name_work;
 use crate::hosts::{AUTO, Project, catalog, choose_host};
+use crate::images::carry;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
-use crate::images::carry;
 use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, host_home, local_label, log, now, rex_json, sh_quote};
 use crate::sessions::new_session_id;
@@ -21,21 +21,27 @@ fn folder_project(host: &str, path: &str, projects: &[Project]) -> Result<Projec
     let script = folder_script(path);
     let out = host_bash(host, &script).ok_or_else(|| format!("{host} can't be reached"))?;
     if !out.status.success() {
-        return Err(format!("{path} is not an accessible Git working folder on {host}"));
+        return Err(format!(
+            "{path} is not an accessible Git working folder on {host}"
+        ));
     }
     let repo = String::from_utf8(out.stdout).map_err(|e| format!("Git folder path: {e}"))?;
     if !repo.starts_with('/') {
-        return Err(format!("Git returned no repository path for {path} on {host}"));
+        return Err(format!(
+            "Git returned no repository path for {path} on {host}"
+        ));
     }
     let display = crate::folders::home_relative(&repo);
     // A catalog repository selected through one of its subfolders keeps its
     // configured profile. Otherwise use the host's normal login environment,
     // just like personal catalog work (no profile or credential switching).
-    let configured = projects.iter().find(|p| {
-        crate::folders::home_relative(p.path.trim_end_matches('/')) == display
-    });
+    let configured = projects
+        .iter()
+        .find(|p| crate::folders::home_relative(p.path.trim_end_matches('/')) == display);
     Ok(Project {
-        profile: configured.map(|p| p.profile.clone()).unwrap_or_else(|| "personal".into()),
+        profile: configured
+            .map(|p| p.profile.clone())
+            .unwrap_or_else(|| "personal".into()),
         name: repo.rsplit('/').next().unwrap_or(&repo).to_string(),
         path: repo,
         clone_url: String::new(),
@@ -72,7 +78,9 @@ pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &s
     let lead = if profile == "work" {
         format!("{WORK_ITEM_COMMAND} {item} {WORK_ITEM_FLAGS}")
     } else {
-        let url = parse_ref(item, tracker).and_then(|l| l["url"].as_str().map(String::from)).unwrap_or_default();
+        let url = parse_ref(item, tracker)
+            .and_then(|l| l["url"].as_str().map(String::from))
+            .unwrap_or_default();
         format!("Let's work on {}", if url.is_empty() { item } else { &url })
     };
     match prompt {
@@ -84,7 +92,9 @@ pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &s
 
 /// A work item as typed: one ref or key, without spaces.
 fn work_item_problem(item: &str) -> Option<&'static str> {
-    item.chars().any(|c| c.is_whitespace() || c.is_control()).then_some("a work item is one ref, without spaces")
+    item.chars()
+        .any(|c| c.is_whitespace() || c.is_control())
+        .then_some("a work item is one ref, without spaces")
 }
 
 /// Open the work's tab on `host` and record it, with the work items its
@@ -104,7 +114,16 @@ pub fn launch(
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
-    launch_with(host, path, name, harness, Prompt::Ref(prompt_ref), work_item, resume, None)
+    launch_with(
+        host,
+        path,
+        name,
+        harness,
+        Prompt::Ref(prompt_ref),
+        work_item,
+        resume,
+        None,
+    )
 }
 
 /// `launch` with the prompt's text itself rather than a prompt file, for
@@ -121,7 +140,16 @@ pub fn launch_text(
     work_item: Option<&str>,
     parent: Option<&str>,
 ) -> Result<(String, String, String), String> {
-    launch_with(host, path, name, harness, Prompt::Text(prompt), work_item, None, parent)
+    launch_with(
+        host,
+        path,
+        name,
+        harness,
+        Prompt::Text(prompt),
+        work_item,
+        None,
+        parent,
+    )
 }
 
 /// Where a launch's prompt comes from.
@@ -174,7 +202,11 @@ fn launch_with(
     }
     let host = if host == AUTO {
         let (chosen, why) = choose_host(&project)?;
-        log(&format!("auto chose {chosen} for {}/{}: {why}", project.name, if name.is_empty() { "(unnamed)" } else { name }));
+        log(&format!(
+            "auto chose {chosen} for {}/{}: {why}",
+            project.name,
+            if name.is_empty() { "(unnamed)" } else { name }
+        ));
         chosen
     } else {
         host.to_string()
@@ -182,7 +214,9 @@ fn launch_with(
     let host = host.as_str();
     // Images pasted into the prompt are files on the prompt's host; give
     // the agent copies on its own.
-    let from = prompt_ref.and_then(|r| parse_prompt_ref(r).ok()).map_or_else(local_label, |(label, _)| label.to_string());
+    let from = prompt_ref
+        .and_then(|r| parse_prompt_ref(r).ok())
+        .map_or_else(local_label, |(label, _)| label.to_string());
     let typed = carry(&from, host, &typed)?;
 
     // Start the session and tab in the project so their processes, and
@@ -207,18 +241,26 @@ fn launch_with(
     });
     // The agent's own session ID, chosen here so the registry knows it from
     // the start; an archive later records the newest one (after /clear).
-    let agent_session = resume.map(|(id, _)| id.to_string()).unwrap_or_else(new_session_id);
+    let agent_session = resume
+        .map(|(id, _)| id.to_string())
+        .unwrap_or_else(new_session_id);
     let mode = if resume.is_some() { "resume" } else { "new" };
     // Work items the prompt names (`#42`, `fizzy:123`, issue and card
     // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
     // board when the catalog sets none.
-    let board = if project.tracker.trim().is_empty() && (!typed.trim().is_empty() || work_item.is_some()) {
-        let script = format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&cwd));
-        host_bash(host, &script).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let tracker = Tracker::new(&tracker_or_fizzy(&project.tracker, &board), &project.clone_url);
+    let board =
+        if project.tracker.trim().is_empty() && (!typed.trim().is_empty() || work_item.is_some()) {
+            let script = format!("{FIZZY_BOARD_SH}fizzy_board {}\n", sh_quote(&cwd));
+            host_bash(host, &script)
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+    let tracker = Tracker::new(
+        &tracker_or_fizzy(&project.tracker, &board),
+        &project.clone_url,
+    );
     let prompt = match work_item {
         Some(item) => work_item_prompt(&project.profile, item, &tracker, typed.trim()),
         None => typed.clone(),
@@ -229,15 +271,31 @@ fn launch_with(
             "couldn't name the work from its work item or prompt (macOS's fm model is unavailable \
              or gave no usable name); name it yourself",
         )?;
-        log(&format!("named {}/{named} from its {}", project.name, if work_item.is_some() { "work item or prompt" } else { "prompt" }));
+        log(&format!(
+            "named {}/{named} from its {}",
+            project.name,
+            if work_item.is_some() {
+                "work item or prompt"
+            } else {
+                "prompt"
+            }
+        ));
         named.as_str()
     } else {
         name
     };
     let (branch, slug) = branch_and_slug(name);
     let mut run = vec![
-        "switchyard", "task", "run", &project.profile, &project.path, name, harness, &project.clone_url,
-        &agent_session, mode,
+        "switchyard",
+        "task",
+        "run",
+        &project.profile,
+        &project.path,
+        name,
+        harness,
+        &project.clone_url,
+        &agent_session,
+        mode,
     ];
     if !prompt.is_empty() {
         run.push(&prompt);
@@ -246,17 +304,32 @@ fn launch_with(
     // shell tab.
     let (session, window_id) = match existing {
         Some(session) => {
-            let mut args = vec!["window", "new", "-s", &session, &slug, "-c", &cwd, "--json", "--"];
+            let mut args = vec![
+                "window", "new", "-s", &session, &slug, "-c", &cwd, "--json", "--",
+            ];
             args.extend(&run);
             let window = rex_json(host, &args)?;
-            let window_id = window["window_id"].as_str().ok_or("rex window new returned no window_id")?;
+            let window_id = window["window_id"]
+                .as_str()
+                .ok_or("rex window new returned no window_id")?;
             (session.clone(), window_id.to_string())
         }
         None => {
-            let mut args = vec!["new", &project.name, "--window", &slug, "-c", &cwd, "--json", "--"];
+            let mut args = vec![
+                "new",
+                &project.name,
+                "--window",
+                &slug,
+                "-c",
+                &cwd,
+                "--json",
+                "--",
+            ];
             args.extend(&run);
             let created = rex_json(host, &args)?;
-            let session = created["session_id"].as_str().ok_or("rex new returned no session_id")?;
+            let session = created["session_id"]
+                .as_str()
+                .ok_or("rex new returned no session_id")?;
             let window_id = created["initial_windows"][0]["window_id"]
                 .as_str()
                 .ok_or("rex new returned no initial window")?;
@@ -322,11 +395,24 @@ mod tests {
             // macOS clocks tick in microseconds, so parallel tests can read the
             // same time; the counter keeps their directories distinct.
             static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("switchyard-folder-{}-{unique}-{seq}-it's a repo", std::process::id()));
+            let path = std::env::temp_dir().join(format!(
+                "switchyard-folder-{}-{unique}-{seq}-it's a repo",
+                std::process::id()
+            ));
             std::fs::create_dir_all(path.join("nested folder")).unwrap();
-            assert!(Command::new("git").args(["init", "--quiet"]).arg(&path).status().unwrap().success());
+            assert!(
+                Command::new("git")
+                    .args(["init", "--quiet"])
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
             Self(path.canonicalize().unwrap())
         }
     }
@@ -354,12 +440,19 @@ mod tests {
     fn catalog_subdirectory_preserves_work_profile() {
         let repo = Fixture::new();
         let configured = Project {
-            profile: "work".into(), path: repo.0.to_str().unwrap().into(),
-            clone_url: "not used".into(), name: "configured".into(), hosts: vec![], tracker: String::new(),
+            profile: "work".into(),
+            path: repo.0.to_str().unwrap().into(),
+            clone_url: "not used".into(),
+            name: "configured".into(),
+            hosts: vec![],
+            tracker: String::new(),
         };
         let project = folder_project(
-            &crate::rex::local_label(), repo.0.join("nested folder").to_str().unwrap(), &[configured],
-        ).unwrap();
+            &crate::rex::local_label(),
+            repo.0.join("nested folder").to_str().unwrap(),
+            &[configured],
+        )
+        .unwrap();
         assert_eq!(project.profile, "work");
     }
 
@@ -375,12 +468,23 @@ mod tests {
             "/agent-kit:issue-implement #7 --create-pr --agent-author\n\nkeep it small",
         );
         let personal = work_item_prompt("personal", "#1045", &fizzy, "");
-        assert_eq!(personal, "Let's work on https://app.fizzy.do/6284043/cards/1045");
+        assert_eq!(
+            personal,
+            "Let's work on https://app.fizzy.do/6284043/cards/1045"
+        );
         // The prompt's links pick the item up as a spawn link.
         assert_eq!(refs_in_text(&personal, &fizzy)[0]["ref"], "1045");
-        assert_eq!(work_item_prompt("personal", "ENG-12", &Tracker::default(), "go"), "Let's work on ENG-12\n\ngo");
         assert_eq!(
-            work_item_prompt("personal", "ENG-12", &Tracker::default(), "/issue-plan fast"),
+            work_item_prompt("personal", "ENG-12", &Tracker::default(), "go"),
+            "Let's work on ENG-12\n\ngo"
+        );
+        assert_eq!(
+            work_item_prompt(
+                "personal",
+                "ENG-12",
+                &Tracker::default(),
+                "/issue-plan fast"
+            ),
             "/issue-plan fast\n\nLet's work on ENG-12"
         );
         assert!(work_item_problem("ENG-12").is_none());
@@ -390,9 +494,19 @@ mod tests {
     #[test]
     fn non_git_folder_and_auto_are_rejected() {
         let repo = Fixture::new();
-        assert!(folder_project(AUTO, repo.0.to_str().unwrap(), &[]).err().unwrap().contains("own host"));
+        assert!(
+            folder_project(AUTO, repo.0.to_str().unwrap(), &[])
+                .err()
+                .unwrap()
+                .contains("own host")
+        );
         let outside = repo.0.parent().unwrap().to_str().unwrap();
-        assert!(folder_project(&crate::rex::local_label(), outside, &[]).err().unwrap().contains("Git working folder"));
+        assert!(
+            folder_project(&crate::rex::local_label(), outside, &[])
+                .err()
+                .unwrap()
+                .contains("Git working folder")
+        );
     }
 
     #[test]
