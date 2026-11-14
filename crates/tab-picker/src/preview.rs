@@ -263,7 +263,11 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
 /// is drawn on its own so its lines know where they came from; a blank
 /// line goes between blocks, except between the items of a tight list.
 /// Rules are drawn across the width.
-fn markdown(text: &str, width: usize, p: &Palette) -> Vec<(Line<'static>, Option<Range<usize>>)> {
+pub(crate) fn markdown(
+    text: &str,
+    width: usize,
+    p: &Palette,
+) -> Vec<(Line<'static>, Option<Range<usize>>)> {
     let options = tui_markdown::Options::new(Sheet(*p)).table_width(crate::cells(width));
     let mut out = Vec::new();
     let mut prev: Option<Range<usize>> = None;

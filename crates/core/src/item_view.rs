@@ -36,6 +36,9 @@ pub struct Thread {
     /// The description or issue body, as the opening post.
     pub post: Comment,
     pub comments: Vec<Comment>,
+    /// Whether the bodies are Markdown (GitHub's), rather than the plain
+    /// text Fizzy gives for its rich text.
+    pub markdown: bool,
 }
 
 /// Fetch the thread of the item a link names (see `links`): a Fizzy card
@@ -144,6 +147,7 @@ fn parse_card(card: &str, comments: &str) -> Result<Thread, String> {
             body: text(&card["description"]),
         },
         comments,
+        markdown: false,
     })
 }
 
@@ -175,6 +179,7 @@ fn parse_github(out: &str) -> Result<Thread, String> {
             body: text(&v["body"]),
         },
         comments,
+        markdown: true,
     })
 }
 
@@ -202,6 +207,7 @@ mod tests {
         let bodies: Vec<&str> = t.comments.iter().map(|c| c.body.as_str()).collect();
         assert_eq!(bodies, ["first\n\n• a point", "second"]);
         assert_eq!(t.comments[0].author, "A");
+        assert!(!t.markdown);
 
         let closed = r#"{"data": {"title": "t", "closed": true, "column": null}}"#;
         let t = parse_card(closed, r#"{"data": []}"#).unwrap();
@@ -227,6 +233,7 @@ mod tests {
         assert_eq!(t.post.body, "It breaks.");
         assert_eq!(t.comments[0].body, "sooner");
         assert_eq!(t.comments[1].author, "z");
+        assert!(t.markdown);
         // No comments field: none.
         let t = parse_github(r#"{"title": "x"}"#).unwrap();
         assert_eq!(t.comments, [] as [Comment; 0]);

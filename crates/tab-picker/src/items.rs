@@ -1,12 +1,13 @@
-//! The ctrl-r work items float: the highlighted task's linked items, with
-//! what can be done to each (see core's `item_actions`). It is separate
-//! from ctrl-b's chooser, which only opens links, and opens even for a
-//! task with one link.
+//! The ctrl-r work items float: the highlighted task's linked items, each
+//! with its title and what can be done to it (see core's `item_actions`).
+//! It is separate from ctrl-b's chooser, which only opens links, and opens
+//! even for a task with one link.
 //!
 //! On the highlighted item: Enter or `o` opens it in the browser; `v`
 //! reads its description and comments here, in a scrolling reader over
 //! the float (a card, issue or PR; see core's `item_view`); `c`
-//! types a one-line comment for a card; `x` closes a card; `r` marks a
+//! types a one-line comment for a card, issue or PR; `x` closes a card or
+//! an issue (not a PR); `r` marks a
 //! draft PR ready for review. Nothing mutates without its explicit key and
 //! then a confirmation naming the item (Enter or `y` runs it, anything
 //! else goes back). Escape, ctrl-c or ctrl-r again close the float; in
@@ -52,7 +53,7 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     List,
-    /// Typing a comment for the highlighted card.
+    /// Typing a comment for the highlighted card, issue or PR.
     Comment(String),
     /// Asking whether to run `action` (with a comment's `body`).
     Confirm {
@@ -99,11 +100,14 @@ pub enum Outcome {
     Refuse(String),
 }
 
+/// The widest the list's box grows for its rows, in columns.
+const MAX_WIDTH: usize = 100;
+
 /// The key that asks for an action, as the float names it.
 fn action_key(a: Action) -> (&'static str, &'static str) {
     match a {
         Action::Comment => ("c", "comment"),
-        Action::Close => ("x", "close card"),
+        Action::Close => ("x", "close"),
         Action::Ready => ("r", "mark ready"),
     }
 }
@@ -209,8 +213,14 @@ impl Items {
                 Action::Comment | Action::Close if e.link.kind == "card" => {
                     format!("{}: its URL names no Fizzy account", e.name())
                 }
-                Action::Comment => format!("{} isn't a card: c comments on Fizzy cards", e.name()),
-                Action::Close => format!("{} isn't a card: x closes Fizzy cards", e.name()),
+                Action::Comment => format!(
+                    "{}: c comments on Fizzy cards and GitHub issues and PRs",
+                    e.name()
+                ),
+                Action::Close if e.link.kind == "pr" => {
+                    format!("{}: x closes cards and issues, not PRs", e.name())
+                }
+                Action::Close => format!("{}: x closes Fizzy cards and GitHub issues", e.name()),
                 Action::Ready if e.link.kind == "pr" => format!("{} isn't a draft", e.name()),
                 Action::Ready => format!("{} isn't a PR: r marks a draft PR ready", e.name()),
             };
@@ -357,7 +367,8 @@ impl Items {
     }
 
     /// A small box over the list: one item a line with its state, the
-    /// actions it takes and its URL, then a line for the mode.
+    /// actions it takes and its title (its URL until the tracker names
+    /// it), then a line for the mode.
     pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
         if let Mode::Read { thread, scroll } = &self.mode {
             self.draw_reader(f, area, p, thread, *scroll);
@@ -365,24 +376,27 @@ impl Items {
         }
         let row_text = |e: &Entry| {
             let acts: Vec<&str> = e.actions().into_iter().map(|a| action_key(a).0).collect();
-            (
-                e.link.short(),
-                e.link.badge_state(),
-                acts.join(" "),
-                e.link.url.clone(),
-            )
+            // Its title, which Enter's URL says nothing of; the URL only
+            // while the tracker hasn't said (see core's `titles`).
+            let about = match e.link.title.trim() {
+                "" => (e.link.url.clone(), false),
+                t => (t.to_string(), true),
+            };
+            (e.link.short(), e.link.badge_state(), acts.join(" "), about)
         };
         let title = format!(" Work items · {} ", self.label);
         let want = self
             .entries
             .iter()
             .map(|e| {
-                let (short, state, acts, url) = row_text(e);
-                str_width(&short)
+                let (short, state, acts, (about, _)) = row_text(e);
+                // A long title is cut at the box's edge rather than widening it.
+                (str_width(&short)
                     + state.as_ref().map_or(0, |(s, _)| str_width(s) + 1)
                     + str_width(&acts)
-                    + str_width(&url)
-                    + 8
+                    + str_width(&about)
+                    + 8)
+                .min(MAX_WIDTH)
             })
             .chain([
                 str_width(&title) + 4,
@@ -406,7 +420,7 @@ impl Items {
         f.render_widget(block, r);
         let rows = inner.height.saturating_sub(2) as usize;
         for (i, e) in self.entries.iter().enumerate().take(rows) {
-            let (short, state, acts, url) = row_text(e);
+            let (short, state, acts, (about, titled)) = row_text(e);
             let selected = i == self.selected;
             let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
@@ -441,9 +455,10 @@ impl Items {
                     Style::new().fg(p.gold).bg(bg),
                 ));
             }
+            let fg = if titled { p.text } else { p.muted };
             spans.push(Span::styled(
-                format!("  {url}"),
-                Style::new().fg(p.muted).bg(bg),
+                format!("  {about}"),
+                Style::new().fg(fg).bg(bg),
             ));
             f.render_widget(Line::from(spans), row);
         }
@@ -584,7 +599,8 @@ fn when(at: &str) -> String {
     }
 }
 
-/// A thread as wrapped lines `width` columns wide.
+/// A thread as wrapped lines `width` columns wide; GitHub's Markdown
+/// bodies drawn as the preview draws an agent's (see preview's `markdown`).
 fn reader_lines(thread: &Thread, width: usize, p: &Palette) -> Vec<Line<'static>> {
     let wrap = |line: Line<'static>| crate::preview::wrap_line(line, width);
     let mut out: Vec<Line<'static>> = Vec::new();
@@ -620,6 +636,14 @@ fn reader_lines(thread: &Thread, width: usize, p: &Palette) -> Vec<Line<'static>
     let body = |out: &mut Vec<Line<'static>>, c: &Comment, empty: &str| {
         if c.body.is_empty() {
             out.push(Line::styled(empty.to_string(), Style::new().fg(p.muted)));
+            return;
+        }
+        if thread.markdown {
+            out.extend(
+                crate::preview::markdown(&c.body, width, p)
+                    .into_iter()
+                    .map(|(line, _)| line),
+            );
             return;
         }
         for l in c.body.lines() {
@@ -759,8 +783,9 @@ mod tests {
     #[test]
     fn actions_refuse_items_they_dont_fit() {
         let mut i = items();
-        assert!(
-            matches!(press(&mut i, KeyCode::Char('x')), Outcome::Refuse(w) if w.contains("isn't a card"))
+        assert_eq!(
+            press(&mut i, KeyCode::Char('x')),
+            Outcome::Refuse("PR o/r#57: x closes cards and issues, not PRs".into())
         );
         press(&mut i, KeyCode::Down);
         assert!(
@@ -768,9 +793,19 @@ mod tests {
         );
         press(&mut i, KeyCode::Down);
         assert!(
-            matches!(press(&mut i, KeyCode::Char('c')), Outcome::Refuse(w) if w == "#3 isn't a card: c comments on Fizzy cards")
+            matches!(press(&mut i, KeyCode::Char('r')), Outcome::Refuse(w) if w.contains("isn't a PR"))
         );
         assert_eq!(i.mode, Mode::List);
+        let mut commit = Items::new(
+            ("s".into(), "w".into()),
+            "t".into(),
+            "p".into(),
+            vec![link("commit", "github", "abc", "u", "")],
+        )
+        .unwrap();
+        assert!(
+            matches!(press(&mut commit, KeyCode::Char('c')), Outcome::Refuse(w) if w.ends_with("c comments on Fizzy cards and GitHub issues and PRs"))
+        );
         let mut open = Items::new(
             ("s".into(), "w".into()),
             "t".into(),
@@ -788,7 +823,7 @@ mod tests {
     fn close_card_confirms_naming_the_card() {
         let mut i = items();
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close card")]);
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close card 1041?");
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
@@ -805,6 +840,25 @@ mod tests {
                 item: card,
                 body: String::new()
             }
+        );
+    }
+
+    #[test]
+    fn issues_take_comments_and_close_prs_take_comments() {
+        let mut i = items();
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("r", "mark ready")]);
+        press(&mut i, KeyCode::Down);
+        press(&mut i, KeyCode::Down);
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close")]);
+        press(&mut i, KeyCode::Char('x'));
+        assert_eq!(i.question().unwrap(), "Close issue o/r#3?");
+        press(&mut i, KeyCode::Esc);
+        press(&mut i, KeyCode::Char('c'));
+        typed(&mut i, "on it");
+        press(&mut i, KeyCode::Enter);
+        assert_eq!(
+            i.question().unwrap(),
+            "Post a comment on issue o/r#3: “on it”?"
         );
     }
 
@@ -899,6 +953,7 @@ mod tests {
                 at: "2026-11-15T08:00:00Z".into(),
                 body: String::new(),
             }],
+            markdown: false,
         };
         let text: Vec<String> = reader_lines(&t, 80, &Palette::load())
             .iter()
@@ -917,5 +972,33 @@ mod tests {
                 "(empty)",
             ]
         );
+    }
+
+    #[test]
+    fn github_bodies_are_drawn_as_markdown() {
+        let t = Thread {
+            title: "t".into(),
+            post: Comment {
+                body: "## Plan\n\nRun **this**:\n\n- one\n- two".into(),
+                ..Comment::default()
+            },
+            markdown: true,
+            ..Thread::default()
+        };
+        let lines = reader_lines(&t, 80, &Palette::load());
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // No literal `**`; the heading, paragraph and list each drawn.
+        assert!(!text.iter().any(|l| l.contains("**")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("Plan")));
+        assert!(text.iter().any(|l| l.contains("one")));
+        let bold = lines
+            .iter()
+            .flat_map(|l| &l.spans)
+            .find(|s| s.content.contains("this"))
+            .unwrap();
+        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
     }
 }

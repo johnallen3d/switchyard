@@ -70,7 +70,7 @@
 //! several it opens a chooser over them (PRs, cards, then issues).
 //! ctrl-r opens the work items float on the highlighted task's links, even
 //! one: open each, read its description and comments in place, comment
-//! on or close a card, mark a draft PR ready, each
+//! on a card, issue or PR, close a card or issue, mark a draft PR ready, each
 //! mutation behind its own key and a confirmation naming the item (see
 //! items.rs).
 //!
@@ -482,8 +482,8 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⏎ o", "open in the browser"),
                 ("v", "read description and comments here"),
                 ("j k ␣ b g G", "scroll the reader; esc q back"),
-                ("c", "comment on a card (asks first)"),
-                ("x", "close a card (asks first)"),
+                ("c", "comment on a card, issue or PR (asks first)"),
+                ("x", "close a card or issue (asks first)"),
                 ("r", "mark a draft PR ready (asks first)"),
                 ("⏎ y", "confirm; other keys go back"),
                 ("↑↓ j k", "move"),

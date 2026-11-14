@@ -1,5 +1,6 @@
 //! Actions on a task's linked work items, for the tab picker: comment on
-//! a Fizzy card, close one, and mark a draft GitHub PR ready for review.
+//! a Fizzy card or a GitHub issue or PR, close a card or an issue, and mark
+//! a draft PR ready for review. (A PR isn't closed from here.)
 //! (Opening an item in the browser needs only its URL; editing items stays
 //! in the CLIs.)
 //!
@@ -47,6 +48,8 @@ impl Action {
 pub enum Item {
     /// A Fizzy card: its account (from its URL) and number.
     Card { account: String, number: String },
+    /// A GitHub issue: `owner/repo` and its number.
+    Issue { repo: String, number: String },
     /// A GitHub PR: `owner/repo`, its number, and whether it is a draft.
     Pr {
         repo: String,
@@ -57,7 +60,7 @@ pub enum Item {
 
 impl Item {
     /// The item a link names, when actions can be taken on it: a Fizzy card
-    /// whose URL names its account, or a GitHub PR.
+    /// whose URL names its account, or a GitHub issue or PR.
     #[must_use]
     pub fn from_link(
         kind: &str,
@@ -75,6 +78,13 @@ impl Item {
                     number: reference.into(),
                 })
             }
+            ("issue", "github") => {
+                let (repo, number) = reference.split_once('#')?;
+                (repo.contains('/') && digits(number)).then(|| Item::Issue {
+                    repo: repo.into(),
+                    number: number.into(),
+                })
+            }
             ("pr", "github") => {
                 let (repo, number) = reference.split_once('#')?;
                 (repo.contains('/') && digits(number)).then(|| Item::Pr {
@@ -87,22 +97,24 @@ impl Item {
         }
     }
 
-    /// The actions this item takes: comment on and close a card; mark a
-    /// draft PR ready. An open PR has none.
+    /// The actions this item takes: comment on and close a card or an
+    /// issue; comment on a PR, and mark a draft one ready.
     #[must_use]
     pub fn actions(&self) -> Vec<Action> {
         match self {
-            Item::Card { .. } => vec![Action::Comment, Action::Close],
-            Item::Pr { draft: true, .. } => vec![Action::Ready],
-            Item::Pr { .. } => vec![],
+            Item::Card { .. } | Item::Issue { .. } => vec![Action::Comment, Action::Close],
+            Item::Pr { draft: true, .. } => vec![Action::Comment, Action::Ready],
+            Item::Pr { .. } => vec![Action::Comment],
         }
     }
 
-    /// How a confirmation names it: `card 1041`, `PR owner/repo#57`.
+    /// How a confirmation names it: `card 1041`, `issue owner/repo#3`,
+    /// `PR owner/repo#57`.
     #[must_use]
     pub fn name(&self) -> String {
         match self {
             Item::Card { number, .. } => format!("card {number}"),
+            Item::Issue { repo, number } => format!("issue {repo}#{number}"),
             Item::Pr { repo, number, .. } => format!("PR {repo}#{number}"),
         }
     }
@@ -127,11 +139,14 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
             .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
     };
+    let gh = |args: Vec<String>| -> Plan {
+        ("gh", args, vec![("GH_PROMPT_DISABLED".into(), "1".into())])
+    };
+    if action == Action::Comment && body.trim().is_empty() {
+        return Err("an empty comment: nothing to post".into());
+    }
     match (action, item) {
         (Action::Comment, Item::Card { account, number }) => {
-            if body.trim().is_empty() {
-                return Err("an empty comment: nothing to post".into());
-            }
             let args = s(&[
                 "comment", "create", "--card", number, "--body", body, "--json",
             ]);
@@ -146,11 +161,18 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
             s(&["card", "close", number, "--json"]),
             vec![("FIZZY_PROFILE".into(), account.clone())],
         )),
-        (Action::Ready, Item::Pr { repo, number, .. }) => Ok((
-            "gh",
-            s(&["pr", "ready", number, "-R", repo]),
-            vec![("GH_PROMPT_DISABLED".into(), "1".into())],
-        )),
+        (Action::Comment, Item::Issue { repo, number }) => Ok(gh(s(&[
+            "issue", "comment", number, "-R", repo, "--body", body,
+        ]))),
+        (Action::Comment, Item::Pr { repo, number, .. }) => Ok(gh(s(&[
+            "pr", "comment", number, "-R", repo, "--body", body,
+        ]))),
+        (Action::Close, Item::Issue { repo, number }) => {
+            Ok(gh(s(&["issue", "close", number, "-R", repo])))
+        }
+        (Action::Ready, Item::Pr { repo, number, .. }) => {
+            Ok(gh(s(&["pr", "ready", number, "-R", repo])))
+        }
         (action, item) => Err(format!("can't {} {}", action.verb(), item.name())),
     }
 }
@@ -294,11 +316,14 @@ mod tests {
             "draft",
         )
         .unwrap();
-        assert_eq!(draft.actions(), [Action::Ready]);
         assert_eq!(draft.name(), "PR o/r#57");
+        assert_eq!(draft.actions(), [Action::Comment, Action::Ready]);
         let open = Item::from_link("pr", "github", "o/r#57", "u", "open").unwrap();
-        assert_eq!(open.actions(), [] as [Action; 0]);
-        assert_eq!(Item::from_link("issue", "github", "o/r#3", "u", ""), None);
+        assert_eq!(open.actions(), [Action::Comment]);
+        let issue = Item::from_link("issue", "github", "o/r#3", "u", "").unwrap();
+        assert_eq!(issue.actions(), [Action::Comment, Action::Close]);
+        assert_eq!(issue.name(), "issue o/r#3");
+        assert_eq!(Item::from_link("issue", "github", "3", "u", ""), None);
         assert_eq!(Item::from_link("commit", "github", "abc", "u", ""), None);
     }
 
@@ -351,7 +376,23 @@ mod tests {
             )
         );
 
-        // Actions only fit their items.
+        let issue = Item::Issue {
+            repo: "o/r".into(),
+            number: "3".into(),
+        };
+        let (program, args, _) = plan(Action::Close, &issue, "").unwrap();
+        assert_eq!(program, "gh");
+        assert_eq!(args, ["issue", "close", "3", "-R", "o/r"]);
+        let (_, args, _) = plan(Action::Comment, &issue, "on it").unwrap();
+        assert_eq!(
+            args,
+            ["issue", "comment", "3", "-R", "o/r", "--body", "on it"]
+        );
+        let (_, args, _) = plan(Action::Comment, &pr, "lgtm").unwrap();
+        assert_eq!(args, ["pr", "comment", "57", "-R", "o/r", "--body", "lgtm"]);
+        assert!(plan(Action::Comment, &issue, " ").is_err());
+
+        // Actions only fit their items; a PR isn't closed from here.
         assert_eq!(
             plan(Action::Ready, &card(), "").unwrap_err(),
             "can't mark ready card 1041"
