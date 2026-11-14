@@ -353,6 +353,17 @@ const SIDE_ROW_LINES: usize = 2;
 /// Lines of status message the right side's header shows at most.
 const DETAIL_MSG_ROWS: usize = 3;
 
+/// Work item titles the right side's header shows at most, one a line.
+const DETAIL_LINK_ROWS: usize = 3;
+
+/// The widest a work item's title goes in the ctrl-b chooser.
+const CHOOSER_TITLE_MAX: usize = 60;
+
+/// A task's links whose titles the right side's header shows.
+fn titled(links: &[Link]) -> impl Iterator<Item = &Link> {
+    links.iter().filter(|l| !l.title.is_empty()).take(DETAIL_LINK_ROWS)
+}
+
 /// How wide a row's work-item badges may be in a list `width` wide.
 fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
@@ -1790,28 +1801,34 @@ impl App {
         self.draw_snooze(f, main);
     }
 
-    /// Rows the right side's header takes in `width`: the name line, then
-    /// the status message wrapped to at most DETAIL_MSG_ROWS.
+    /// Rows the right side's header takes in `width`: the name line, its
+    /// work items' titles (at most DETAIL_LINK_ROWS), then the status
+    /// message wrapped to at most DETAIL_MSG_ROWS.
     fn detail_rows(&self, width: u16) -> u16 {
         let Some(item) = self.selected_item() else { return 1 };
-        let msg = self.flat(item).msg;
-        if msg.is_empty() {
-            return 1;
+        let t = self.flat(item);
+        let titles = titled(t.links).count() as u16;
+        if t.msg.is_empty() {
+            return 1 + titles;
         }
-        1 + preview::wrap(msg, (width as usize).saturating_sub(2).max(1)).len().min(DETAIL_MSG_ROWS) as u16
+        1 + titles + preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1)).len().min(DETAIL_MSG_ROWS) as u16
     }
 
     /// The right side's header: the highlighted row's status, project and
     /// name, with its work items, host and age on the right (a plain tab's
-    /// folder), then its whole status message.
+    /// folder), then its work items' titles and its whole status message.
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
-        let [line, msg_area] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         let Some(item) = self.selected_item() else {
-            f.render_widget(Line::styled(" Nothing highlighted", Style::new().fg(p.muted)), line);
+            f.render_widget(Line::styled(" Nothing highlighted", Style::new().fg(p.muted)), area);
             return;
         };
         let t = self.flat(item);
+        let titles = titled(t.links).count() as u16;
+        let [line, titles_area, msg_area] =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(titles), Constraint::Min(0)]).areas(area);
+        let lines: Vec<Line> = titled(t.links).map(|l| self.title_line(l, titles_area.width as usize)).collect();
+        f.render_widget(Paragraph::new(lines), titles_area);
         let plain = self.is_plain_tab(item);
         let (glyph, color, verb) = self.status_of(&t, item, tick(self.started));
         let (right, right_w) = match item {
@@ -1851,6 +1868,17 @@ impl App {
         }
         let lines: Vec<Line> = wrapped.into_iter().map(|l| Line::styled(format!("  {l}"), style)).collect();
         f.render_widget(Paragraph::new(lines), msg_area);
+    }
+
+    /// A work item's ref and title, clipped to `width`, for the headers.
+    fn title_line(&self, l: &Link, width: usize) -> Line<'static> {
+        let p = &self.p;
+        let short = l.short();
+        let room = width.saturating_sub(str_width(&short) + 4);
+        Line::from(vec![
+            Span::styled(format!("  {short}  "), Style::new().fg(p.muted)),
+            Span::styled(preview::clip_width(&l.title, room), Style::new().fg(p.subtle)),
+        ])
     }
 
     /// The other views, and Inbox without room for the sidebar: the search
@@ -1940,6 +1968,16 @@ impl App {
                     spans.push(Span::styled(format!("{} ", t.project), Style::new().fg(p.subtle)));
                 }
                 spans.push(Span::styled(format!("{} ", t.name), Style::new().fg(p.text).add_modifier(Modifier::BOLD)));
+                // Its first work item's title, where there is room.
+                let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+                if let Some(l) = titled(t.links).next() {
+                    let short = l.short();
+                    let room = (head.width as usize).saturating_sub(used + str_width(&short) + 6);
+                    if room >= 12 {
+                        spans.push(Span::styled(format!("· {short} "), Style::new().fg(p.muted)));
+                        spans.push(Span::styled(format!("{} ", preview::clip_width(&l.title, room)), Style::new().fg(p.subtle)));
+                    }
+                }
             }
             None => spans.push(Span::styled("Preview ", Style::new().fg(p.muted))),
         }
@@ -2137,14 +2175,17 @@ impl App {
     }
 
     /// The ctrl-b chooser, when open: a small box over the list, one link a
-    /// line with its state and URL.
+    /// line with its state, title and URL.
     fn draw_chooser(&self, f: &mut Frame, area: Rect) {
         let Some(c) = &self.chooser else { return };
         let p = &self.p;
         let want = c
             .links
             .iter()
-            .map(|l| str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(s) + 1) + str_width(&l.url) + 6)
+            .map(|l| {
+                let title = if l.title.is_empty() { 0 } else { str_width(&l.title).min(CHOOSER_TITLE_MAX) + 2 };
+                str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(s) + 1) + title + str_width(&l.url) + 6
+            })
             .max()
             .unwrap_or(0);
         let w = (want as u16 + 2).min(area.width);
@@ -2179,6 +2220,10 @@ impl App {
                     Tone::Ref | Tone::Muted => p.muted,
                 };
                 spans.push(Span::styled(format!(" {text}"), Style::new().fg(fg).bg(bg)));
+            }
+            if !l.title.is_empty() {
+                let title = preview::clip_width(&l.title, CHOOSER_TITLE_MAX);
+                spans.push(Span::styled(format!("  {title}"), Style::new().fg(p.subtle).bg(bg)));
             }
             spans.push(Span::styled(format!("  {url}"), Style::new().fg(p.muted).bg(bg)));
             f.render_widget(Line::from(spans), row);
@@ -3846,7 +3891,7 @@ mod tests {
             app.tasks = parse_tasks(&serde_json::json!([
                 {"session_id":"s", "window_id":"a", "name":"many", "status":"done", "links":[
                     {"kind":"issue","system":"github","ref":"o/r#42","url":"https://i"},
-                    {"kind":"card","system":"fizzy","ref":"1041","url":"https://c"},
+                    {"kind":"card","system":"fizzy","ref":"1041","url":"https://c","title":"Work item titles"},
                     {"kind":"pr","system":"github","ref":"o/r#57","url":"https://p"}]},
                 {"session_id":"s", "window_id":"b", "name":"one", "status":"idle", "links":[
                     {"kind":"card","system":"fizzy","ref":"1042","url":"https://c2"}]}
@@ -3882,10 +3927,17 @@ mod tests {
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         assert!(text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"), "{text}");
+        assert!(text.contains("card 1041  Work item titles  https://c"), "{text}");
         assert!(help_text(&app).starts_with("Link chooser"));
         app.key(plain(KeyCode::Esc));
         assert!(app.chooser.is_none());
         assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
+        // The header shows the titled work item under the name line.
+        assert_eq!(app.detail_rows(80), 2);
+        let mut terminal = Terminal::new(TestBackend::new(80, 2)).unwrap();
+        terminal.draw(|f| app.draw_detail(f, f.area())).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("  card 1041  Work item titles"), "{text}");
     }
 
     /// The keys float's bindings as text: each group's title, then a line

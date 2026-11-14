@@ -467,7 +467,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
         .collect()
 }
 
-fn clip_width(s: &str, room: usize) -> String {
+pub fn clip_width(s: &str, room: usize) -> String {
     if str_width(s) <= room {
         return s.to_string();
     }

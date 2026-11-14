@@ -19,5 +19,6 @@ pub mod rex;
 pub mod server;
 pub mod sessions;
 pub mod tasks;
+pub mod titles;
 pub mod transcript;
 pub mod usage;

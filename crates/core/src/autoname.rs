@@ -62,14 +62,18 @@ pub fn name_work(profile: &str, item: Option<&str>, tracker: &Tracker, prompt: &
 /// or PR's from gh under the project's profile. None for refs no tracker
 /// places (a Linear key, say) or when the lookup fails.
 fn item_title(profile: &str, item: &str, tracker: &Tracker) -> Option<String> {
-    let link = parse_ref(item, tracker)?;
+    link_title(profile, &parse_ref(item, tracker)?, tracker)
+}
+
+/// A link's title (see `item_title`), for `titles`' cache.
+pub(crate) fn link_title(profile: &str, link: &Value, tracker: &Tracker) -> Option<String> {
     let number = link["ref"].as_str()?;
     let title = match link["system"].as_str()? {
         "fizzy" => {
             let mut cmd = Command::new("fizzy");
             cmd.args(["card", "show", number, "--jq", ".data.title"]);
             // The Fizzy CLI's profiles are named after their accounts.
-            if let Some(account) = card_account(&link).or(tracker.fizzy_account.clone()) {
+            if let Some(account) = card_account(link).or(tracker.fizzy_account.clone()) {
                 cmd.env("FIZZY_PROFILE", account);
             }
             bounded_output(&mut cmd, None, TITLE_TIMEOUT)?

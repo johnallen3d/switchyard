@@ -498,6 +498,7 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
         }
     }
     apply_live(&mut tasks, &live);
+    crate::titles::apply(&mut tasks);
     Ok(tasks)
 }
 
@@ -513,6 +514,7 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// (`branch_head`, `branch_merged`, not saved) and their work items as
 /// links (saved): the branch's git config links, and derived ones such as
 /// their PR, with its live `state` and `checks` (not saved); see `links`.
+/// Their links get their work items' `title` too (not saved; see `titles`).
 /// A host that can't be reached leaves its tasks as they were, without
 /// status, and a tab ends its task only when the host lists the task's
 /// session without it. A new task's missing worktree ends it only after
@@ -688,12 +690,23 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     for (i, items) in rebuilt {
         set_derived_items(&mut tasks[i], items);
     }
+    // Every task's work items' titles (see `titles`), added on read below.
+    // Ended tasks' links already name their repo or card account, so they
+    // need no tracker.
+    let asks = tasks.iter().enumerate().flat_map(|(i, task)| {
+        let tracker = plans.iter().find(|(k, _, _)| *k == i).map(|(_, t, _)| t.clone()).unwrap_or_default();
+        let profile = field(task, "profile");
+        let links = task["links"].as_array().cloned().unwrap_or_default();
+        links.into_iter().map(move |link| crate::titles::Ask { profile: profile.clone(), link, tracker: tracker.clone() })
+    });
+    crate::titles::refresh(asks.collect());
     let live_prs: Vec<(String, String, Pr)> = live_prs
         .into_iter()
         .map(|(i, repo, pr)| (format!("{}/{}", field(&tasks[i], "host"), field(&tasks[i], "window_id")), repo, pr))
         .collect();
     let mut tasks = commit_checked_at(&tasks_path(), tasks, stamp)?;
     apply_live(&mut tasks, &live);
+    crate::titles::apply(&mut tasks);
     for task in tasks.iter_mut() {
         let open = task["ended_at"].is_null();
         let key = format!("{}/{}", field(task, "host"), field(task, "window_id"));

@@ -132,6 +132,9 @@ pub struct Link {
     pub url: String,
     pub state: String,
     pub checks: String,
+    /// The work item's title, when its tracker has said (see core's
+    /// `titles`); empty otherwise.
+    pub title: String,
 }
 
 impl Link {
@@ -391,6 +394,7 @@ fn parse_links(v: &serde_json::Value) -> Vec<Link> {
                     url: s(l, "url"),
                     state: s(l, "state"),
                     checks: s(l, "checks"),
+                    title: s(l, "title"),
                 })
                 .collect()
         })
@@ -498,7 +502,7 @@ mod tests {
             reference: reference.into(),
             url: format!("u/{reference}"),
             state: state.into(),
-            checks: String::new(),
+            ..Link::default()
         }
     }
 
