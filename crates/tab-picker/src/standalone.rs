@@ -330,6 +330,18 @@ pub fn resume(p: &Pick) -> Result<(), String> {
     }
 }
 
+/// Start a session from work item `url` in the catalog project at `path`:
+/// auto host, claude, named from the item (see core's `launch`). Ok is
+/// where it opened: host, session and window.
+pub fn launch(path: &str, url: &str) -> Result<(String, String, String), String> {
+    let r = switchyard_core::launch::launch_text("auto", path, "", "claude", "", Some(url), None);
+    match &r {
+        Ok((host, _, window)) => log(&format!("started work on {url} on {host} ({window})")),
+        Err(e) => log(&format!("launch from {url} failed: {e}")),
+    }
+    r
+}
+
 /// Open the pick's task's main work item in the browser here (the
 /// standalone picker runs where John is); Ok is the URL.
 pub fn open_link(p: &Pick) -> Result<String, String> {

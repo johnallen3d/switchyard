@@ -43,6 +43,9 @@
 //!   transcript, live, and the reply box. ctrl-e collapses the sidebar, and
 //!   typing to search brings it back. Narrower, a preview under the list
 //!   shows the transcript, and ctrl-e expands it over the list.
+//! - Work: one catalog project's open cards or issues, the ones an open
+//!   task links to dimmed; Enter starts a session from the highlighted
+//!   item, or goes to its task (see work.rs).
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
@@ -99,6 +102,7 @@ mod scrollback;
 mod snooze;
 mod standalone;
 mod usage;
+mod work;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -210,17 +214,20 @@ enum Tasks {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Inbox,
+    /// One project's open work items, to start a session from (see work.rs).
+    Work,
     Usage,
     Archive,
 }
 
 impl View {
-    /// `inbox` (or the older `all`), `usage` or `archive`.
+    /// `inbox` (or the older `all`), `work`, `usage` or `archive`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "inbox" | "all" => Some(View::Inbox),
             "archive" => Some(View::Archive),
+            "work" => Some(View::Work),
             "usage" => Some(View::Usage),
             _ => None,
         }
@@ -228,11 +235,19 @@ impl View {
 
     fn next(self, back: bool) -> Self {
         match (self, back) {
-            (View::Inbox, false) | (View::Archive, true) => View::Usage,
+            (View::Inbox, false) | (View::Usage, true) => View::Work,
+            (View::Work, false) | (View::Archive, true) => View::Usage,
             (View::Usage, false) | (View::Inbox, true) => View::Archive,
-            (View::Archive, false) | (View::Usage, true) => View::Inbox,
+            (View::Archive, false) | (View::Work, true) => View::Inbox,
         }
     }
+}
+
+/// A session the Work view is starting (see `App::launch`).
+struct Launching {
+    url: String,
+    name: String,
+    rx: Receiver<Result<(String, String, String), String>>,
 }
 
 /// Which profile's rows to show; ctrl-o cycles through them.
@@ -577,6 +592,11 @@ struct App {
     /// live meanwhile; its outcome becomes the note.
     archiving: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     usage: usage::Usage,
+    /// The Work view (see work.rs).
+    work: work::Work,
+    /// Sessions the Work view is starting: the item's URL and name, and
+    /// the launch's outcome to come.
+    launching: Vec<Launching>,
     /// The last pane capture (see preview.rs), shown while its row is
     /// highlighted.
     preview: Option<preview::Preview>,
@@ -655,6 +675,8 @@ impl App {
             feed: None,
             archiving: None,
             usage: usage::Usage::default(),
+            work: work::Work::default(),
+            launching: Vec::new(),
             preview: None,
             asked: None,
             scroll: (0, None),
@@ -799,7 +821,7 @@ impl App {
         if self
             .items
             .as_ref()
-            .is_some_and(|i| self.selected_key().as_ref() != Some(&i.key))
+            .is_some_and(|i| !i.reader_only && self.selected_key().as_ref() != Some(&i.key))
         {
             self.items = None;
         }
@@ -1209,6 +1231,10 @@ impl App {
         let best = match self.view {
             View::Inbox => self.filter_merged(&pattern, filtering),
             View::Archive => self.filter_archive(&pattern, filtering),
+            View::Work => {
+                self.work.refilter(&self.query, &self.tasks);
+                None
+            }
             View::Usage => None,
         };
         let want = if filtering {
@@ -1518,6 +1544,15 @@ impl App {
     }
 
     fn set_view(&mut self, view: View) {
+        // Only a picker with a feed lists anything (tests have none).
+        if view == View::Work && self.view != View::Work && self.feed.is_some() {
+            // On the highlighted row's project, when it's in the catalog.
+            let project = self
+                .selected_item()
+                .map(|i| self.project_of(i).0)
+                .filter(|p| !p.is_empty());
+            self.work.open(project.as_deref());
+        }
         self.armed = Armed::No;
         self.chooser = None;
         self.items = None;
@@ -1947,7 +1982,7 @@ impl App {
         // ctrl-x arms an archive; on a worktree with uncommitted changes, the
         // next ctrl-x (typed by the config when Enter answers `ask`) moves on
         // to "are you sure". Enter and Escape never get here.
-        if matches!(k.code, KeyCode::Char('x') if ctrl) {
+        if matches!(k.code, KeyCode::Char('x') if ctrl) && self.view != View::Work {
             self.arm_archive();
             return;
         }
@@ -2421,7 +2456,11 @@ impl App {
         } else {
             body
         };
-        if self.view == View::Usage {
+        if self.view == View::Work {
+            self.list_area = body;
+            let p = self.p;
+            self.work.draw(f, body, &p, tick(self.started));
+        } else if self.view == View::Usage {
             self.list_area = body;
             let profile = match self.profile {
                 Profile::All => None,
@@ -2870,7 +2909,7 @@ impl App {
         if self.view == View::Archive && self.kept {
             chip("not archived", p.foam);
         }
-        if self.view == View::Usage {
+        if matches!(self.view, View::Usage | View::Work) {
             return spans;
         }
         if let Tasks::Failed = self.tasks_load {
@@ -2893,9 +2932,10 @@ impl App {
             View::Inbox => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
+            View::Work => "Search open work items",
         };
         draw::search(f, p, area, &self.query, placeholder, typing, true);
-        if self.view == View::Usage {
+        if matches!(self.view, View::Usage | View::Work) {
             return;
         }
         let shown = self.rows.iter().filter(|r| selectable(r)).count();
@@ -3086,7 +3126,7 @@ impl App {
         };
         let lines = if self.query.trim().is_empty() {
             match self.view {
-                View::Usage => Vec::new(),
+                View::Usage | View::Work => Vec::new(),
                 View::Inbox => match &self.load {
                     Load::Waiting => vec![spin(), Line::from(""), text("Loading tabs…".into())],
                     Load::Failed(err) => vec![
@@ -3639,7 +3679,32 @@ impl App {
     fn help_sections(&self) -> Vec<help::Section> {
         use help::Section;
         let mut sections = Vec::new();
-        if self.view == View::Usage {
+        if self.view == View::Work {
+            sections.push(Section::new(
+                "Work items",
+                &[
+                    (
+                        "⏎",
+                        "start a session from it (auto host, claude), or go to its task",
+                    ),
+                    ("⌃V", "read its description and comments"),
+                    ("⌃B", "open it in the browser"),
+                    ("⇥", "choose the project"),
+                    ("⌃R", "list the project again"),
+                ],
+            ));
+            sections.push(Section::new(
+                "Moving and searching",
+                &[
+                    ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
+                    ("PgUp PgDn", "page"),
+                    ("Home End", "first, last"),
+                    ("type", "search titles and numbers"),
+                    ("⌃W ⌥⌫", "delete a word"),
+                    ("⌃U", "clear the search"),
+                ],
+            ));
+        } else if self.view == View::Usage {
             sections.push(Section::new(
                 "Usage",
                 &[
@@ -3797,7 +3862,7 @@ impl App {
                     "hide archived tasks"
                 },
             )),
-            View::Usage => {}
+            View::Usage | View::Work => {}
         }
         views.push(("? F1", "these keys"));
         help::Section::new("Views", &views)
@@ -3964,6 +4029,15 @@ impl App {
         spans
     }
 
+    /// Footer key hints (key, what it does), as many as fit.
+    fn draw_hints(&self, f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
+        let p = &self.p;
+        let hints: Vec<(&str, &str, Color)> =
+            hints.iter().map(|&(k, d)| (k, d, p.subtle)).collect();
+        let (spans, _) = draw::hints(p, &hints, area.width as usize);
+        f.render_widget(Line::from(spans), area);
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         if let Some((msg, failed)) = &self.note {
@@ -4002,14 +4076,7 @@ impl App {
             return;
         }
         if let Some(i) = &self.items {
-            let hints: Vec<(&str, &str, Color)> = i
-                .hints()
-                .into_iter()
-                .map(|(k, d)| (k, d, p.subtle))
-                .collect();
-            let (spans, _) = draw::hints(p, &hints, area.width as usize);
-            f.render_widget(Line::from(spans), area);
-            return;
+            return self.draw_hints(f, area, &i.hints());
         }
         if self.chooser.is_some() {
             let (spans, _) = draw::hints(
@@ -4040,6 +4107,9 @@ impl App {
             ]);
             f.render_widget(line, area);
             return;
+        }
+        if self.view == View::Work {
+            return self.draw_hints(f, area, &self.work.hints());
         }
         let hints: &[(&str, &str, Color)] = if self.quick {
             &[("⏎", "jump", p.subtle), ("esc", "close", p.subtle)]
@@ -4134,6 +4204,11 @@ impl App {
         if self.items.is_some() {
             self.run_items_key(k, term);
             return true;
+        }
+        // The Work view's own keys (see work.rs); the rest search and
+        // switch views as in the others.
+        if self.view == View::Work {
+            return self.run_work_key(k, term);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
@@ -4230,6 +4305,116 @@ impl App {
         self.note = Some(note);
         self.refetch();
         true
+    }
+
+    /// Run what a key in the Work view asks for: start a session from the
+    /// highlighted item, show its task, read it or open it; false for the
+    /// keys it leaves to the list.
+    fn run_work_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        let page = usize::try_from(self.page()).unwrap_or(1);
+        match self.work.key(k, page) {
+            work::Outcome::Pass => return false,
+            work::Outcome::Stay => {}
+            work::Outcome::Refuse(why) => self.note = Some((why, true)),
+            work::Outcome::Open(url) => {
+                self.note = Some(match standalone::open_url(&url) {
+                    Ok(()) => (format!("opened {url}"), false),
+                    Err(e) => (e, true),
+                });
+            }
+            work::Outcome::Go(to) => {
+                let pick = standalone::Pick {
+                    action: "go".into(),
+                    host: to.host,
+                    session: to.session,
+                    window: to.window,
+                };
+                self.note = Some(match standalone::go(&pick) {
+                    Ok(()) => (format!("showed {}", to.label), false),
+                    Err(e) => (e, true),
+                });
+            }
+            work::Outcome::Read(link) => {
+                let profile = self
+                    .work
+                    .current()
+                    .map(|p| p.profile.clone())
+                    .unwrap_or_default();
+                let label = self
+                    .work
+                    .current()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                self.busy(term, format!("Reading {}…", link.short()));
+                let thread = standalone::item_thread(&link, &profile);
+                match (
+                    thread,
+                    items::Items::new(Default::default(), label, profile, vec![link]),
+                ) {
+                    (Ok(thread), Some(mut i)) => {
+                        self.note = None;
+                        i.reader_only = true;
+                        i.show(thread);
+                        self.items = Some(i);
+                    }
+                    (Err(e), _) => self.note = Some((e, true)),
+                    (Ok(_), None) => {}
+                }
+            }
+            work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
+        }
+        true
+    }
+
+    /// Start a session from a work item in the background: auto host,
+    /// claude, named from the item (see core's `launch`). The registry and
+    /// Rex hosts it needs are reached from the Mac.
+    fn launch(&mut self, path: String, url: String, name: String) {
+        if !cfg!(target_os = "macos") {
+            self.note = Some(("sessions start from the Mac's picker".into(), true));
+            return;
+        }
+        self.note = Some((format!("Starting {name}…"), false));
+        self.work.starting.insert(url.clone());
+        let (tx, rx) = chan::channel();
+        let item = url.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(standalone::launch(&path, &item));
+        });
+        self.launching.push(Launching { url, name, rx });
+    }
+
+    /// Finished listings and launches from the Work view.
+    fn take_work(&mut self) {
+        if self.work.receive() && self.view == View::Work {
+            self.refilter();
+        }
+        let mut done = Vec::new();
+        self.launching.retain(|l| match l.rx.try_recv() {
+            Ok(r) => {
+                done.push((l.url.clone(), l.name.clone(), Some(r)));
+                false
+            }
+            Err(TryRecvError::Empty) => true,
+            Err(TryRecvError::Disconnected) => {
+                done.push((l.url.clone(), l.name.clone(), None));
+                false
+            }
+        });
+        for (url, name, r) in done {
+            self.note = Some(match r {
+                Some(Ok((host, _, _))) => (format!("started {name} on {host}"), false),
+                Some(Err(e)) => {
+                    self.work.starting.remove(&url);
+                    (format!("{name}: {e}"), true)
+                }
+                None => {
+                    self.work.starting.remove(&url);
+                    (format!("{name}: the launch went away"), true)
+                }
+            });
+            self.refetch();
+        }
     }
 
     /// Run what the work items float asks for on `k`: open a URL, or take
@@ -4461,6 +4646,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.take_fetched();
         app.take_archived();
+        app.take_work();
         app.ask_preview();
         app.sync_commands();
         let before = app.now;
@@ -4476,6 +4662,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         term.draw(|f| app.draw(f))?;
         app.save_reply();
         let animate = app.archiving.is_some()
+            || !app.launching.is_empty()
+            || (app.view == View::Work && app.work.loading())
             || matches!(app.load, Load::Waiting)
             || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
             || app.tabs.iter().any(|t| t.state == State::Working);
@@ -4553,6 +4741,9 @@ fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
     app.excluded = resolve_folders(&app.excluded_raw);
     if let Some(c) = current {
         app.set_current(c);
+    }
+    if view == View::Work {
+        app.work.open(None);
     }
     app.start_feed();
     picker(app)
@@ -4661,11 +4852,15 @@ mod tests {
         app.key(plain(KeyCode::Char('l')));
         assert!(app.view == View::Inbox && app.query == "hl");
         app.key(ctrl('l'));
+        assert!(app.view == View::Work);
+        app.key(ctrl('l'));
         assert!(app.view == View::Usage);
         app.key(ctrl('l'));
         assert!(app.view == View::Archive);
         app.key(ctrl('h'));
         assert!(app.view == View::Usage);
+        app.key(ctrl('h'));
+        assert!(app.view == View::Work);
         app.key(ctrl('h'));
         assert!(app.view == View::Inbox);
     }
@@ -5777,7 +5972,7 @@ mod tests {
     fn usage_is_integrated_read_only_and_handles_narrow_frames() {
         let mut app = inbox();
         let mut view = View::Inbox;
-        for expected in [View::Usage, View::Archive, View::Inbox] {
+        for expected in [View::Work, View::Usage, View::Archive, View::Inbox] {
             view = view.next(false);
             assert!(view == expected);
             assert!(view.next(true).next(false) == view);

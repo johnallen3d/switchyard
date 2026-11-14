@@ -127,7 +127,7 @@ pub fn failed_hosts(input: &str) -> Vec<String> {
 
 /// A work item linked to a task (see core's `links`), with a PR's live
 /// state and checks when known.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Link {
     pub kind: String,
     pub system: String,

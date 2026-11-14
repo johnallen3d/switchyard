@@ -76,6 +76,9 @@ pub struct Items {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub mode: Mode,
+    /// Opened on one item to read it (the Work view's ctrl-v): leaving the
+    /// reader closes the float rather than showing its list.
+    pub reader_only: bool,
     /// The reader's last drawn height and furthest scroll, for its keys.
     page: Cell<(usize, usize)>,
 }
@@ -141,6 +144,7 @@ impl Items {
             entries,
             selected: 0,
             mode: Mode::List,
+            reader_only: false,
             page: Cell::new((0, 0)),
         })
     }
@@ -150,6 +154,15 @@ impl Items {
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
+        let out = self.mode_key(k);
+        // Back from reading one item: nothing else to show.
+        if self.reader_only && self.mode == Mode::List && out == Outcome::Stay {
+            return Outcome::Close;
+        }
+        out
+    }
+
+    fn mode_key(&mut self, k: KeyEvent) -> Outcome {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         match std::mem::replace(&mut self.mode, Mode::List) {

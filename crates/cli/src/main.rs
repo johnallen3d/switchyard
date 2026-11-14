@@ -26,7 +26,7 @@ const VERSION: &str = match option_env!("SWITCHYARD_BUILD_VERSION") {
 };
 
 const USAGE: &str =
-    "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW] [--quick]
+    "usage: switchyard [--view inbox|work|usage|archive] [--current SESSION/WINDOW] [--quick]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -39,7 +39,8 @@ tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-b (open the task's work item), ctrl-r (work item actions: open,
 comment on or close a Fizzy card, mark a draft PR ready, each confirmed
 first), ctrl-t (pin) and ctrl-s (snooze), staying open until its tab
-is closed. ctrl-h and ctrl-l cycle the views: Inbox, Usage, Archive.
+is closed. ctrl-h and ctrl-l cycle the views: Inbox, Work (one
+project's open cards or issues, to start a session from), Usage, Archive.
 --current highlights that tab (cmd+i and cmd+k pass the tab they were
 pressed on). --quick is cmd+k's float: Inbox's list alone, where
 Enter jumps to the highlighted tab and quits, and Escape quits. new opens the

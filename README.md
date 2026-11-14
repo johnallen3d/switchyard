@@ -3,12 +3,12 @@
 Rex pickers for switching tabs, managing agent tasks, and starting sessions.
 One Rust binary (`switchyard`), Lua actions, and a Home Manager module.
 
-| Key           | Opens                                    |
-| ------------- | ---------------------------------------- |
-| `cmd+i`       | Tab picker tab: Inbox, Usage, Archive    |
-| `cmd+k`       | Quick jump float: tabs and agents        |
-| `cmd+shift+n` | New session                              |
-| `ctrl+cmd+n`  | New agent task in a project worktree     |
+| Key           | Opens                                       |
+| ------------- | ------------------------------------------- |
+| `cmd+i`       | Tab picker tab: Inbox, Work, Usage, Archive |
+| `cmd+k`       | Quick jump float: tabs and agents           |
+| `cmd+shift+n` | New session                                 |
+| `ctrl+cmd+n`  | New agent task in a project worktree        |
 
 cmd+i shows the tab picker's own tab, the bare `switchyard` picker in the
 Mac's `agents` session. Without one it opens the tab there, creating the
