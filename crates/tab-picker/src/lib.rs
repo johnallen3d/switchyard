@@ -2432,7 +2432,8 @@ impl App {
 
     /// Inbox's list as the sidebar: each tab or task on two lines (see
     /// draw_side_row) under the one-line status headings, scrolled to keep
-    /// the highlighted row, and the heading over it, in view.
+    /// the highlighted row, and the heading over it, in view. When it all
+    /// fits, the Snoozed group sits at the bottom, the free space above it.
     fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
         let h = area.height as usize;
         let heights: Vec<usize> = self.rows.iter().map(Self::side_height).collect();
@@ -2451,8 +2452,14 @@ impl App {
         let overflow = total > h && h > 0;
         let list = Rect { width: area.width.saturating_sub(if overflow { 2 } else { 0 }), ..area };
         let tick = tick(self.started);
+        // The free space goes above Snoozed, unless it leads the list.
+        let slack = if overflow { 0 } else { h.saturating_sub(total) };
+        let snoozed = self.rows.iter().position(|r| *r == Item::Status("snoozed")).filter(|&i| i > 0);
         let mut y = 0;
         for (i, row) in self.rows.iter().enumerate().skip(self.offset) {
+            if Some(i) == snoozed {
+                y += slack;
+            }
             if y >= h {
                 break;
             }
