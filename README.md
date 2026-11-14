@@ -83,6 +83,19 @@ For now, use the standalone binaries to try changes before pushing.
 A push alone does not update the installed tools. Settings-only changes need
 only a system-config deployment; README changes need no activation.
 
+## Changelog
+
+The changelog is the repository's
+[GitHub Releases](https://github.com/johnallen3d/switchyard/releases). After CI
+passes on a push to `main`, the Release workflow publishes a release named like
+`switchyard --version` names the build, such as `2026-11-14 17:22 UTC
+(4e909b4)`, and tagged `2026.11.14-1722-4e909b4`. Its notes are
+[git-cliff](https://git-cliff.org)'s list of changes since the previous
+release, generated from the conventional commit subjects (see `cliff.toml`):
+`feat` is Added, `fix` is Fixed, and `refactor` and `perf` are Changed. Other
+types are omitted. Nothing is generated or committed locally; write a clear
+conventional subject and the release notes follow.
+
 ## Configuration
 
 Home Manager's `programs.switchyard` installs the binaries, writes

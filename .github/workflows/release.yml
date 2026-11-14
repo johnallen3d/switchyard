@@ -1,0 +1,84 @@
+name: Release
+
+# Publish a GitHub Release for each green CI build of a push to main. The
+# release is named like `switchyard --version` names the build ("2026-11-14
+# 17:22 UTC (4e909b4)": the commit's UTC date and short hash, as flake.nix
+# computes it) and its notes are git-cliff's changes since the previous
+# release (see cliff.toml). The first release covers the whole history.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Releases run one at a time, oldest first, so each one's notes start where
+# the last one's ended.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the build
+        id: build
+        run: |
+          stamp=$(TZ=UTC git show -s --format=%cd --date=format-local:'%Y %m %d %H %M' HEAD)
+          read -r y m d hh mm <<<"$stamp"
+          short=$(git rev-parse --short=7 HEAD)
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "tag=$y.$m.$d-$hh$mm-$short"
+            echo "title=$y-$m-$d $hh:$mm UTC ($short)"
+          } >>"$GITHUB_OUTPUT"
+      - name: Skip builds a release already covers
+        id: check
+        env:
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          # A rerun of an older CI run must not release a commit that an
+          # existing release (its own or a newer one's) already includes.
+          covered=$(git tag --contains HEAD --list '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*')
+          if [ -n "$covered" ]; then
+            echo "Already released in: $covered"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
+        if: steps.check.outputs.skip == 'false'
+      - name: Write release notes
+        if: steps.check.outputs.skip == 'false'
+        env:
+          TAG: ${{ steps.build.outputs.tag }}
+        run: |
+          nix run --no-update-lock-file --inputs-from . nixpkgs#git-cliff -- \
+            --unreleased --tag "$TAG" --strip all --output "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: Publish release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.build.outputs.sha }}
+          TAG: ${{ steps.build.outputs.tag }}
+          TITLE: ${{ steps.build.outputs.title }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SHA" \
+            --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.md"
