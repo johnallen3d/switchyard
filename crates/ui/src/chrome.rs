@@ -9,6 +9,11 @@
 //! picker's base colour behind the box. The box's straight edges stay ▄ and
 //! ▀ half blocks, so its top and bottom sit half a cell in, as the corner
 //! images do.
+//!
+//! The terminal scales each image to its cell, and smoothing at the image's
+//! border lets the cell's background bleed in as a faint line. The images
+//! are drawn at several times the reported cell size so that, scaled down,
+//! the bleed is less than a pixel.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -35,6 +40,9 @@ const PLACEHOLDER: &str = "\u{10EEEE}\u{0305}\u{0305}";
 /// programs in the terminal might use ("RS").
 const FIRST_ID: u32 = 0x52_53_00;
 
+/// How many times the reported cell size the corner images are drawn at.
+const SUPERSAMPLE: u32 = 4;
+
 /// Base64 characters per transmission chunk, the protocol's maximum.
 const CHUNK: usize = 4096;
 
@@ -55,6 +63,7 @@ impl Corners {
     pub fn new(cell: CellSize, fills: &[Color], out: &mut impl Write) -> io::Result<Self> {
         let mut ids = HashMap::new();
         let mut id = FIRST_ID;
+        let cell = CellSize { width: cell.width * SUPERSAMPLE, height: cell.height * SUPERSAMPLE };
         for &fill in fills {
             let Some(rgb) = rgb(fill) else { continue };
             for corner in CORNERS {
