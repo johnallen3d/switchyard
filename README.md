@@ -139,14 +139,21 @@ are refused.
 | `message_task` | Type text into the agent's tab (not while it's blocked) |
 | `stop_task`    | Archive (refused with uncommitted changes)              |
 
-Tasks are named `PROJECT/NAME`. An agent that passes its own `REX_SESSION`
-and `REX_BLOCK` to `spawn_task` (`parent_session`, `parent_block`) gets the
-new task recorded as its child (`parent_window` in the registry), and the
-tab picker's Inbox shows it nested under the agent's row. To add it to Claude Code on another host:
+Tasks are named `PROJECT/NAME`. `spawn_task` records the new task as the
+calling agent's child (`parent_window` in the registry), and the tab
+picker's Inbox shows it nested under the agent's row, when it knows the
+agent's Rex location: from the `parent_session` and `parent_block`
+arguments, else from the `X-Rex-Session` and `X-Rex-Block` request headers.
+A client config sends the headers from the agent's environment, so agents
+needn't pass anything. Empty values and unexpanded placeholders (such as a
+literal `${REX_BLOCK}`) are ignored. To add it to Claude Code on another
+host:
 
 ```bash
 claude mcp add --transport http switchyard \
-  http://johns-macbook-pro.taila14c2.ts.net:7391/mcp
+  http://johns-macbook-pro.taila14c2.ts.net:7391/mcp \
+  --header 'X-Rex-Session: ${REX_SESSION}' \
+  --header 'X-Rex-Block: ${REX_BLOCK}'
 ```
 
 `[mcp]` in the config sets `enabled` (default: on macOS only) and `port`.

@@ -14,6 +14,13 @@
 //! (`transcript`), `message_task` (`actions::message`) and `stop_task` (a
 //! plain archive, never force-archive). They name a task `PROJECT/NAME`, as
 //! the pickers label it.
+//!
+//! `spawn_task` nests the new task under the caller's tab when it knows
+//! where the caller is: from its `parent_session` / `parent_block`
+//! arguments, else from the request's `X-Rex-Session` / `X-Rex-Block`
+//! headers, which a client config fills from `REX_SESSION` / `REX_BLOCK`.
+//! Empty values and unexpanded placeholders (`${REX_BLOCK}`) count as
+//! absent.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -158,8 +165,23 @@ struct Request {
     method: String,
     path: String,
     origin: Option<String>,
+    caller: Caller,
     close: bool,
     body: Vec<u8>,
+}
+
+/// Where the caller says it is in Rex, from its request headers.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct Caller {
+    session: Option<String>,
+    block: Option<String>,
+}
+
+/// A Rex location value, or None for an empty one or a placeholder the
+/// client didn't expand (`${REX_BLOCK}` when the variable is unset).
+fn location(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty() && !value.starts_with('$')).then_some(value)
 }
 
 /// Read the next request; None when the client has hung up between
@@ -205,6 +227,8 @@ fn read_request(reader: &mut impl BufRead) -> io::Result<Option<Result<Request, 
             },
             "transfer-encoding" => return Ok(Some(Err(411))),
             "origin" => req.origin = Some(value.to_string()),
+            "x-rex-session" => req.caller.session = location(value).map(String::from),
+            "x-rex-block" => req.caller.block = location(value).map(String::from),
             "connection" => match value.to_ascii_lowercase().as_str() {
                 "close" => req.close = true,
                 "keep-alive" => req.close = false,
@@ -304,8 +328,11 @@ fn route(req: &Request, endpoint: &Endpoint) -> (u16, Option<Value>) {
     };
     // Batches came and went between revisions; answering them costs little.
     let replies: Vec<Value> = match &message {
-        Value::Array(batch) => batch.iter().filter_map(|m| handle(m, endpoint)).collect(),
-        m => handle(m, endpoint).into_iter().collect(),
+        Value::Array(batch) => batch
+            .iter()
+            .filter_map(|m| handle(m, &req.caller, endpoint))
+            .collect(),
+        m => handle(m, &req.caller, endpoint).into_iter().collect(),
     };
     match (message.is_array(), replies.len()) {
         (_, 0) => (202, None),
@@ -319,7 +346,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 }
 
 /// The reply to one JSON-RPC message; None for notifications and responses.
-fn handle(message: &Value, endpoint: &Endpoint) -> Option<Value> {
+fn handle(message: &Value, caller: &Caller, endpoint: &Endpoint) -> Option<Value> {
     let Some(method) = message["method"].as_str() else {
         // A response to something this server never asks, or junk.
         return message
@@ -349,7 +376,7 @@ fn handle(message: &Value, endpoint: &Endpoint) -> Option<Value> {
             let name = params["name"].as_str().unwrap_or("");
             let args = &params["arguments"];
             let started = Instant::now();
-            let outcome = call(name, args, endpoint);
+            let outcome = call(name, args, caller, endpoint);
             let took = started.elapsed().as_millis();
             match &outcome {
                 Ok(_) => crate::log(&format!("mcp: {name} ok ({took} ms)")),
@@ -453,12 +480,12 @@ fn label(task: &Value) -> String {
     )
 }
 
-fn call(name: &str, args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
     match name {
         "list_tasks" => {
             Ok(json!({ "tasks": open_tasks(endpoint)?.iter().map(summary).collect::<Vec<_>>() }))
         }
-        "spawn_task" => spawn(args, endpoint),
+        "spawn_task" => spawn(args, caller, endpoint),
         "read_task" => {
             let task = find_open(str_arg(args, "task")?, endpoint)?;
             let wanted = args["entries"]
@@ -589,15 +616,33 @@ fn block_window(hosts: &[String], block: &str) -> Option<String> {
             .ok()
             .filter(|o| o.status.success())?;
         let info: Value = serde_json::from_slice(&out.stdout).ok()?;
-        info["block"]["window_id"].as_str().filter(|w| !w.is_empty()).map(String::from)
+        info["block"]["window_id"]
+            .as_str()
+            .filter(|w| !w.is_empty())
+            .map(String::from)
     })
+}
+
+/// The spawner's Rex session and block: each from the tool arguments
+/// when given, else from the request headers.
+fn parent_location<'a>(args: &'a Value, caller: &'a Caller) -> (Option<&'a str>, Option<&'a str>) {
+    let pick = |key: &str, header: &'a Option<String>| {
+        args[key]
+            .as_str()
+            .and_then(location)
+            .or_else(|| header.as_deref().and_then(location))
+    };
+    (
+        pick("parent_session", &caller.session),
+        pick("parent_block", &caller.block),
+    )
 }
 
 fn normalise(name: &str) -> String {
     name.chars().filter_map(name_char).collect()
 }
 
-fn spawn(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
     let project = str_arg(args, "project")?;
     // As the picker takes typed names: `MCP smoke test` is `mcp-smoke-test`.
     let name = normalise(str_arg(args, "name")?);
@@ -614,8 +659,12 @@ fn spawn(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
         .ok_or_else(|| format!("{project} is not a catalog project"))?;
     // The spawner's tab, so the picker can nest the task under it. Not
     // finding it only costs the nesting.
-    let parent = opt_arg(args, "parent_block").and_then(|block| {
-        let hosts = endpoint.shared.lock().hosts_for_session(opt_arg(args, "parent_session").unwrap_or(""));
+    let (parent_session, parent_block) = parent_location(args, caller);
+    let parent = parent_block.and_then(|block| {
+        let hosts = endpoint
+            .shared
+            .lock()
+            .hosts_for_session(parent_session.unwrap_or(""));
         let window = block_window(&hosts, block);
         if window.is_none() {
             crate::log(&format!("mcp: spawn_task: no Rex server has block {block}"));
@@ -702,6 +751,57 @@ mod tests {
             411
         );
         assert!(read_request(&mut Cursor::new("")).unwrap().is_none());
+    }
+
+    #[test]
+    fn reads_the_callers_rex_location_headers() {
+        let raw = "POST /mcp HTTP/1.1\r\nx-rex-session: session:a\r\nX-REX-BLOCK:  block:b \r\nContent-Length: 0\r\n\r\n";
+        let req = read_request(&mut Cursor::new(raw))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            req.caller,
+            Caller {
+                session: Some("session:a".into()),
+                block: Some("block:b".into())
+            }
+        );
+        // An unset variable leaves an empty value or the literal placeholder.
+        let raw = "POST /mcp HTTP/1.1\r\nX-Rex-Session: ${REX_SESSION}\r\nX-Rex-Block: \r\n\r\n";
+        let req = read_request(&mut Cursor::new(raw))
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.caller, Caller::default());
+    }
+
+    #[test]
+    fn spawn_arguments_override_the_headers() {
+        let caller = Caller {
+            session: Some("session:h".into()),
+            block: Some("block:h".into()),
+        };
+        let none = json!({});
+        assert_eq!(
+            parent_location(&none, &caller),
+            (Some("session:h"), Some("block:h"))
+        );
+        let both = json!({ "parent_session": "session:a", "parent_block": "block:a" });
+        assert_eq!(
+            parent_location(&both, &caller),
+            (Some("session:a"), Some("block:a"))
+        );
+        let blank = json!({ "parent_session": " ", "parent_block": "${REX_BLOCK}" });
+        assert_eq!(
+            parent_location(&blank, &caller),
+            (Some("session:h"), Some("block:h"))
+        );
+        assert_eq!(
+            parent_location(&both, &Caller::default()),
+            (Some("session:a"), Some("block:a"))
+        );
+        assert_eq!(parent_location(&none, &Caller::default()), (None, None));
     }
 
     #[test]
