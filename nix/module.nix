@@ -18,19 +18,24 @@
   home = config.home.homeDirectory;
   # Services start with a bare PATH. The server runs rex (often outside Nix,
   # in ~/.local/bin), ssh, git, bash and hostname, so give it the same
-  # lookup as the Rex Lua's util.user_path, then the system's.
-  servicePath = lib.concatStringsSep ":" (lib.unique [
-    "${home}/.local/bin"
-    "${config.home.profileDirectory}/bin"
-    "/etc/profiles/per-user/${config.home.username}/bin"
-    "/run/current-system/sw/bin"
-    "/nix/var/nix/profiles/default/bin"
-    "/usr/local/bin"
-    "/usr/bin"
-    "/bin"
-    "/usr/sbin"
-    "/sbin"
-  ]);
+  # lookup as the Rex Lua's util.user_path, then the system's. On the Mac
+  # that includes Homebrew's, where mise lives: work-profile gh lookups
+  # (titles, PR state) load amfaro's env through it.
+  servicePath = lib.concatStringsSep ":" (lib.unique ([
+      "${home}/.local/bin"
+      "${config.home.profileDirectory}/bin"
+      "/etc/profiles/per-user/${config.home.username}/bin"
+      "/run/current-system/sw/bin"
+      "/nix/var/nix/profiles/default/bin"
+    ]
+    ++ lib.optional isDarwin "/opt/homebrew/bin"
+    ++ [
+      "/usr/local/bin"
+      "/usr/bin"
+      "/bin"
+      "/usr/sbin"
+      "/sbin"
+    ]));
   # The task registry and config.toml, where the shells would find them.
   serviceEnv = {
     PATH = servicePath;
@@ -113,17 +118,21 @@ in {
             type = toml.type;
             default = {};
             example = {
-              quotas = [{
-                path = "~/.cache/llm-usage/work.json";
-                account = "work";
-                profile = "work";
-              }];
-              sessions = [{
-                harness = "pi";
-                path = "~/.config/pi-work/sessions";
-                account = "work";
-                profile = "work";
-              }];
+              quotas = [
+                {
+                  path = "~/.cache/llm-usage/work.json";
+                  account = "work";
+                  profile = "work";
+                }
+              ];
+              sessions = [
+                {
+                  harness = "pi";
+                  path = "~/.config/pi-work/sessions";
+                  account = "work";
+                  profile = "work";
+                }
+              ];
             };
             description = ''
               Read-only Usage tab inputs, configured separately on each host.
