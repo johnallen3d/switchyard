@@ -145,8 +145,9 @@ pub fn record_task(task: serde_json::Value) -> Result<(), String> {
 
 /// Every window on a host's Rex server with its most urgent agent status, as
 /// `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` lines (the last three empty
-/// for a tab with no status). A tab shows its most urgent pane, as in the
-/// tab picker (cmd+i, cmd+k).
+/// for a tab with no status), after an `S<TAB>SESSION_ID` line for each
+/// session whose windows were read. A tab shows its most urgent pane, as in
+/// the tab picker (cmd+i, cmd+k).
 const WINDOWS_SCRIPT: &str = r#"
 local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
@@ -156,6 +157,7 @@ local list = rex.call("session.list")
 for _, s in ipairs((list and list.sessions) or {}) do
   rex.session.attach{ session_id = s.session_id }
   local view = rex.session.view{ session_id = s.session_id }
+  if view and view.windows then lines[#lines + 1] = "S\t" .. s.session_id end
   for _, w in ipairs((view and view.windows) or {}) do
     local best
     for _, l in ipairs(w.layers or {}) do
@@ -237,8 +239,46 @@ pub fn rfc3339_secs(s: &str) -> Option<u64> {
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - offset).ok()
 }
 
-fn host_windows(host: &str) -> Option<HashMap<String, TabStatus>> {
+/// What a host's Rex server listed: the sessions whose windows it read, and
+/// those windows' live status by window ID.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HostWindows {
+    pub sessions: std::collections::HashSet<String>,
+    pub tabs: HashMap<String, TabStatus>,
+}
+
+impl HostWindows {
+    /// Parse WINDOWS_SCRIPT's reply.
+    pub fn parse(reply: &str) -> Self {
+        let mut listed = Self::default();
+        for line in reply.lines().filter(|l| !l.is_empty()) {
+            if let Some(session) = line.strip_prefix("S\t") {
+                listed.sessions.insert(session.to_string());
+            } else {
+                let (id, status) = parse_window_status(line);
+                listed.tabs.insert(id, status);
+            }
+        }
+        listed
+    }
+
+    /// Whether this listing shows the task's tab closed: only when it read
+    /// the task's own session and that session has no such window. A
+    /// session it didn't list (another or a fresh server, as a temporary
+    /// `XDG_RUNTIME_DIR` reaches, or a failed view) proves nothing.
+    pub fn tab_gone(&self, session_id: &str, window_id: &str) -> bool {
+        !session_id.is_empty()
+            && !window_id.is_empty()
+            && self.sessions.contains(session_id)
+            && !self.tabs.contains_key(window_id)
+    }
+}
+
+/// `host`'s Rex windows, or None when they can't be listed. It never starts
+/// a server: a missing one is unreachable, not empty.
+fn host_windows(host: &str) -> Option<HostWindows> {
     let mut cmd = Command::new("rex");
+    cmd.arg("--autostart=false");
     if host != local_label() {
         cmd.args(["-S", host]);
     }
@@ -249,7 +289,7 @@ fn host_windows(host: &str) -> Option<HashMap<String, TabStatus>> {
         .ok()
         .filter(|o| o.status.success())?;
     let reply: String = serde_json::from_slice(&out.stdout).ok()?;
-    Some(reply.lines().map(parse_window_status).collect())
+    Some(HostWindows::parse(&reply))
 }
 
 /// Bash that sets `head` (the full branch head), `baseref` (the default
@@ -454,7 +494,7 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut live: HashMap<String, TabStatus> = HashMap::new();
     for handle in checks {
         if let Ok(Some(windows)) = handle.join() {
-            live.extend(windows);
+            live.extend(windows.tabs);
         }
     }
     apply_live(&mut tasks, &live);
@@ -474,7 +514,8 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// links (saved): the branch's git config links, and derived ones such as
 /// their PR, with its live `state` and `checks` (not saved); see `links`.
 /// A host that can't be reached leaves its tasks as they were, without
-/// status. A new task's missing worktree ends it only after
+/// status, and a tab ends its task only when the host lists the task's
+/// session without it. A new task's missing worktree ends it only after
 /// `LAUNCH_GRACE_SECS`, since `task run` may still be creating it.
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
@@ -513,6 +554,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         for (i, task) in mine.enumerate() {
             let window_id = task["window_id"].as_str().unwrap_or("").to_string();
             let window_id = window_id.as_str();
+            let session_id = field(task, "session_id");
             let key = format!("{host}/{window_id}");
             let worktree = worktrees.as_ref().and_then(|w| w.get(i).cloned().flatten());
             if !task["ended_at"].is_null() {
@@ -526,9 +568,10 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
                 }
                 continue;
             }
-            let tab = windows.as_ref().map(|w| w.get(window_id));
-            let tab_gone = matches!(tab, Some(None));
-            if let Some(Some(status)) = tab {
+            // Ended only when Rex positively lists the task's session
+            // without its tab; see `HostWindows::tab_gone`.
+            let tab_gone = windows.as_ref().is_some_and(|w| w.tab_gone(&session_id, window_id));
+            if let Some(status) = windows.as_ref().and_then(|w| w.tabs.get(window_id)) {
                 live.insert(window_id.to_string(), status.clone());
             }
             match worktree {
@@ -743,6 +786,28 @@ mod tests {
         assert_eq!(tasks[1]["pinned"], true);
         // Gone from the later read (pruned or replaced): left alone.
         assert_eq!(tasks[2]["pinned"], true);
+    }
+
+    #[test]
+    fn only_a_listed_session_without_the_tab_closes_it() {
+        let listed = HostWindows::parse("S\tsession:a\nwindow:1\tworking\t\tbusy\n");
+        assert_eq!(listed.tabs["window:1"].state, "working");
+        assert!(!listed.tab_gone("session:a", "window:1"));
+        assert!(listed.tab_gone("session:a", "window:2"));
+        // A session the server didn't list proves nothing.
+        assert!(!listed.tab_gone("session:b", "window:2"));
+        assert!(!listed.tab_gone("", "window:2"));
+        assert!(!listed.tab_gone("session:a", ""));
+    }
+
+    #[test]
+    fn a_fresh_or_wrong_server_closes_no_tabs() {
+        // As a temporary XDG_RUNTIME_DIR's autostarted server answers:
+        // nothing, or only its own new session.
+        for reply in ["", "S\tsession:fresh\n", "S\tsession:fresh\nwindow:9\t\t\t\n"] {
+            let listed = HostWindows::parse(reply);
+            assert!(!listed.tab_gone("session:01a1db3e", "window:01a1db57"), "{reply:?}");
+        }
     }
 
     #[test]

@@ -187,6 +187,9 @@ pub fn supervise(shared: Arc<Shared>, host: String, events: Events, stop: Arc<At
 /// Run one watcher until it exits (Err with why) or `stop` is set (Ok).
 fn run(shared: &Arc<Shared>, host: &str, script: &str, events: &Events, stop: &AtomicBool) -> Result<(), String> {
     let mut cmd = Command::new("rex");
+    // Never start a server: a missing one (as a temporary XDG_RUNTIME_DIR
+    // points at) is unreachable, not empty.
+    cmd.arg("--autostart=false");
     if host != "local" {
         cmd.args(["-S", host]);
     }
