@@ -3,11 +3,13 @@
 //! one object per spawned task (see `launch` for the fields). Rex has no
 //! custom metadata for sessions or tabs, so this is what maps a tab back to
 //! its project, branch and worktree. Ended tasks are kept a while so the
-//! inbox can show recent finishes, then pruned.
+//! inbox can show recent finishes, then pruned. Saves are atomic and synced
+//! to disk, and keep the previous file as `spawn-tasks.json.bak`, which
+//! readers fall back to when the registry won't parse (see `read_at`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -15,7 +17,7 @@ use crate::links::{
     Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo, parse_ref, pr_key, set_agent_links,
     set_derived_items, set_derived_pr, tracker_or_fizzy, FIZZY_BOARD_SH,
 };
-use crate::rex::{home, host_bash, local_label, now};
+use crate::rex::{home, host_bash, local_label, log, now};
 use crate::sessions::newest_session;
 
 /// How long ended tasks stay in the registry, and so can be resumed from the
@@ -45,23 +47,92 @@ pub fn load_tasks() -> Result<Vec<serde_json::Value>, String> {
 }
 
 fn load_at(path: &Path) -> Result<Vec<serde_json::Value>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
+    read_at(path).map(|(tasks, _)| tasks)
+}
+
+/// Log a registry storage problem to the spawn log, but not from tests,
+/// which damage registries on purpose.
+fn note(line: &str) {
+    if !cfg!(test) {
+        log(line);
     }
 }
 
-/// Replace the registry atomically, so a reader never sees half a file.
-fn save_at(path: &Path, tasks: &[serde_json::Value]) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+/// The last good registry: `save_at` links the file it replaces here, so it
+/// is at most one save behind.
+fn backup_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+/// The registry at `path`, and whether it came from the backup because the
+/// file itself won't parse. Saves are atomic, so a reader never sees half a
+/// file; one that won't parse was damaged, such as by a crash before the
+/// disk had it. A missing file is an empty registry, not a reason to bring
+/// back the backup.
+fn read_at(path: &Path) -> Result<(Vec<serde_json::Value>, bool), String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((Vec::new(), false)),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let err = match serde_json::from_slice(&bytes) {
+        Ok(tasks) => return Ok((tasks, false)),
+        Err(e) => format!("{}: {e}", path.display()),
+    };
+    let backup = backup_path(path);
+    match std::fs::read(&backup).ok().and_then(|b| serde_json::from_slice(&b).ok()) {
+        Some(tasks) => {
+            note(&format!("{err}; using {}", backup.display()));
+            Ok((tasks, true))
+        }
+        None => Err(err),
     }
+}
+
+/// Replace the registry atomically, so a reader never sees half a file, and
+/// durably: the new file and its directory entry reach the disk before this
+/// returns, so a crash leaves the old registry or the new one, not an empty
+/// file. With `backup`, the file replaced becomes the backup; pass false when
+/// it is the damaged file being repaired, so the good backup stays.
+fn save_at(path: &Path, tasks: &[serde_json::Value], backup: bool) -> Result<(), String> {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let tmp = path.with_extension(format!("json.{}", std::process::id()));
     let mut text = serde_json::to_string_pretty(tasks).map_err(|e| e.to_string())?;
     text.push('\n');
-    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    write_synced(&tmp, text.as_bytes()).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("{}: {e}", tmp.display())
+    })?;
+    if backup && let Err(e) = link_over(path, &backup_path(path)) {
+        // The save matters more than its backup.
+        if e.kind() != io::ErrorKind::NotFound {
+            note(&format!("could not back up {}: {e}", path.display()));
+        }
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Some filesystems refuse to sync a directory; the rename has happened.
+    let _ = File::open(dir).and_then(|d| d.sync_all());
+    Ok(())
+}
+
+/// Write `bytes` to a new file at `path` and flush it to the disk.
+fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).write(true).truncate(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Make `to` another name for `from`'s file, replacing what `to` was in one
+/// step, so `to` is always whole. A hard link: `from` is about to be renamed
+/// over, and the link keeps its old contents without copying them.
+fn link_over(from: &Path, to: &Path) -> io::Result<()> {
+    let tmp = to.with_extension(format!("tmp.{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::hard_link(from, &tmp)?;
+    std::fs::rename(&tmp, to).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Read-modify-write the registry under its lock. `f` changes the tasks it
@@ -75,11 +146,19 @@ pub fn update_tasks<T>(f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, 
 
 fn update_at<T>(path: &Path, f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>) -> Result<T, String> {
     let _lock = lock_at(path)?;
-    let mut tasks = load_at(path)?;
+    let (mut tasks, recovered) = read_at(path)?;
     let before = serde_json::to_string(&tasks).map_err(|e| e.to_string())?;
     let out = f(&mut tasks)?;
-    if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
-        save_at(path, &tasks)?;
+    if recovered {
+        // Repair the damaged file from the backup, keeping it to look at.
+        let damaged = path.with_extension(format!("json.damaged.{}", now()));
+        match link_over(path, &damaged) {
+            Ok(()) => note(&format!("restored {} from its backup; the damaged file is {}", path.display(), damaged.display())),
+            Err(e) => note(&format!("restored {} from its backup; could not keep the damaged file: {e}", path.display())),
+        }
+        save_at(path, &tasks, false)?;
+    } else if serde_json::to_string(&tasks).map_err(|e| e.to_string())? != before {
+        save_at(path, &tasks, true)?;
     }
     Ok(out)
 }
@@ -102,9 +181,21 @@ fn lock_at(path: &Path) -> Result<File, String> {
     Ok(file)
 }
 
+/// What identifies a task: its host, window and start, as JSON so that
+/// values of different types can't collide.
+fn task_key(task: &serde_json::Value) -> String {
+    format!("{}\t{}\t{}", task["host"], task["window_id"], task["created_at"])
+}
+
 /// Whether `a` and `b` are the same task: the same host, window and start.
 fn same_task(a: &serde_json::Value, b: &serde_json::Value) -> bool {
-    ["host", "window_id", "created_at"].iter().all(|k| a[*k] == b[*k])
+    task_key(a) == task_key(b)
+}
+
+/// `tasks` by `task_key`, for merges that would otherwise scan the registry
+/// once per task.
+fn by_key(tasks: &[serde_json::Value]) -> HashMap<String, &serde_json::Value> {
+    tasks.iter().map(|t| (task_key(t), t)).collect()
 }
 
 /// Save `task` as the registry's record of its task, leaving the other
@@ -118,7 +209,7 @@ pub fn save_record(task: &serde_json::Value) -> Result<(), String> {
 fn save_record_at(path: &Path, task: &serde_json::Value) -> Result<(), String> {
     update_at(path, |tasks| {
         let mut one = [task.clone()];
-        carry_inbox_state(&mut one, tasks.as_slice());
+        carry_inbox_state(&mut one, &by_key(tasks));
         let [record] = one;
         match tasks.iter().position(|t| same_task(t, task)) {
             Some(i) => tasks[i] = record,
@@ -743,16 +834,17 @@ const INBOX_KEYS: [&str; 2] = ["pinned", "snoozed_until"];
 fn commit_checked_at(path: &Path, checked: Vec<serde_json::Value>, stamp: u64) -> Result<Vec<serde_json::Value>, String> {
     update_at(path, |fresh| {
         let mut merged = checked;
-        carry_inbox_state(&mut merged, fresh.as_slice());
+        let newer = by_key(fresh);
+        carry_inbox_state(&mut merged, &newer);
         for task in merged.iter_mut() {
-            let Some(newer) = fresh.iter().find(|f| same_task(f, task)) else { continue };
+            let Some(newer) = newer.get(&task_key(task)) else { continue };
             if !newer["ended_at"].is_null() {
                 task["ended_at"] = newer["ended_at"].clone();
                 task["ended_reason"] = newer["ended_reason"].clone();
             }
         }
-        let launched: Vec<serde_json::Value> =
-            fresh.iter().filter(|f| !merged.iter().any(|t| same_task(t, f))).cloned().collect();
+        let checked: HashSet<String> = merged.iter().map(task_key).collect();
+        let launched: Vec<serde_json::Value> = fresh.iter().filter(|f| !checked.contains(&task_key(f))).cloned().collect();
         merged.extend(launched);
         // Pruned after the merge, so an old ended task the registry still
         // has doesn't come back once this check has dropped it.
@@ -762,11 +854,11 @@ fn commit_checked_at(path: &Path, checked: Vec<serde_json::Value>, stamp: u64) -
     })
 }
 
-/// Copy each task's inbox state from `fresh`, a later read of the registry,
-/// matching tasks by host, window and start.
-fn carry_inbox_state(tasks: &mut [serde_json::Value], fresh: &[serde_json::Value]) {
+/// Copy each task's inbox state from `fresh`, a later read of the registry
+/// (see `by_key`), matching tasks by host, window and start.
+fn carry_inbox_state(tasks: &mut [serde_json::Value], fresh: &HashMap<String, &serde_json::Value>) {
     for task in tasks.iter_mut() {
-        let Some(newer) = fresh.iter().find(|f| same_task(f, task)) else { continue };
+        let Some(newer) = fresh.get(&task_key(task)) else { continue };
         let Some(obj) = task.as_object_mut() else { continue };
         for key in INBOX_KEYS {
             match newer.get(key) {
@@ -793,7 +885,7 @@ mod tests {
             serde_json::json!({"host":"h", "window_id":"a", "created_at":1}),
             serde_json::json!({"host":"h", "window_id":"b", "created_at":2, "pinned":true, "snoozed_until":9}),
         ];
-        carry_inbox_state(&mut tasks, &fresh);
+        carry_inbox_state(&mut tasks, &by_key(&fresh));
         assert_eq!(tasks[0], serde_json::json!({"host":"h", "window_id":"a", "created_at":1, "status":"x"}));
         assert_eq!(tasks[1]["snoozed_until"], 9);
         assert_eq!(tasks[1]["pinned"], true);
@@ -848,7 +940,7 @@ mod tests {
     #[test]
     fn a_check_that_an_archive_overtook_keeps_the_archive_end() {
         let path = registry("overtaken");
-        save_at(&path, &[task("a", 1)]).unwrap();
+        save_at(&path, &[task("a", 1)], true).unwrap();
         // The check reads the registry, and while it checks the worktree the
         // archive ends the task and saves that.
         let mut checked = load_at(&path).unwrap();
@@ -871,7 +963,7 @@ mod tests {
     #[test]
     fn an_archive_saved_after_a_check_still_wins() {
         let path = registry("archive-last");
-        save_at(&path, &[task("a", 1)]).unwrap();
+        save_at(&path, &[task("a", 1)], true).unwrap();
         let mut archived = load_at(&path).unwrap();
         archived[0]["ended_at"] = 50.into();
         archived[0]["ended_reason"] = "archived".into();
@@ -887,7 +979,7 @@ mod tests {
     #[test]
     fn a_task_launched_during_a_check_survives_it() {
         let path = registry("launched-check");
-        save_at(&path, &[task("a", 1)]).unwrap();
+        save_at(&path, &[task("a", 1)], true).unwrap();
         let checked = load_at(&path).unwrap();
         update_at(&path, |tasks| {
             tasks.push(task("b", 2));
@@ -903,7 +995,7 @@ mod tests {
     #[test]
     fn an_archive_keeps_what_was_saved_while_it_ran() {
         let path = registry("archive-meanwhile");
-        save_at(&path, &[task("a", 1)]).unwrap();
+        save_at(&path, &[task("a", 1)], true).unwrap();
         // The archive's copy of its task, read before it ran.
         let mut archived = load_at(&path).unwrap()[0].clone();
         // Meanwhile: a launch, and a pin on the archived task.
@@ -926,7 +1018,7 @@ mod tests {
     #[test]
     fn concurrent_writers_lose_no_updates() {
         let path = registry("writers");
-        save_at(&path, &[]).unwrap();
+        save_at(&path, &[], true).unwrap();
         let writers: Vec<_> = (0..4)
             .map(|w| {
                 let path = path.clone();
@@ -945,6 +1037,95 @@ mod tests {
             writer.join().unwrap();
         }
         assert_eq!(load_at(&path).unwrap().len(), 40);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn each_save_backs_up_the_registry_it_replaces() {
+        let path = registry("backup");
+        save_at(&path, &[task("a", 1)], true).unwrap();
+        assert!(!backup_path(&path).exists());
+        record_at(&path, task("b", 2));
+        let backup = std::fs::read(backup_path(&path)).unwrap();
+        let backup: Vec<serde_json::Value> = serde_json::from_slice(&backup).unwrap();
+        assert_eq!(backup, [task("a", 1)]);
+        assert_eq!(load_at(&path).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    fn record_at(path: &Path, t: serde_json::Value) {
+        update_at(path, |tasks| {
+            tasks.push(t);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_damaged_registry_is_read_from_its_backup_and_repaired() {
+        let path = registry("damaged");
+        save_at(&path, &[task("a", 1)], true).unwrap();
+        record_at(&path, task("b", 2));
+        // A crash left the registry truncated.
+        std::fs::write(&path, "[{\"host\":").unwrap();
+        // Readers get the backup, one save behind.
+        assert_eq!(load_at(&path).unwrap(), [task("a", 1)]);
+        // The next writer repairs the file from it and keeps the damaged one.
+        record_at(&path, task("c", 3));
+        assert_eq!(load_at(&path).unwrap(), [task("a", 1), task("c", 3)]);
+        assert!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).is_ok());
+        let dir = path.parent().unwrap();
+        let damaged: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("spawn-tasks.json.damaged."))
+            .collect();
+        assert_eq!(damaged.len(), 1);
+        assert_eq!(std::fs::read_to_string(damaged[0].path()).unwrap(), "[{\"host\":");
+        // The repair didn't back up the damaged file over the good backup.
+        let backup: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(backup_path(&path)).unwrap()).unwrap();
+        assert_eq!(backup, [task("a", 1)]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_damaged_registry_without_a_backup_is_an_error() {
+        let path = registry("no-backup");
+        std::fs::write(&path, "").unwrap();
+        assert!(load_at(&path).is_err());
+        assert!(update_at(&path, |_| Ok(())).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_missing_registry_is_empty_even_with_a_backup() {
+        let path = registry("missing");
+        save_at(&path, &[task("a", 1)], true).unwrap();
+        record_at(&path, task("b", 2));
+        std::fs::remove_file(&path).unwrap();
+        assert!(load_at(&path).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn a_check_merge_matches_tasks_by_host_window_and_start() {
+        let path = registry("keys");
+        // Same window, different start: a different task.
+        save_at(&path, &[task("a", 1), task("a", 2)], true).unwrap();
+        let mut checked = load_at(&path).unwrap();
+        update_at(&path, |tasks| {
+            tasks[1]["pinned"] = true.into();
+            tasks[1]["ended_at"] = 5.into();
+            tasks[1]["ended_reason"] = "archived".into();
+            Ok(())
+        })
+        .unwrap();
+        checked.truncate(1);
+        let merged = commit_checked_at(&path, checked, 10).unwrap();
+        assert_eq!(merged.len(), 2);
+        assert!(merged[0].get("pinned").is_none() && merged[0]["ended_at"].is_null());
+        assert_eq!((merged[1]["pinned"].clone(), merged[1]["ended_reason"].clone()), (true.into(), "archived".into()));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
