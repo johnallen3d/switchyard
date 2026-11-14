@@ -7,6 +7,13 @@
 //! `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`, the
 //! fields hex encoded; PROMPT_REF is empty when only a work item follows.
 //!
+//! In a catalog project, the work item field lists the project's open cards
+//! or issues (core's `items`) once it has focus: ↓ or typing shows the
+//! matches over the list, Enter (the float's action or standalone) takes
+//! the highlighted one's URL as the work item, Tab fills the field with it
+//! and Escape hides them. Nothing listed, as when the CLI is missing or
+//! unauthenticated, leaves the field free-form.
+//!
 //! ctrl-o chooses the host (the folders' host, and where agent work runs,
 //! where `auto` picks the least busy); ctrl-s switches the kind. A session
 //! on `auto` runs on the host the float is on.
@@ -27,11 +34,13 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
 use switchyard_core::commands::{self, SlashCommand};
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
+use switchyard_core::items::{self, OpenItem, OpenItems};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
 use switchyard_core::prompts::prune_prompts;
@@ -83,6 +92,8 @@ const PROMPT_MAX_ROWS: u16 = 6;
 /// The prompt box around its text: soft top and bottom edges, a gap and the
 /// chip row.
 const PROMPT_CHROME_ROWS: u16 = prompt_box::CHROME_ROWS;
+/// The most rows the work item menu shows at once.
+const ITEM_MENU_ROWS: u16 = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Item {
@@ -181,6 +192,20 @@ struct App {
     commands_rx: Receiver<(Probe, Result<Vec<SlashCommand>, String>)>,
     /// Where the prompt box was last drawn, and within what, for its menu.
     prompt_card: Option<(Rect, Rect)>,
+    /// Open work items by catalog project path, None while being listed
+    /// (empty when they couldn't be), and the listings' results.
+    open_items: HashMap<String, Option<OpenItems>>,
+    items_tx: Sender<(String, Result<OpenItems, String>)>,
+    items_rx: Receiver<(String, Result<OpenItems, String>)>,
+    /// The work item menu: whether it was asked for (↓ or typing in the
+    /// field), its matches for the field's text (item index and title hits),
+    /// the highlighted match, the text they are for, and where the form's
+    /// fields were drawn, within what.
+    item_menu: bool,
+    item_hits: Vec<(usize, Vec<usize>)>,
+    item_selected: usize,
+    item_query: Option<String>,
+    item_card: Option<(Rect, Rect)>,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -228,6 +253,7 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         let (commands_tx, commands_rx) = mpsc::channel();
+        let (items_tx, items_rx) = mpsc::channel();
         let mut app = App {
             p: Palette::load(),
             kind,
@@ -252,6 +278,14 @@ impl App {
             commands_tx,
             commands_rx,
             prompt_card: None,
+            open_items: HashMap::new(),
+            items_tx,
+            items_rx,
+            item_menu: false,
+            item_hits: Vec::new(),
+            item_selected: 0,
+            item_query: None,
+            item_card: None,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -355,6 +389,122 @@ impl App {
             }
             None => self.prompt.set_commands(Vec::new(), anywhere),
         }
+    }
+
+    /// List the highlighted project's open work items in the background
+    /// once the work item field has focus there, and match them against the
+    /// field's text.
+    fn sync_items(&mut self) {
+        while let Ok((path, got)) = self.items_rx.try_recv() {
+            let list = got.unwrap_or_else(|e| {
+                log(&format!("open work items for {path}: {e}"));
+                OpenItems { noun: "items", items: Vec::new() }
+            });
+            self.open_items.insert(path, Some(list));
+        }
+        if self.kind == Kind::Agent && self.focus == Focus::Item
+            && let Some(project) = self.project()
+            && !self.open_items.contains_key(&project.path)
+        {
+            let project = project.clone();
+            self.open_items.insert(project.path.clone(), None);
+            let tx = self.items_tx.clone();
+            std::thread::spawn(move || {
+                let got = items::list_open(&project);
+                let _ = tx.send((project.path, got));
+            });
+        }
+        self.match_items();
+    }
+
+    /// Whether the highlighted project's open items are being listed, for
+    /// the spinner.
+    fn listing_items(&self) -> bool {
+        self.project().is_some_and(|p| matches!(self.open_items.get(&p.path), Some(None)))
+    }
+
+    /// The highlighted project's open work items, once listed.
+    fn item_list(&self) -> Option<&OpenItems> {
+        self.project().and_then(|p| self.open_items.get(&p.path)).and_then(Option::as_ref)
+    }
+
+    /// Match the listed items against the field's text, by number and title:
+    /// all of them, in order, for an empty field; none once the field holds
+    /// one of their URLs (chosen) or the menu isn't showing.
+    fn match_items(&mut self) {
+        let query = self.typed_item();
+        if self.item_query.as_ref() != Some(&query) {
+            self.item_selected = 0;
+            self.item_query = Some(query.clone());
+        }
+        // Leaving the field closes the menu, so tabbing back through it
+        // never picks an item by accident.
+        if self.focus != Focus::Item {
+            self.item_menu = false;
+        }
+        let showing = self.kind == Kind::Agent && self.focus == Focus::Item && self.item_menu;
+        let list = match self.item_list() {
+            Some(list) if showing && !list.items.iter().any(|i| i.url == query) => list.items.clone(),
+            _ => Vec::new(),
+        };
+        let query = query.trim_start_matches('#');
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut scored: Vec<(u32, usize, Vec<usize>)> = Vec::new();
+        for (i, item) in list.iter().enumerate() {
+            if query.is_empty() {
+                scored.push((0, i, Vec::new()));
+                continue;
+            }
+            let number = item.number.to_string();
+            if let Some((score, mut hits)) = score_fields(&mut self.matcher, &pattern, &[&number, &item.title]) {
+                scored.push((score, i, hits.swap_remove(1)));
+            }
+        }
+        // Best first, in listed order among equals.
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        self.item_hits = scored.into_iter().map(|(_, i, h)| (i, h)).collect();
+        self.item_selected = self.item_selected.min(self.item_hits.len().saturating_sub(1));
+    }
+
+    /// The item highlighted in the showing work item menu.
+    fn chosen_item(&self) -> Option<&OpenItem> {
+        let (i, _) = self.item_hits.get(self.item_selected)?;
+        self.item_list()?.items.get(*i)
+    }
+
+    /// Take a key for the work item menu: ↓ opens it when there are items;
+    /// while it shows, ↑/↓ (ctrl-p/n) move, Tab fills the field with the
+    /// highlighted item and Escape hides it. False for any other key.
+    fn item_menu_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        self.match_items();
+        if self.item_hits.is_empty() {
+            if k.code != KeyCode::Down || self.item_menu {
+                return false;
+            }
+            self.item_menu = true;
+            self.match_items();
+            return !self.item_hits.is_empty();
+        }
+        let n = self.item_hits.len() as isize;
+        let step = |at: usize, by: isize| (at as isize + by).rem_euclid(n) as usize;
+        match k.code {
+            KeyCode::Down => self.item_selected = step(self.item_selected, 1),
+            KeyCode::Char('n') if ctrl => self.item_selected = step(self.item_selected, 1),
+            KeyCode::Up => self.item_selected = step(self.item_selected, -1),
+            KeyCode::Char('p') if ctrl => self.item_selected = step(self.item_selected, -1),
+            KeyCode::Tab => {
+                if let Some(url) = self.chosen_item().map(|i| i.url.clone()) {
+                    self.item.clear();
+                    self.item.insert_str(&url);
+                }
+                self.item_menu = false;
+            }
+            KeyCode::Esc => self.item_menu = false,
+            _ => return false,
+        }
+        self.match_items();
+        true
     }
 
     fn receive(&mut self) {
@@ -506,8 +656,17 @@ impl App {
     }
 
     /// The work item as typed.
-    fn item_text(&self) -> String {
+    fn typed_item(&self) -> String {
         self.item.lines().concat().trim().to_string()
+    }
+
+    /// The work item as sent: the work item menu's highlighted item while
+    /// it shows (so Enter takes it), else the field's text.
+    fn item_text(&self) -> String {
+        match self.chosen_item() {
+            Some(item) => item.url.clone(),
+            None => self.typed_item(),
+        }
     }
 
     /// The prompt as sent: surrounding blank space dropped.
@@ -604,6 +763,7 @@ impl App {
             }
             Focus::Item => {
                 self.item.insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
+                self.item_menu = true;
             }
             Focus::Prompt => self.prompt.paste(&text),
         }
@@ -627,6 +787,9 @@ impl App {
         }
         // The slash-command menu, while open, has Tab, the arrows and Escape.
         if self.focus == Focus::Prompt && self.prompt.menu_key(k) {
+            return true;
+        }
+        if self.focus == Focus::Item && self.item_menu_key(k) {
             return true;
         }
         let page = (self.list_area.height as isize - 2).max(1);
@@ -722,9 +885,14 @@ impl App {
                     KeyCode::Char(c) if !ctrl && !alt => {
                         if item_char(c) {
                             self.item.insert_char(c);
+                            self.item_menu = true;
                         }
                     }
-                    _ => text_key(&mut self.item, k),
+                    _ => {
+                        let before = self.typed_item();
+                        text_key(&mut self.item, k);
+                        self.item_menu |= self.typed_item() != before;
+                    }
                 },
                 // Rex's mode takes plain Enter to act, so a newline is alt- or
                 // shift-Enter (or arrives in a paste).
@@ -744,6 +912,7 @@ impl App {
         let title = if agent { "Agent work" } else { "New session" };
         let inner = draw::frame(f, &self.p, title, Vec::new(), "", Margin::new(2, 1));
         self.prompt_card = None;
+        self.item_card = None;
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
         let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
@@ -774,6 +943,51 @@ impl App {
         self.draw_footer(f, footer);
         if let Some((card, bounds)) = self.prompt_card {
             self.prompt.draw_menu(f, &self.p, card, bounds);
+        }
+        if let Some((fields, bounds)) = self.item_card {
+            self.draw_item_menu(f, fields, bounds);
+        }
+    }
+
+    /// The work item menu, over the list (`bounds`) up to the form's fields:
+    /// the matching items, number and title, the highlighted one picked out.
+    fn draw_item_menu(&self, f: &mut Frame, fields: Rect, bounds: Rect) {
+        let Some(list) = self.item_list() else { return };
+        let p = &self.p;
+        let room = fields.y.saturating_sub(bounds.y);
+        let rows = (self.item_hits.len() as u16).min(ITEM_MENU_ROWS).min(room);
+        if rows == 0 || fields.width < 12 {
+            return;
+        }
+        let area = Rect { x: fields.x, y: fields.y - rows, width: fields.width, height: rows };
+        f.render_widget(Clear, area);
+        let first = self.item_selected.saturating_sub(rows as usize - 1);
+        let w = area.width as usize;
+        let number_w = self.item_hits.iter().map(|(i, _)| list.items[*i].number.to_string().len()).max().unwrap_or(1) + 1;
+        for (n, (i, hits)) in self.item_hits.iter().enumerate().skip(first).take(rows as usize) {
+            let item = &list.items[*i];
+            let selected = n == self.item_selected;
+            let bg = if selected { p.hl_med } else { p.surface };
+            let mut spans = vec![
+                Span::styled(if selected { "▎" } else { " " }, Style::new().fg(p.iris).bg(bg)),
+                Span::styled(" ", Style::new().bg(bg)),
+                Span::styled(
+                    format!("{:>number_w$}  ", format!("#{}", item.number)),
+                    Style::new().fg(if selected { p.foam } else { p.subtle }).bg(bg),
+                ),
+            ];
+            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+            let plain = if selected {
+                Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(p.text).bg(bg)
+            };
+            let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+            spans.extend(highlight(&item.title, hits, w.saturating_sub(used + 1), false, plain, hl));
+            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+            spans.push(Span::styled(" ".repeat(w.saturating_sub(used)), Style::new().bg(bg)));
+            let row = Rect { y: area.y + (n - first) as u16, height: 1, ..area };
+            f.render_widget(Line::from(spans), row);
         }
     }
 
@@ -1003,6 +1217,9 @@ impl App {
         }
 
         self.draw_item(f, item_row, label_w);
+        if self.focus == Focus::Item && !self.item_hits.is_empty() {
+            self.item_card = Some((Rect { height: 2, ..name_row }, self.list_area));
+        }
         self.draw_prompt(f, card, prompt_rows);
     }
 
@@ -1017,24 +1234,36 @@ impl App {
                 if focused { Style::new().fg(p.iris).add_modifier(Modifier::BOLD) } else { Style::new().fg(p.subtle) },
             ),
         ];
-        let item = self.item_text();
+        let item = self.typed_item();
         if item.is_empty() && !focused {
             spans.push(Span::styled("—", Style::new().fg(p.muted)));
         }
         f.render_widget(Line::from(spans), row);
-        // The catalog says whether a project is work; a folder's profile is
+        // While focused: the open items being listed, how many there are to
+        // choose from, or the highlighted one Enter would take. Otherwise,
+        // the catalog says whether a project is work; a folder's profile is
         // settled at launch, so it gets no hint.
-        let hint = match self.project() {
-            Some(project) if !item.is_empty() && project.profile == "work" => {
-                Some(format!("→ {WORK_ITEM_COMMAND} "))
+        let listing = self.listing_items();
+        let open = self.item_list().map_or(0, |l| l.items.len());
+        let (hints, color): (Vec<String>, Color) = match (self.chosen_item(), self.project()) {
+            (Some(chosen), _) => (vec![format!("⏎ #{} · ⇥ fill ", chosen.number), format!("#{} ", chosen.number)], p.foam),
+            (None, _) if focused && listing => {
+                (vec![format!("{} listing open items ", SPINNER[tick(self.started) % SPINNER.len()])], p.muted)
             }
-            _ => None,
+            (None, _) if focused && item.is_empty() && open > 0 => {
+                let noun = self.item_list().map_or("items", |l| l.noun);
+                (vec![format!("↓ {open} open {noun} "), "↓ ".into()], p.muted)
+            }
+            (None, Some(project)) if !item.is_empty() && project.profile == "work" => {
+                (vec![format!("→ {WORK_ITEM_COMMAND} ")], p.gold)
+            }
+            _ => (Vec::new(), p.muted),
         };
         let room = (row.width as usize).saturating_sub(label_w as usize + str_width(&item) + 2);
-        let hint = hint.filter(|h| str_width(h) <= room);
+        let hint = hints.into_iter().find(|h| str_width(h) <= room);
         let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
         if let Some(hint) = hint {
-            f.render_widget(Line::from(Span::styled(hint, Style::new().fg(p.gold))).right_aligned(), row);
+            f.render_widget(Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(), row);
         }
         if focused || !item.is_empty() {
             let field = Rect { x: row.x + label_w, width: row.width.saturating_sub(label_w + hint_w), ..row };
@@ -1163,6 +1392,7 @@ impl App {
                     let next = match self.focus {
                         Focus::Project => "name",
                         Focus::Name => "work item",
+                        Focus::Item if !self.item_hits.is_empty() => "fill item",
                         Focus::Item => "prompt",
                         Focus::Prompt => "project",
                     };
@@ -1191,7 +1421,8 @@ impl App {
                 }
             }
             hints.push(("⌃O", "host", p.subtle));
-            hints.push(("esc", "close", p.subtle));
+            let esc = if self.focus == Focus::Item && !self.item_hits.is_empty() { "hide items" } else { "close" };
+            hints.push(("esc", esc, p.subtle));
         }
         let (spans, _) = draw::hints(p, &hints, area.width as usize);
         f.render_widget(Line::from(spans), area);
@@ -1347,9 +1578,10 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
         app.receive();
         app.sync_commands();
+        app.sync_items();
         term.draw(|f| app.draw(f))?;
         app.report()?;
-        let wait = if app.waiting() { Duration::from_millis(90) } else { Duration::from_millis(250) };
+        let wait = if app.waiting() || app.listing_items() { Duration::from_millis(90) } else { Duration::from_millis(250) };
         if !event::poll(wait)? {
             continue;
         }
@@ -1488,6 +1720,71 @@ mod tests {
         assert_eq!(app.pick(), format!("{base}/{}/{}", hex(&app.prompt.file_ref), hex("#42")));
         app.name.insert_str("typed");
         assert_eq!(app.names_from(), None, "a typed name wins");
+    }
+
+    fn key(app: &mut App, code: KeyCode) {
+        app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        app.sync_items();
+    }
+
+    #[test]
+    fn open_items_are_chosen_from_the_work_item_field() {
+        let mut app = app();
+        app.query = "repo".into();
+        app.refilter();
+        app.name.clear();
+        // Listed already, so no CLI runs.
+        let card = |n: u64, title: &str| OpenItem { number: n, title: title.into(), url: format!("https://app.fizzy.do/1/cards/{n}") };
+        app.open_items.insert("~/catalog/repo".into(), Some(OpenItems {
+            noun: "cards", items: vec![card(1158, "Spawn from a card"), card(1157, "Work item titles")],
+        }));
+        app.focus = Focus::Item;
+        app.sync_items();
+        assert!(app.item_hits.is_empty(), "the menu waits to be asked for");
+        assert!(app.pick().is_empty(), "nothing chosen, nothing to name it from");
+        key(&mut app, KeyCode::Down);
+        assert_eq!(app.item_hits.len(), 2);
+        key(&mut app, KeyCode::Down);
+        let base = format!("agent/{}/{}//{}", hex(AUTO), hex("~/catalog/repo"), HARNESSES[0]);
+        let url = "https://app.fizzy.do/1/cards/1157";
+        assert_eq!(app.pick(), format!("{base}//{}", hex(url)), "Enter takes the highlighted item");
+        // Typing filters by title or number; Tab fills the field and closes.
+        app.paste("spawn");
+        app.sync_items();
+        assert_eq!(app.item_hits.iter().map(|h| h.0).collect::<Vec<_>>(), [0]);
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.typed_item(), "https://app.fizzy.do/1/cards/1158");
+        assert!(app.item_hits.is_empty() && app.focus == Focus::Item);
+        // A ref matching nothing is sent as typed.
+        app.item.clear();
+        app.paste("ENG-12");
+        app.sync_items();
+        assert!(app.item_hits.is_empty());
+        assert_eq!(app.item_text(), "ENG-12");
+        // Escape hides the menu rather than closing; leaving the field closes it.
+        app.item.clear();
+        key(&mut app, KeyCode::Down);
+        assert!(!app.item_hits.is_empty());
+        assert!(app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.sync_items();
+        assert!(app.item_hits.is_empty());
+        key(&mut app, KeyCode::Down);
+        app.focus = Focus::Prompt;
+        app.sync_items();
+        app.focus = Focus::Item;
+        app.sync_items();
+        assert!(app.item_hits.is_empty(), "tabbing back never reopens it");
+    }
+
+    #[test]
+    fn unlisted_items_leave_the_field_free_form() {
+        let mut app = app();
+        app.query = "repo".into();
+        app.refilter();
+        app.open_items.insert("~/catalog/repo".into(), Some(OpenItems { noun: "issues", items: Vec::new() }));
+        app.focus = Focus::Item;
+        key(&mut app, KeyCode::Down);
+        assert!(app.focus == Focus::Prompt, "with nothing listed, ↓ still moves on");
     }
 
     #[test]

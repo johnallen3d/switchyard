@@ -10,7 +10,11 @@
 //!   catalog project or Git folder: a name, a harness (ctrl-t, Claude by
 //!   default), an optional work item and an optional prompt. The name may be
 //!   left blank when there is a work item or prompt: `task launch` names the
-//!   work from it (see core's `autoname`). ctrl-s switches
+//!   work from it (see core's `autoname`). In a catalog project the work
+//!   item field offers the project's open Fizzy cards or GitHub issues
+//!   (see core's `items`), listed in the background once it has focus: ↓ or
+//!   typing shows them, Enter takes the highlighted one and Tab fills the
+//!   field with it; it goes into the title as any work item does. ctrl-s switches
 //!   the kind; `--kind` starts it (cmd+shift+n: session, ctrl+cmd+n: agent).
 //!   The picker reports the choice in the terminal title as
 //!   `rex-new:session/HOST/PATH` or

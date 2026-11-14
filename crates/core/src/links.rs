@@ -154,7 +154,7 @@ fn fresh(entry: &Value, ttl: u64, stamp: u64) -> bool {
 /// Run gh under `profile` (work gets amfaro's mise env, personal the login
 /// env, as the agents do), giving up after GH_TIMEOUT. None when gh can't
 /// run, fails, or takes too long.
-fn gh(profile: &str, args: &[&str]) -> Option<String> {
+pub(crate) fn gh(profile: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("gh");
     cmd.args(args).env("GH_PROMPT_DISABLED", "1");
     if profile == "work" {
