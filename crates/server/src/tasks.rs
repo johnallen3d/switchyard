@@ -40,7 +40,7 @@ fn stamp(path: &Path) -> Stamp {
 
 /// Read the registry for a first answer, then reconcile on each trigger
 /// from `triggers` (and the timer) until every sender is gone.
-pub fn run(shared: Arc<Shared>, triggers: Receiver<&'static str>) {
+pub fn run(shared: &Arc<Shared>, triggers: &Receiver<&'static str>) {
     let read_at = Instant::now();
     shared.update(|s| s.set_tasks(load_tasks(), false, read_at));
     let mut why = "start";
@@ -79,7 +79,7 @@ pub fn run(shared: Arc<Shared>, triggers: Receiver<&'static str>) {
 
 /// Trigger a check when the registry file changes. A check that saves the
 /// registry changes it too, which costs one more check that saves nothing.
-pub fn watch_registry(trigger: Sender<&'static str>) {
+pub fn watch_registry(trigger: &Sender<&'static str>) {
     let path = tasks_path();
     let mut last = stamp(&path);
     loop {

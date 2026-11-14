@@ -3,7 +3,7 @@
 //! It gets its data as pastes, in the background (see
 //! `Feed`): from switchyard-server when one answers, as pushed updates,
 //! else directly, every few seconds: the rows from one `rex do -e` on this
-//! host that runs host_rows.lua on every server,
+//! host that runs `host_rows.lua` on every server,
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
 //! for the preview (see preview.rs). It acts on Enter, ctrl-b (open the
@@ -28,10 +28,10 @@ use switchyard_ui::protocol::{DATA, unhex};
 
 use crate::preview;
 
-/// One server's rows (see host_rows.lua).
+/// One server's rows (see `host_rows.lua`).
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
 
-/// Runs HOST_ROWS on this host's server and every server it knows, at
+/// Runs `HOST_ROWS` on this host's server and every server it knows, at
 /// once, and returns their rows together: a host
 /// that fails gets an `E` row naming it, and only when every host fails is
 /// it an error.
@@ -104,7 +104,7 @@ impl Feed {
         on_server.store(first.is_some(), Ordering::Relaxed);
         {
             let (tx, poke, on_server) = (tx.clone(), poke.clone(), on_server.clone());
-            thread::spawn(move || follow_server(first, tx, poke, on_server));
+            thread::spawn(move || follow_server(first, &tx, &poke, &on_server));
         }
         let (preview, wants) = mpsc::channel();
         if !quick {
@@ -121,9 +121,9 @@ impl Feed {
                 }
             });
             let preview_tx = tx.clone();
-            thread::spawn(move || preview::follow(wants, preview_tx));
+            thread::spawn(move || preview::follow(&wants, &preview_tx));
         }
-        thread::spawn(move || fetch_when_needed(tx, poked, on_server));
+        thread::spawn(move || fetch_when_needed(&tx, &poked, &on_server));
         Feed { rx, poke, preview }
     }
 
@@ -141,16 +141,16 @@ impl Feed {
 /// (a poke, which starts a direct fetch at once) and try again every RETRY.
 fn follow_server(
     mut sub: Option<server::Subscription>,
-    tx: Sender<String>,
-    poke: Sender<()>,
-    on_server: Arc<AtomicBool>,
+    tx: &Sender<String>,
+    poke: &Sender<()>,
+    on_server: &AtomicBool,
 ) {
     loop {
         if let Some(sub) = sub.take() {
             on_server.store(true, Ordering::Relaxed);
             for snap in sub {
                 let Ok(snap) = snap else { break };
-                if !send_pastes(&tx, &snap) {
+                if !send_pastes(tx, &snap) {
                     return;
                 }
             }
@@ -181,16 +181,16 @@ const NO_REGISTRY: &str = "the task registry is on the Mac";
 
 /// Fetch directly whenever the server isn't answering: at once, after
 /// REFRESH and on a poke. With it answering, a poke gets one snapshot.
-fn fetch_when_needed(tx: Sender<String>, poked: Receiver<()>, on_server: Arc<AtomicBool>) {
+fn fetch_when_needed(tx: &Sender<String>, poked: &Receiver<()>, on_server: &AtomicBool) {
     let mut due = !on_server.load(Ordering::Relaxed);
     loop {
         if due {
             let sent = if on_server.load(Ordering::Relaxed) {
                 // Should the server have just gone, follow_server's poke
                 // fetches directly.
-                server::snapshot().map_or(true, |snap| send_pastes(&tx, &snap))
+                server::snapshot().map_or(true, |snap| send_pastes(tx, &snap))
             } else {
-                fetch(&tx)
+                fetch(tx)
             };
             if !sent {
                 return;
@@ -323,9 +323,9 @@ pub fn resume(p: &Pick) -> Result<(), String> {
         "resume",
         actions::act("resume", &p.host, &p.session, &p.window),
     )?;
-    let mut f = out.trim_end().splitn(3, '\t');
-    match (f.next(), f.next(), f.next()) {
-        (Some(h), Some(s), Some(w)) => select(h, s, w),
+    let mut fields = out.trim_end().splitn(3, '\t');
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some(host), Some(session), Some(window)) => select(host, session, window),
         _ => Err(format!("resume printed no tab: {out}")),
     }
 }
@@ -380,7 +380,7 @@ pub fn item_action(
             // A closed card's column and state are cached for a few minutes
             // (see core's cards); the next refresh should ask Fizzy at once.
             (Action::Close, Item::Card { account, number }) => {
-                switchyard_core::cards::forget(account, number)
+                switchyard_core::cards::forget(account, number);
             }
             _ => {}
         }

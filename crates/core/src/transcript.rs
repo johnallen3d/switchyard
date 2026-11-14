@@ -4,7 +4,7 @@
 //! `fetch` runs on the config host for a tab (host, session, window). It
 //! takes what the task registry says of the tab's task (profile, harness,
 //! worktree, agent session) and asks the tab's Rex server for its agent
-//! pane (PANE_SCRIPT: the reporting program, its process ID and the pane's
+//! pane (`PANE_SCRIPT`: the reporting program, its process ID and the pane's
 //! directory), then reads the log on the agent's host: here, or there with
 //! `switchyard transcript --local` over SSH. Either is enough: a tab with no
 //! task goes by its pane, and a task whose agent has exited by the registry.
@@ -23,6 +23,7 @@
 //! absent when the log doesn't say); or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -43,7 +44,7 @@ const BYTES: usize = 96 * 1024;
 
 /// A tab's agent pane, run as `rex [-S HOST] do -e SCRIPT --json --args
 /// '{"session":ID,"window":ID}'`: the tiled pane with the most urgent
-/// program status, as host_rows.lua picks a tab's, with its block, status,
+/// program status, as `host_rows.lua` picks a tab's, with its block, status,
 /// program, that program's process ID and the foreground process's
 /// directory; `{}` when no pane reports one.
 const PANE_SCRIPT: &str = r#"
@@ -78,7 +79,11 @@ end
 error("tab not found", 0)
 "#;
 
-/// The agent pane of a tab on `host` (see PANE_SCRIPT).
+/// The agent pane of a tab on `host` (see `PANE_SCRIPT`).
+///
+/// # Errors
+///
+/// Fails when Rex can't run the lookup or the tab isn't found.
 pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, String> {
     let args = json!({ "session": session, "window": window }).to_string();
     rex_json(host, &["do", "-e", PANE_SCRIPT, "--json", "--args", &args])
@@ -87,6 +92,7 @@ pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, Stri
 /// The transcript of the agent in a tab, as JSON (see the module docs).
 /// `target` names the tab's host as the picker's title does: `-` for this
 /// one, else the hex-encoded label.
+#[must_use]
 pub fn fetch(target: &str, session: &str, window: &str) -> Value {
     let host = if target == "-" {
         local_label()
@@ -97,6 +103,7 @@ pub fn fetch(target: &str, session: &str, window: &str) -> Value {
 }
 
 /// `fetch` for a tab on the host with Rex label `host`.
+#[must_use]
 pub fn fetch_on(host: &str, session: &str, window: &str) -> Value {
     fetch_inner(host, session, window).unwrap_or_else(|e| json!({ "error": e }))
 }
@@ -186,6 +193,7 @@ fn remote(
 
 /// The transcript of an agent on this host (see the module docs); `pid` is
 /// 0 and `agent_session` empty when unknown.
+#[must_use]
 pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Value {
     let Some(path) = find(profile, harness, dir, agent_session, pid) else {
         return json!({ "error": format!("no {harness} session log for {dir}") });
@@ -280,6 +288,7 @@ fn read(path: &Path, harness: &str) -> std::io::Result<Tail> {
 
 /// The model the agent's last turn ran on, or Pi's last switch to one since.
 /// None when the log doesn't say.
+#[must_use]
 pub fn model(log: &str, harness: &str) -> Option<String> {
     log.lines().rev().find_map(|line| {
         let v = serde_json::from_str::<Value>(line).ok()?;
@@ -306,6 +315,7 @@ pub fn model(log: &str, harness: &str) -> Option<String> {
 /// The context the last turn in a log used: its input, cached and written
 /// cache tokens and its output, as the agent's own context meter counts.
 /// None when no turn in the log reports usage.
+#[must_use]
 pub fn tokens(log: &str, harness: &str) -> Option<u64> {
     log.lines().rev().find_map(|line| {
         let v = serde_json::from_str::<Value>(line).ok()?;
@@ -336,6 +346,7 @@ pub fn tokens(log: &str, harness: &str) -> Option<u64> {
 }
 
 /// A log's entries (JSON lines), oldest first, the last ENTRIES of them.
+#[must_use]
 pub fn entries(log: &str, harness: &str) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     for line in log.lines() {
@@ -374,7 +385,7 @@ fn claude_entry(v: &Value, out: &mut Vec<(&'static str, String)>) {
         match part["type"].as_str() {
             Some("text") => push_text(out, kind, part["text"].as_str().unwrap_or("")),
             Some("tool_use") => {
-                push_tool(out, part["name"].as_str().unwrap_or("tool"), &part["input"])
+                push_tool(out, part["name"].as_str().unwrap_or("tool"), &part["input"]);
             }
             _ => {}
         }
@@ -426,9 +437,9 @@ fn push_tool(out: &mut Vec<(&'static str, String)>, name: &str, input: &Value) {
         for q in input["questions"].as_array().into_iter().flatten() {
             text.push_str(q["question"].as_str().unwrap_or(""));
             for o in q["options"].as_array().into_iter().flatten() {
-                text.push_str(&format!("\n  - {}", o["label"].as_str().unwrap_or("")));
+                let _ = write!(text, "\n  - {}", o["label"].as_str().unwrap_or(""));
                 if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
-                    text.push_str(&format!(": {d}"));
+                    let _ = write!(text, ": {d}");
                 }
             }
             text.push('\n');

@@ -56,8 +56,7 @@ fn key(link: &Value) -> Option<String> {
 
 fn cache_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"))
+        .map_or_else(|_| home().join(".local/state"), PathBuf::from)
         .join("rex/switchyard-titles.json")
 }
 

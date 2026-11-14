@@ -8,7 +8,9 @@
 //! readers fall back to when the registry won't parse (see `read_at`).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
+use std::hash::BuildHasher;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -39,11 +41,15 @@ fn launching(task: &serde_json::Value, now: u64) -> bool {
 
 pub fn tasks_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"))
+        .map_or_else(|_| home().join(".local/state"), PathBuf::from)
         .join("rex/spawn-tasks.json")
 }
 
+/// The task registry's records.
+///
+/// # Errors
+///
+/// Fails when the registry exists but can't be read or recovered.
 pub fn load_tasks() -> Result<Vec<serde_json::Value>, String> {
     load_at(&tasks_path())
 }
@@ -152,6 +158,11 @@ fn link_over(from: &Path, to: &Path) -> io::Result<()> {
 /// through here, so two of them can't interleave: neither overwrites the
 /// other's save with a copy read before it. `f` must not touch the registry
 /// again (the lock is not reentrant); an error from `f` saves nothing.
+///
+/// # Errors
+///
+/// Fails when the registry can't be locked, read, or saved, or with `f`'s
+/// error.
 pub fn update_tasks<T>(
     f: impl FnOnce(&mut Vec<serde_json::Value>) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -230,6 +241,10 @@ fn by_key(tasks: &[serde_json::Value]) -> HashMap<String, &serde_json::Value> {
 /// records as the registry has them now. For a writer that changes only its
 /// own task (an archive), so it doesn't write back a copy of the rest that it
 /// read earlier. The inbox state the registry has (pins, snoozes) is kept.
+///
+/// # Errors
+///
+/// Fails as `update_tasks` does.
 pub fn save_record(task: &serde_json::Value) -> Result<(), String> {
     save_record_at(&tasks_path(), task)
 }
@@ -251,10 +266,16 @@ fn save_record_at(path: &Path, task: &serde_json::Value) -> Result<(), String> {
 /// Rex window IDs are unique across servers, but a host's label
 /// (`hostname -s`) can change under a task when macOS takes its name from
 /// the network, which would leave the task unreachable by host.
+#[must_use]
 pub fn in_window(task: &serde_json::Value, window: &str) -> bool {
     task["window_id"].as_str() == Some(window)
 }
 
+/// Add `task` to the registry.
+///
+/// # Errors
+///
+/// Fails as `update_tasks` does.
 pub fn record_task(task: serde_json::Value) -> Result<(), String> {
     update_tasks(|tasks| {
         tasks.push(task);
@@ -305,8 +326,9 @@ pub struct TabStatus {
     pub msg: String,
 }
 
-/// A `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` line, as WINDOWS_SCRIPT
-/// prints them and host_rows.lua's W rows carry them after the W.
+/// A `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` line, as `WINDOWS_SCRIPT`
+/// prints them and `host_rows.lua`'s W rows carry them after the W.
+#[must_use]
 pub fn parse_window_status(line: &str) -> (String, TabStatus) {
     let mut f = line.split('\t');
     let id = f.next().unwrap_or("").to_string();
@@ -319,7 +341,10 @@ pub fn parse_window_status(line: &str) -> (String, TabStatus) {
 /// Give each open task its tab's live agent status (`status`, `status_at`,
 /// `status_msg`) from `live`, by window ID; a task whose tab isn't there
 /// keeps what it had.
-pub fn apply_live(tasks: &mut [serde_json::Value], live: &HashMap<String, TabStatus>) {
+pub fn apply_live<S: BuildHasher>(
+    tasks: &mut [serde_json::Value],
+    live: &HashMap<String, TabStatus, S>,
+) {
     for task in tasks.iter_mut().filter(|t| t["ended_at"].is_null()) {
         if let Some(status) = task["window_id"].as_str().and_then(|id| live.get(id)) {
             task["status"] = status.state.clone().into();
@@ -331,6 +356,7 @@ pub fn apply_live(tasks: &mut [serde_json::Value], live: &HashMap<String, TabSta
 
 /// Seconds since the Unix epoch for an RFC 3339 timestamp such as
 /// `2026-11-07T15:40:18.294391-05:00`, as Rex reports status changes.
+#[must_use]
 pub fn rfc3339_secs(s: &str) -> Option<u64> {
     let num = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
@@ -354,7 +380,7 @@ pub fn rfc3339_secs(s: &str) -> Option<u64> {
     let yoe = y - era * 400;
     let doy = (153 * (mo + if mo > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
+    let days = era * 146_097 + doe - 719_468;
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - offset).ok()
 }
 
@@ -367,7 +393,8 @@ pub struct HostWindows {
 }
 
 impl HostWindows {
-    /// Parse WINDOWS_SCRIPT's reply.
+    /// Parse `WINDOWS_SCRIPT`'s reply.
+    #[must_use]
     pub fn parse(reply: &str) -> Self {
         let mut listed = Self::default();
         for line in reply.lines().filter(|l| !l.is_empty()) {
@@ -385,6 +412,7 @@ impl HostWindows {
     /// the task's own session and that session has no such window. A
     /// session it didn't list (another or a fresh server, as a temporary
     /// `XDG_RUNTIME_DIR` reaches, or a failed view) proves nothing.
+    #[must_use]
     pub fn tab_gone(&self, session_id: &str, window_id: &str) -> bool {
         !session_id.is_empty()
             && !window_id.is_empty()
@@ -449,37 +477,9 @@ pub(crate) const MERGED_SH: &str = r#"
   fi
 "#;
 
-/// For each (repo, branch), the branch's worktree on `host` with its
-/// uncommitted files (count, and the first few paths), its branch head,
-/// whether that is merged into the default branch, and the repo's origin
-/// URL, or an empty path when
-/// the repo is there but the branch has no worktree; None for a repo that
-/// can't be read. None overall when the host can't be reached. One script
-/// per host on stdin: `bash -s` over SSH by Rex label (as `probe` reaches
-/// hosts; their login shell is Fish), or locally for the config host.
-fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<Option<Worktree>>> {
-    // Pairs are REPO, BRANCH and the task's recorded worktree, which still
-    // counts while detached from BRANCH, as a rebase leaves it until it
-    // finishes: a check in that moment would otherwise end the task as
-    // "worktree removed". One line per pair:
-    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>FILE...,
-    // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
-    // sets it; LINKS are the branch's `switchyard-link` git config values,
-    // FIXES its commit message lines that may close issues, space separated;
-    // FIZZY the repo's `.fizzy.yaml` board (see `links::FIZZY_BOARD_SH`).
-    // Each repo's worktree list, origin URL, default branch and link config
-    // are read once, the branch head comes from the worktree list, and the
-    // rest is shell builtins where it can be: starting processes is most of
-    // the cost, on macOS especially. Bash 3.2 (macOS's /bin/bash) runs it too.
-    let mut script = String::from(
-        r#"merged_state() {
-"#,
-    );
-    script.push_str(MERGED_SH);
-    script.push_str("}\n");
-    script.push_str(FIZZY_BOARD_SH);
-    script.push_str(
-        r#"repos=() lists=() origins=() bases=() configs=() boards=()
+/// The loop of `host_worktrees`' script, reading `REPO<TAB>BRANCH<TAB>WANT`
+/// lines from the `RSP_PAIRS` heredoc that follows it.
+const WORKTREES_LOOP: &str = r#"repos=() lists=() origins=() bases=() configs=() boards=()
 while IFS=$'\t' read -r repo branch want; do
   list= n=
   for i in "${!repos[@]}"; do
@@ -538,57 +538,55 @@ while IFS=$'\t' read -r repo branch want; do
   fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$count" "${head:0:12}" "$merged" "$origin" "$links" "$fixes" "${boards[$n]}" "$files"
 done <<'RSP_PAIRS'
-"#,
+"#;
+
+/// For each (repo, branch), the branch's worktree on `host` with its
+/// uncommitted files (count, and the first few paths), its branch head,
+/// whether that is merged into the default branch, and the repo's origin
+/// URL, or an empty path when
+/// the repo is there but the branch has no worktree; None for a repo that
+/// can't be read. None overall when the host can't be reached. One script
+/// per host on stdin: `bash -s` over SSH by Rex label (as `probe` reaches
+/// hosts; their login shell is Fish), or locally for the config host.
+fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<Option<Worktree>>> {
+    // Pairs are REPO, BRANCH and the task's recorded worktree, which still
+    // counts while detached from BRANCH, as a rebase leaves it until it
+    // finishes: a check in that moment would otherwise end the task as
+    // "worktree removed". One line per pair:
+    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>FILE...,
+    // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
+    // sets it; LINKS are the branch's `switchyard-link` git config values,
+    // FIXES its commit message lines that may close issues, space separated;
+    // FIZZY the repo's `.fizzy.yaml` board (see `links::FIZZY_BOARD_SH`).
+    // Each repo's worktree list, origin URL, default branch and link config
+    // are read once, the branch head comes from the worktree list, and the
+    // rest is shell builtins where it can be: starting processes is most of
+    // the cost, on macOS especially. Bash 3.2 (macOS's /bin/bash) runs it too.
+    let mut script = String::from(
+        r"merged_state() {
+",
     );
+    script.push_str(MERGED_SH);
+    script.push_str("}\n");
+    script.push_str(FIZZY_BOARD_SH);
+    script.push_str(WORKTREES_LOOP);
     for (repo, branch, worktree) in pairs {
-        script.push_str(&format!("{repo}\t{branch}\t{worktree}\n"));
+        let _ = writeln!(script, "{repo}\t{branch}\t{worktree}");
     }
     script.push_str("RSP_PAIRS\n");
     let out = host_bash(host, &script).filter(|o| o.status.success())?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() != pairs.len() {
+    let rows: Vec<&str> = text.lines().collect();
+    if rows.len() != pairs.len() {
         return None;
     }
     Some(
-        lines
-            .into_iter()
-            .map(|l| match l {
-                "?" => None,
-                line if line == "-" || line.starts_with("-\t") => {
-                    let fizzy = line.split('\t').nth(1).unwrap_or("").to_string();
-                    Some(Worktree {
-                        fizzy,
-                        ..Worktree::default()
-                    })
-                }
-                line => {
-                    let mut f = line.split('\t');
-                    let path = f.next().unwrap_or("").to_string();
-                    let dirty = f.next().and_then(|n| n.parse().ok()).unwrap_or(0);
-                    let head = f.next().unwrap_or("").to_string();
-                    let merged = f.next().unwrap_or("").to_string();
-                    let origin = f.next().unwrap_or("").to_string();
-                    let links = f
-                        .next()
-                        .unwrap_or("")
-                        .split_whitespace()
-                        .map(String::from)
-                        .collect();
-                    let fixes = crate::links::fixed_refs(f.next().unwrap_or(""));
-                    let fizzy = f.next().unwrap_or("").to_string();
-                    let files = f.filter(|s| !s.is_empty()).map(String::from).collect();
-                    Some(Worktree {
-                        path,
-                        dirty,
-                        files,
-                        head,
-                        merged,
-                        origin,
-                        links,
-                        fixes,
-                        fizzy,
-                    })
+        rows.into_iter()
+            .map(|l| {
+                if l == "?" {
+                    None
+                } else {
+                    Some(Worktree::parse(l))
                 }
             })
             .collect(),
@@ -614,9 +612,53 @@ struct Worktree {
     fizzy: String,
 }
 
+impl Worktree {
+    /// One of `host_worktrees`' lines other than `?`: a worktree's fields,
+    /// or `-<TAB>FIZZY` for none.
+    fn parse(line: &str) -> Self {
+        if line == "-" || line.starts_with("-\t") {
+            let fizzy = line.split('\t').nth(1).unwrap_or("").to_string();
+            return Worktree {
+                fizzy,
+                ..Worktree::default()
+            };
+        }
+        let mut f = line.split('\t');
+        let path = f.next().unwrap_or("").to_string();
+        let dirty = f.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let head = f.next().unwrap_or("").to_string();
+        let merged = f.next().unwrap_or("").to_string();
+        let origin = f.next().unwrap_or("").to_string();
+        let links = f
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(String::from)
+            .collect();
+        let fixes = crate::links::fixed_refs(f.next().unwrap_or(""));
+        let fizzy = f.next().unwrap_or("").to_string();
+        let changed = f.filter(|s| !s.is_empty()).map(String::from).collect();
+        Worktree {
+            path,
+            dirty,
+            files: changed,
+            head,
+            merged,
+            origin,
+            links,
+            fixes,
+            fizzy,
+        }
+    }
+}
+
 /// The registry with each open task's live agent status from its host's Rex
 /// server, as `reconcile_tasks` gives it but without checking worktrees over
 /// SSH or ending anything, so the inbox can show tasks before that check.
+///
+/// # Errors
+///
+/// Fails when the registry can't be loaded.
 pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
     let mut hosts: Vec<String> = tasks
@@ -660,12 +702,57 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// status, and a tab ends its task only when the host lists the task's
 /// session without it. A new task's missing worktree ends it only after
 /// `LAUNCH_GRACE_SECS`, since `task run` may still be creating it.
+///
+/// # Errors
+///
+/// Fails when the registry can't be loaded, or the check's changes can't be
+/// saved.
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     let mut tasks = load_tasks()?;
-    let field = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
-    let checked = |t: &serde_json::Value| {
-        t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed")
-    };
+    let checks = check_hosts(&tasks);
+    let stamp = now();
+    let (live, dirty) = apply_checks(&mut tasks, checks, stamp);
+    keep_newest_sessions(&mut tasks, stamp);
+    let plans = task_trackers(&tasks, &dirty);
+    let live_prs = update_links(&mut tasks, &plans);
+    refresh_titles(&tasks, &plans);
+    let cards = crate::cards::find_cards(tasks.iter().filter(|t| checked(t)));
+    let live_prs: Vec<(String, String, Pr)> = live_prs
+        .into_iter()
+        .map(|(i, repo, pr)| (window_key(&tasks[i]), repo, pr))
+        .collect();
+    let mut tasks = commit_checked_at(&tasks_path(), tasks, stamp)?;
+    apply_live(&mut tasks, &live);
+    crate::titles::apply(&mut tasks);
+    for task in &mut tasks {
+        add_unsaved(task, &dirty, &live_prs, &cards);
+    }
+    Ok(tasks)
+}
+
+/// Field `k` of task `t` as a string, or empty.
+fn field(t: &serde_json::Value, k: &str) -> String {
+    t[k].as_str().unwrap_or("").to_string()
+}
+
+/// Whether `reconcile_tasks` checks task `t`: it is open, or ended with
+/// only its tab closed.
+fn checked(t: &serde_json::Value) -> bool {
+    t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed")
+}
+
+/// A task's `HOST/WINDOW_ID`, which keys a check's worktrees and PRs.
+fn window_key(t: &serde_json::Value) -> String {
+    format!("{}/{}", field(t, "host"), field(t, "window_id"))
+}
+
+/// One host's check: its tabs (None when Rex can't be asked) and the
+/// worktrees of its checked tasks, in their order (None when it can't be
+/// reached).
+type HostCheck = (String, Option<HostWindows>, Option<Vec<Option<Worktree>>>);
+
+/// Start checking each host of the checked tasks, in parallel.
+fn check_hosts(tasks: &[serde_json::Value]) -> Vec<std::thread::JoinHandle<HostCheck>> {
     let mut hosts: Vec<String> = tasks
         .iter()
         .filter(|t| checked(t))
@@ -673,7 +760,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         .collect();
     hosts.sort();
     hosts.dedup();
-    let checks: Vec<_> = hosts
+    hosts
         .into_iter()
         .map(|host| {
             let pairs: Vec<(String, String, String)> = tasks
@@ -692,10 +779,18 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
                 (host, windows, worktrees)
             })
         })
-        .collect();
-    let stamp = now();
+        .collect()
+}
+
+/// End the checked tasks whose tab or worktree the host checks found gone,
+/// and return the open tabs' live status by window ID and the worktrees
+/// found, by `HOST/WINDOW_ID`.
+fn apply_checks(
+    tasks: &mut [serde_json::Value],
+    checks: Vec<std::thread::JoinHandle<HostCheck>>,
+    stamp: u64,
+) -> (HashMap<String, TabStatus>, HashMap<String, Worktree>) {
     let mut live: HashMap<String, TabStatus> = HashMap::new();
-    // Worktrees by HOST/WINDOW_ID.
     let mut dirty: HashMap<String, Worktree> = HashMap::new();
     for handle in checks {
         let Ok((host, windows, worktrees)) = handle.join() else {
@@ -713,7 +808,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             if !task["ended_at"].is_null() {
                 match worktree {
                     Some(w) if w.path.is_empty() => {
-                        task["ended_reason"] = "worktree removed".into()
+                        task["ended_reason"] = "worktree removed".into();
                     }
                     Some(w) => {
                         task["worktree"] = w.path.clone().into();
@@ -749,8 +844,13 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             }
         }
     }
-    // Tasks that ended on their own just now keep their newest agent session
-    // (after a /clear it is no longer the one spawn chose), for a resume.
+    (live, dirty)
+}
+
+/// Tasks that ended on their own just now (at `stamp`) keep their newest
+/// agent session (after a /clear it is no longer the one spawn chose), for
+/// a resume.
+fn keep_newest_sessions(tasks: &mut [serde_json::Value], stamp: u64) {
     let ended_now: Vec<usize> = (0..tasks.len())
         .filter(|&i| tasks[i]["ended_at"].as_u64() == Some(stamp))
         .collect();
@@ -766,48 +866,77 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             tasks[i]["agent_session"] = id.into();
         }
     }
-    // Each checked task's work items (see `links`): its branch's git config
-    // links, issues its branch name and commits name, and its PR from
-    // GitHub, which is saved with its live state added below.
+}
+
+/// Each checked task's index, tracker and worktree (from `dirty`, by
+/// `HOST/WINDOW_ID`).
+fn task_trackers(
+    tasks: &[serde_json::Value],
+    dirty: &HashMap<String, Worktree>,
+) -> Vec<(usize, Tracker, Option<Worktree>)> {
     let projects = crate::hosts::catalog().unwrap_or_default();
-    let mut plans: Vec<(usize, Tracker, Option<Worktree>)> = Vec::new();
-    for (i, task) in tasks.iter().enumerate().filter(|(_, t)| checked(t)) {
-        let key = format!("{}/{}", field(task, "host"), field(task, "window_id"));
-        let worktree = dirty.get(&key).cloned();
-        let repo = crate::folders::home_relative(&field(task, "repo"));
-        let project = projects
-            .iter()
-            .find(|p| crate::folders::home_relative(p.path.trim_end_matches('/')) == repo);
-        let remote = worktree
-            .as_ref()
-            .map(|w| w.origin.clone())
-            .filter(|o| github_repo(o).is_some())
-            .or_else(|| project.map(|p| p.clone_url.clone()))
-            .unwrap_or_default();
-        let board = worktree.as_ref().map(|w| w.fizzy.as_str()).unwrap_or("");
-        let catalog = project.map(|p| p.tracker.as_str()).unwrap_or("");
-        let mut tracker = Tracker::new(&tracker_or_fizzy(catalog, board), &remote);
-        if tracker.github.is_none() {
-            tracker.github = task["links"].as_array().and_then(|links| {
-                links
-                    .iter()
-                    .filter(|l| l["kind"] == "pr" && l["system"] == "github")
-                    .find_map(|l| {
-                        l["ref"]
-                            .as_str()?
-                            .split_once('#')
-                            .map(|(repo, _)| repo.to_string())
-                    })
-            });
-        }
-        plans.push((i, tracker, worktree));
+    tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| checked(t))
+        .map(|(i, task)| {
+            let worktree = dirty.get(&window_key(task)).cloned();
+            let tracker = task_tracker(task, worktree.as_ref(), &projects);
+            (i, tracker, worktree)
+        })
+        .collect()
+}
+
+/// The tracker of `task`'s work items: its catalog project's, or its
+/// checkout's `.fizzy.yaml` board, with the GitHub repo of its origin, its
+/// project's clone URL, or else a PR link it already has.
+fn task_tracker(
+    task: &serde_json::Value,
+    worktree: Option<&Worktree>,
+    projects: &[crate::hosts::Project],
+) -> Tracker {
+    let repo = crate::folders::home_relative(&field(task, "repo"));
+    let project = projects
+        .iter()
+        .find(|p| crate::folders::home_relative(p.path.trim_end_matches('/')) == repo);
+    let remote = worktree
+        .map(|w| w.origin.clone())
+        .filter(|o| github_repo(o).is_some())
+        .or_else(|| project.map(|p| p.clone_url.clone()))
+        .unwrap_or_default();
+    let board = worktree.map_or("", |w| w.fizzy.as_str());
+    let catalog = project.map_or("", |p| p.tracker.as_str());
+    let mut tracker = Tracker::new(&tracker_or_fizzy(catalog, board), &remote);
+    if tracker.github.is_none() {
+        tracker.github = task["links"].as_array().and_then(|links| {
+            links
+                .iter()
+                .filter(|l| l["kind"] == "pr" && l["system"] == "github")
+                .find_map(|l| {
+                    l["ref"]
+                        .as_str()?
+                        .split_once('#')
+                        .map(|(repo, _)| repo.to_string())
+                })
+        });
     }
-    let mut lookups: Vec<(usize, Lookup)> = Vec::new();
+    tracker
+}
+
+/// Update each planned task's work items (see `links`): its branch's git
+/// config links, issues its branch name and commits name, and its PR from
+/// GitHub, which is saved. Returns the PRs found, by task index and repo,
+/// for their live state to be added once saved.
+fn update_links(
+    tasks: &mut [serde_json::Value],
+    plans: &[(usize, Tracker, Option<Worktree>)],
+) -> Vec<(usize, String, Pr)> {
+    let mut lookups: Vec<(usize, &Tracker, Lookup)> = Vec::new();
     // The derived issue and card links of tasks whose worktree was read,
     // rebuilt rather than added to, so one the branch no longer implies
     // goes. Without a worktree (or a PR answer) they are only added to.
     let mut rebuilt: HashMap<usize, Vec<serde_json::Value>> = HashMap::new();
-    for (i, tracker, worktree) in &plans {
+    for (i, tracker, worktree) in plans {
         let task = &mut tasks[*i];
         let branch = field(task, "branch");
         let mut items = Vec::new();
@@ -826,6 +955,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         if let (Some(repo), false) = (&tracker.github, branch.is_empty()) {
             lookups.push((
                 *i,
+                tracker,
                 Lookup {
                     profile: field(task, "profile"),
                     repo: repo.clone(),
@@ -834,9 +964,14 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
             ));
         }
     }
-    let prs = find_prs(&lookups.iter().map(|(_, l)| l.clone()).collect::<Vec<_>>());
+    let prs = find_prs(
+        &lookups
+            .iter()
+            .map(|(_, _, l)| l.clone())
+            .collect::<Vec<_>>(),
+    );
     let mut live_prs: Vec<(usize, String, Pr)> = Vec::new();
-    for (i, l) in &lookups {
+    for (i, tracker, l) in &lookups {
         let Some(pr) = prs.get(&pr_key(&l.repo, &l.branch)) else {
             // GitHub couldn't be asked, so the PR body's links stay.
             for link in rebuilt.remove(i).unwrap_or_default() {
@@ -846,7 +981,6 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         };
         set_derived_pr(&mut tasks[*i], &l.repo, pr);
         if let Some(pr) = pr {
-            let tracker = &plans.iter().find(|(k, _, _)| k == i).expect("planned").1;
             let items = pr.fixes.iter().filter_map(|r| parse_ref(r, tracker));
             match rebuilt.get_mut(i) {
                 Some(rebuilt) => rebuilt.extend(items),
@@ -862,9 +996,13 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
     for (i, items) in rebuilt {
         set_derived_items(&mut tasks[i], items);
     }
-    // Every task's work items' titles (see `titles`), added on read below.
-    // Ended tasks' links already name their repo or card account, so they
-    // need no tracker.
+    live_prs
+}
+
+/// Refresh every task's work items' titles (see `titles`), added on read.
+/// Ended tasks' links already name their repo or card account, so they need
+/// no tracker.
+fn refresh_titles(tasks: &[serde_json::Value], plans: &[(usize, Tracker, Option<Worktree>)]) {
     let asks = tasks.iter().enumerate().flat_map(|(i, task)| {
         let tracker = plans
             .iter()
@@ -880,46 +1018,35 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         })
     });
     crate::titles::refresh(asks.collect());
-    let cards = crate::cards::find_cards(tasks.iter().filter(|t| checked(t)));
-    let live_prs: Vec<(String, String, Pr)> = live_prs
-        .into_iter()
-        .map(|(i, repo, pr)| {
-            (
-                format!(
-                    "{}/{}",
-                    field(&tasks[i], "host"),
-                    field(&tasks[i], "window_id")
-                ),
-                repo,
-                pr,
-            )
-        })
-        .collect();
-    let mut tasks = commit_checked_at(&tasks_path(), tasks, stamp)?;
-    apply_live(&mut tasks, &live);
-    crate::titles::apply(&mut tasks);
-    for task in tasks.iter_mut() {
-        let open = task["ended_at"].is_null();
-        let key = format!("{}/{}", field(task, "host"), field(task, "window_id"));
-        if let Some(w) = dirty.get(&key) {
-            task["dirty_count"] = w.dirty.into();
-            task["dirty_files"] = w.files.clone().into();
-            if !w.head.is_empty() {
-                task["branch_head"] = w.head.clone().into();
-            }
-            if !w.merged.is_empty() {
-                task["branch_merged"] = w.merged.clone().into();
-            }
-            if !open {
-                task["worktree_left"] = true.into();
-            }
+}
+
+/// Add what a check found that isn't saved to `task`: its worktree's state
+/// (from `dirty`), its PRs' live state, and its cards'.
+fn add_unsaved(
+    task: &mut serde_json::Value,
+    dirty: &HashMap<String, Worktree>,
+    live_prs: &[(String, String, Pr)],
+    cards: &HashMap<String, crate::cards::Card>,
+) {
+    let open = task["ended_at"].is_null();
+    let key = window_key(task);
+    if let Some(w) = dirty.get(&key) {
+        task["dirty_count"] = w.dirty.into();
+        task["dirty_files"] = w.files.clone().into();
+        if !w.head.is_empty() {
+            task["branch_head"] = w.head.clone().into();
         }
-        for (_, repo, pr) in live_prs.iter().filter(|(k, _, _)| *k == key) {
-            add_live(task, repo, pr);
+        if !w.merged.is_empty() {
+            task["branch_merged"] = w.merged.clone().into();
         }
-        crate::cards::add_live(task, &cards);
+        if !open {
+            task["worktree_left"] = true.into();
+        }
     }
-    Ok(tasks)
+    for (_, repo, pr) in live_prs.iter().filter(|(k, _, _)| *k == key) {
+        add_live(task, repo, pr);
+    }
+    crate::cards::add_live(task, cards);
 }
 
 /// The inbox state John sets on a task (see actions' pin and snooze).
@@ -941,7 +1068,7 @@ fn commit_checked_at(
         let mut merged = checked;
         let newer = by_key(fresh);
         carry_inbox_state(&mut merged, &newer);
-        for task in merged.iter_mut() {
+        for task in &mut merged {
             let Some(newer) = newer.get(&task_key(task)) else {
                 continue;
             };
@@ -964,7 +1091,7 @@ fn commit_checked_at(
                 .as_u64()
                 .is_none_or(|ended| stamp.saturating_sub(ended) < ENDED_KEEP_SECS)
         });
-        *fresh = merged.clone();
+        fresh.clone_from(&merged);
         Ok(merged)
     })
 }
@@ -1249,7 +1376,7 @@ mod tests {
         save_at(&path, &[task("a", 1)], true).unwrap();
         record_at(&path, task("b", 2));
         std::fs::remove_file(&path).unwrap();
-        assert!(load_at(&path).unwrap().is_empty());
+        assert_eq!(load_at(&path).unwrap(), [] as [serde_json::Value; 0]);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1301,8 +1428,11 @@ mod tests {
         assert!(ok, "git {args:?}");
     }
 
-    #[test]
-    fn worktree_script_reports_head_merge_state_and_origin() {
+    /// A repo under a fresh temp root with worktrees for branches `fresh`
+    /// (new), `done` (merged), `open` (unmerged, dirty, linked, with fixes),
+    /// `pulled` (only origin's newer commit) and `rebasing` (detached), and a
+    /// `.fizzy.yaml` board. Returns the root and the repo.
+    fn worktree_fixture() -> (PathBuf, PathBuf) {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -1385,6 +1515,12 @@ mod tests {
             "account: \"6284043\"\napi_url: https://app.fizzy.do\nboard: b1\n",
         )
         .unwrap();
+        (root, repo)
+    }
+
+    #[test]
+    fn worktree_script_reports_head_merge_state_and_origin() {
+        let (root, repo) = worktree_fixture();
         let r = repo.to_str().unwrap().to_string();
         let mut pairs: Vec<(String, String, String)> = ["fresh", "done", "open", "gone", "pulled"]
             .iter()
@@ -1406,7 +1542,7 @@ mod tests {
         assert_eq!(w[2].links, ["fizzy:5", "https://github.com/o/r/issues/3"]);
         assert_eq!(w[2].fixes, ["#9", "o/r#10"]);
         assert!(w[0].links.is_empty() && w[0].fixes.is_empty());
-        assert!(w[3].path.is_empty());
+        assert_eq!(w[3].path, "");
         assert_eq!(w[4].merged, "new");
         assert!(w[4].fixes.is_empty(), "{:?}", w[4].fixes);
         assert!(
@@ -1415,7 +1551,7 @@ mod tests {
             "{}",
             w[5].path
         );
-        assert!(w[6].path.is_empty());
+        assert_eq!(w[6].path, "");
         // The repo's `.fizzy.yaml` board, with or without a worktree.
         assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
         assert!(

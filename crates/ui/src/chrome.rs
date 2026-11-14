@@ -65,6 +65,10 @@ pub struct Corners {
 impl Corners {
     /// Transmit the corner images for each fill colour and return the
     /// handle that places them.
+    ///
+    /// # Errors
+    ///
+    /// Fails when writing the images to `out` or flushing it fails.
     pub fn new(cell: CellSize, fills: &[Color], out: &mut impl Write) -> io::Result<Self> {
         let mut ids = HashMap::new();
         let mut id = FIRST_ID;
@@ -101,7 +105,9 @@ impl Corners {
         let Some(id) = rgb(fill).and_then(|rgb| self.ids.get(&(corner, rgb))) else {
             return false;
         };
-        let ink = Color::Rgb((id >> 16) as u8, (id >> 8) as u8, *id as u8);
+        // The image id, in its low three bytes, is the placeholder's colour.
+        let [_, red, green, blue] = id.to_be_bytes();
+        let ink = Color::Rgb(red, green, blue);
         if let Some(cell) = buf.cell_mut((x, y)) {
             cell.set_symbol(PLACEHOLDER)
                 .set_style(Style::new().fg(ink).bg(behind));
@@ -110,6 +116,10 @@ impl Corners {
     }
 
     /// Free the images; the picker is closing.
+    ///
+    /// # Errors
+    ///
+    /// Fails when writing the delete commands to `out` or flushing it fails.
     pub fn delete(&self, out: &mut impl Write) -> io::Result<()> {
         for id in self.ids.values() {
             write!(out, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")?;
@@ -128,38 +138,46 @@ fn rgb(c: Color) -> Option<(u8, u8, u8)> {
 /// RGBA pixels for one corner cell: the box fills the half of the cell on
 /// its side of the half-cell edge, rounded with a radius of the cell width
 /// (a quarter circle at the usual 1:2 cell shape), anti-aliased by coverage.
-fn rasterize(corner: Corner, (r, g, b): (u8, u8, u8), cell: CellSize) -> Vec<u8> {
-    let (w, h) = (cell.width as f64, cell.height as f64);
-    let radius = w.min(h / 2.0);
+fn rasterize(corner: Corner, (red, green, blue): (u8, u8, u8), cell: CellSize) -> Vec<u8> {
+    let (width, height) = (f64::from(cell.width), f64::from(cell.height));
+    let radius = width.min(height / 2.0);
     // Worked out for the top-left corner; the others mirror it.
-    let (cx, cy) = (radius, h / 2.0 + radius);
+    let (cx, cy) = (radius, height / 2.0 + radius);
     let flip_x = matches!(corner, Corner::TopRight | Corner::BottomRight);
     let flip_y = matches!(corner, Corner::BottomLeft | Corner::BottomRight);
-    let mut px = Vec::with_capacity((cell.width * cell.height * 4) as usize);
+    let pixels = usize::try_from(cell.width * cell.height).unwrap_or(0);
+    let mut px = Vec::with_capacity(pixels * 4);
     for y in 0..cell.height {
         for x in 0..cell.width {
             let fx = if flip_x {
-                w - (x as f64 + 0.5)
+                width - (f64::from(x) + 0.5)
             } else {
-                x as f64 + 0.5
+                f64::from(x) + 0.5
             };
             let fy = if flip_y {
-                h - (y as f64 + 0.5)
+                height - (f64::from(y) + 0.5)
             } else {
-                y as f64 + 0.5
+                f64::from(y) + 0.5
             };
             // Signed distance to the box edge, negative inside.
             let (dx, dy) = (cx - fx, cy - fy);
-            let d = if dx > 0.0 && dy > 0.0 {
+            let dist = if dx > 0.0 && dy > 0.0 {
                 dx.hypot(dy) - radius
             } else {
                 dx.max(dy) - radius
             };
-            let alpha = (0.5 - d).clamp(0.0, 1.0);
-            px.extend([r, g, b, (alpha * 255.0).round() as u8]);
+            px.extend([red, green, blue, coverage_alpha(0.5 - dist)]);
         }
     }
     px
+}
+
+/// A pixel's coverage (clamped to 0..=1) as an alpha byte.
+// The clamp keeps the rounded value in 0..=255, so the cast neither
+// truncates nor loses a sign; std has no checked float-to-int conversion.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn coverage_alpha(coverage: f64) -> u8 {
+    (coverage.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 fn transmit(out: &mut impl Write, id: u32, cell: CellSize, rgba: &[u8]) -> io::Result<()> {
@@ -182,6 +200,7 @@ fn transmit(out: &mut impl Write, id: u32, cell: CellSize, rgba: &[u8]) -> io::R
     Ok(())
 }
 
+#[must_use]
 pub fn base64(bytes: &[u8]) -> String {
     const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -189,7 +208,7 @@ pub fn base64(bytes: &[u8]) -> String {
         let n = group
             .iter()
             .enumerate()
-            .fold(0u32, |n, (i, &b)| n | (b as u32) << (16 - 8 * i));
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
         for i in 0..4 {
             if i <= group.len() {
                 s.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
@@ -204,6 +223,7 @@ pub fn base64(bytes: &[u8]) -> String {
 /// Ask the terminal whether it supports kitty graphics and how big a cell
 /// is in pixels. Must run in raw mode before anything else reads stdin.
 /// None when graphics are unsupported or nobody answered in time.
+#[must_use]
 pub fn detect(timeout: Duration) -> Option<CellSize> {
     if std::env::var_os("TMUX").is_some() {
         return None;
@@ -225,6 +245,11 @@ pub fn detect(timeout: Duration) -> Option<CellSize> {
     (width > 0 && height > 0).then_some(CellSize { width, height })
 }
 
+/// `left` as poll(2)'s timeout, saturating at the longest it takes.
+fn poll_millis(left: Duration) -> libc::c_int {
+    libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX)
+}
+
 /// What the terminal sends back, up to its device attributes reply
 /// (`CSI ? … c`) or the timeout.
 fn read_reply(timeout: Duration) -> String {
@@ -242,7 +267,7 @@ fn read_reply(timeout: Duration) -> String {
             revents: 0,
         };
         // SAFETY: one valid pollfd for the duration of the call.
-        if unsafe { libc::poll(&mut fd, 1, left.as_millis() as libc::c_int) } <= 0 {
+        if unsafe { libc::poll(&raw mut fd, 1, poll_millis(left)) } <= 0 {
             break;
         }
         let mut chunk = [0u8; 512];

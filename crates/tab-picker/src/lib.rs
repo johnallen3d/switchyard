@@ -25,7 +25,7 @@
 //! and the picker highlights that tab again.
 //!
 //! The highlighted row and an armed archive survive each delivery. Tasks
-//! link to tabs by (session_id, window_id). Views, moved along with ctrl-h
+//! link to tabs by (`session_id`, `window_id`). Views, moved along with ctrl-h
 //! and ctrl-l:
 //!
 //! - Inbox (default): one flat list across every session, each row naming
@@ -35,7 +35,7 @@
 //!   with no agent are left out, as is the picker's own `switchyard` tab;
 //!   the quick float (cmd+k) lists them under Tabs.
 //!   Pinned tasks lead the list and Snoozed ones trail it. A task an
-//!   agent spawned (through the MCP endpoint's spawn_task) hangs off its
+//!   agent spawned (through the MCP endpoint's `spawn_task`) hangs off its
 //!   spawner's row as a small tree when both are listed (see `nest`).
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
@@ -75,7 +75,7 @@
 //!
 //! Inbox keeps a reply box at its bottom, under the preview (or the
 //! transcript), expanded or not:
-//! the new-session picker's prompt box (see the ui crate's prompt_box),
+//! the new-session picker's prompt box (see the ui crate's `prompt_box`),
 //! with its rounded corners. Tab moves into it to message the highlighted
 //! agent; alt- or shift-Enter adds a line, Escape (or Tab, while it's
 //! empty) leaves it, and shift with the arrows (or the page keys) scrolls
@@ -100,6 +100,7 @@ mod standalone;
 mod usage;
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::io;
 use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -135,6 +136,35 @@ const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
 const ICON_PIN: &str = "\u{f0403}"; // nf-md-pin
 const ICON_SNOOZE: &str = "\u{f04b2}"; // nf-md-sleep
+
+pub(crate) use switchyard_ui::draw::cells;
+
+/// A count as a float, for display and proportions: rounding only past
+/// 2^53, which no token count, byte count or row count comes near.
+// There is no lossless conversion from u64 to f64; this is the one place
+// that accepts the rounding, rather than a cast at every use.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn approx(n: u64) -> f64 {
+    n as f64
+}
+
+/// A non-negative cell count from a float, rounded to the nearest.
+// Floats have no `TryFrom` into integers; `as` saturates (NaN and
+// negatives become 0), which is the clamp wanted here.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) fn round_cells(x: f64) -> usize {
+    x.round() as usize
+}
+
+/// A `width` by `height` box in the middle of `area`, which must hold it.
+pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
 /// no known status), the tabs with no agent (quick float only), then Snoozed.
@@ -176,6 +206,7 @@ pub enum View {
 
 impl View {
     /// `inbox` (or the older `all`), `usage` or `archive`.
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "inbox" | "all" => Some(View::Inbox),
@@ -316,7 +347,7 @@ impl Chooser {
 /// The ctrl-s prompt: when to wake the highlighted task, typed (see
 /// snooze.rs). Empty, it wakes a snoozed task.
 struct Snooze {
-    /// The task's tab, as (session_id, window_id), which stays highlighted.
+    /// The task's tab, as (`session_id`, `window_id`), which stays highlighted.
     key: Key,
     label: String,
     /// The task's current snooze, 0 for none.
@@ -339,7 +370,7 @@ impl Snooze {
 /// prompt box the new-session picker uses and kept in a prompt file, which
 /// `switchyard task act message` sends.
 struct Reply {
-    /// The agent's tab, as (session_id, window_id), which stays highlighted.
+    /// The agent's tab, as (`session_id`, `window_id`), which stays highlighted.
     key: Key,
     label: String,
     prompt: PromptBox,
@@ -380,14 +411,95 @@ fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
 }
 
+/// The help float's sections for the transcript, scrollback and the
+/// floats, which say the same whatever is highlighted.
+fn help_float_sections() -> Vec<help::Section> {
+    use help::Section;
+    vec![
+        Section::new(
+            "Transcript",
+            &[
+                ("⌃V", "scroll back"),
+                ("⇧↑ ⇧PgUp", "scroll back from here"),
+                ("⇥", "message the agent"),
+            ],
+        ),
+        Section::new(
+            "Scrollback",
+            &[
+                ("j k ↑↓", "move a line"),
+                ("⌃D ⌃U", "half a page"),
+                ("⌃F ⌃B PgDn PgUp", "a page"),
+                ("{ }", "previous, next blank line"),
+                ("g G Home End", "top, bottom"),
+                ("/ ?", "search forward, back"),
+                ("n N", "next, previous match"),
+                ("v V Space", "start or drop a selection"),
+                ("y ⏎", "copy and leave"),
+                ("esc", "drop selection, search, then leave"),
+                ("q ⌃C ⌃V", "leave"),
+            ],
+        ),
+        Section::new(
+            "Reply box",
+            &[
+                ("⏎", "send"),
+                ("⌥⏎ ⇧⏎", "new line"),
+                ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
+                ("⌃V", "scroll back, then back here"),
+                ("⌃G", "edit in the editor"),
+                ("⌃C", "clear, then leave"),
+                ("esc", "leave"),
+            ],
+        ),
+        Section::new(
+            "Snooze prompt",
+            &[
+                ("⏎", "snooze (empty: wake)"),
+                ("⌃U", "clear"),
+                ("esc", "cancel"),
+            ],
+        ),
+        Section::new(
+            "Link chooser",
+            &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")],
+        ),
+        Section::new(
+            "Work items",
+            &[
+                ("⏎ o", "open in the browser"),
+                ("c", "comment on a card (asks first)"),
+                ("x", "close a card (asks first)"),
+                ("r", "mark a draft PR ready (asks first)"),
+                ("⏎ y", "confirm; other keys go back"),
+                ("↑↓ j k", "move"),
+                ("esc ⌃R", "close"),
+            ],
+        ),
+        Section::new(
+            "This float",
+            &[
+                ("/", "filter"),
+                ("⌃U", "clear the filter"),
+                ("j k ↑↓", "scroll"),
+                ("esc q", "close"),
+            ],
+        ),
+    ]
+}
+
 // ---------------------------------------------------------------- app
 
+// The picker's whole state: its flags (follow, kept, expanded, sidebar,
+// quick, ...) are independent toggles of separate features, not states of
+// one machine, so folding them into enums would only obscure them.
+#[allow(clippy::struct_excessive_bools)]
 struct App {
     p: Palette,
     sessions: Vec<Session>,
     tabs: Vec<Tab>,
     tasks: Vec<Task>,
-    /// The tab the picker opened from, as (session_id, window_id); the
+    /// The tab the picker opened from, as (`session_id`, `window_id`); the
     /// selection follows it until John moves.
     current: Key,
     follow: bool,
@@ -432,8 +544,8 @@ struct App {
     cell: Option<chrome::CellSize>,
     /// Whether ctrl-g asked for the reply box's message in `$EDITOR`.
     edit_requested: bool,
-    /// Pins and snoozes made here, by (host, window_id): (pinned,
-    /// snoozed_until, when), kept over deliveries until they agree.
+    /// Pins and snoozes made here, by (host, `window_id)`: (pinned,
+    /// `snoozed_until`, when), kept over deliveries until they agree.
     pending: HashMap<Key, (bool, u64, Instant)>,
     list_area: Rect,
     started: Instant,
@@ -445,7 +557,7 @@ struct App {
     /// The last standalone action's outcome (and whether it failed), shown
     /// in the footer until the next key.
     note: Option<(String, bool)>,
-    /// The picker's data, as pastes (see standalone::Feed).
+    /// The picker's data, as pastes (see `standalone::Feed`).
     feed: Option<standalone::Feed>,
     /// A standalone archive running on its own thread, so the picker stays
     /// live meanwhile; its outcome becomes the note.
@@ -460,7 +572,7 @@ struct App {
     /// sidebar, it is collapsed.
     expanded: bool,
     /// Inbox is drawn as the sidebar and the highlighted row (see
-    /// draw_split), as of the last frame.
+    /// `draw_split`), as of the last frame.
     sidebar: bool,
     /// How far the preview is scrolled back from its bottom, in lines, and
     /// the pane that is for.
@@ -720,7 +832,7 @@ impl App {
         self.selected.and_then(|r| self.item(r))
     }
 
-    /// The (session_id, window_id) a row stands for.
+    /// The (`session_id`, `window_id`) a row stands for.
     fn key_of(&self, item: Item) -> Option<Key> {
         match item {
             Item::Status(_) => None,
@@ -872,7 +984,7 @@ impl App {
         match item {
             Item::Tab(t) => self.tabs[t].state != State::Idle || self.tabs[t].task.is_some(),
             Item::Task(k) => self.tasks[k].ended.is_none(),
-            _ => false,
+            Item::Status(_) => false,
         }
     }
 
@@ -930,7 +1042,7 @@ impl App {
                 .sessions
                 .iter()
                 .position(|s| s.id == self.tasks[k].session_id),
-            _ => None,
+            Item::Status(_) => None,
         }
     }
 
@@ -981,10 +1093,10 @@ impl App {
                         name: &t.name,
                         msg: &t.msg,
                         host: &t.host,
-                        state: if tab.state != State::Idle {
-                            tab.state.name()
-                        } else {
+                        state: if tab.state == State::Idle {
                             &t.state
+                        } else {
+                            tab.state.name()
                         },
                         ended: None,
                         left: false,
@@ -1206,6 +1318,28 @@ impl App {
     /// or snooze still says where the row goes. Headings left with no rows
     /// go.
     fn nest(&mut self) {
+        /// Push `item`'s children, and theirs in turn, each with its guide.
+        fn descend(
+            item: Item,
+            lead: &str,
+            children: &HashMap<Item, Vec<Item>>,
+            rows: &mut Vec<Item>,
+            tree: &mut HashMap<Item, Guide>,
+        ) {
+            let Some(kids) = children.get(&item) else {
+                return;
+            };
+            for (n, &kid) in kids.iter().enumerate() {
+                let guide = Guide {
+                    lead: lead.to_string(),
+                    last: n + 1 == kids.len(),
+                };
+                let next = guide.stem();
+                rows.push(kid);
+                tree.insert(kid, guide);
+                descend(kid, &next, children, rows, tree);
+            }
+        }
         let listed: HashSet<Item> = self.rows.iter().copied().filter(selectable).collect();
         let mut parent: HashMap<Item, Item> = HashMap::new();
         for &item in &listed {
@@ -1250,27 +1384,6 @@ impl App {
         }
         for kids in children.values_mut() {
             kids.sort_by_cached_key(|&i| self.agent_key(i));
-        }
-        fn descend(
-            item: Item,
-            lead: &str,
-            children: &HashMap<Item, Vec<Item>>,
-            rows: &mut Vec<Item>,
-            tree: &mut HashMap<Item, Guide>,
-        ) {
-            let Some(kids) = children.get(&item) else {
-                return;
-            };
-            for (n, &kid) in kids.iter().enumerate() {
-                let guide = Guide {
-                    lead: lead.to_string(),
-                    last: n + 1 == kids.len(),
-                };
-                let next = guide.stem();
-                rows.push(kid);
-                tree.insert(kid, guide);
-                descend(kid, &next, children, rows, tree);
-            }
         }
         let old = std::mem::take(&mut self.rows);
         let mut rows = Vec::with_capacity(old.len());
@@ -1394,7 +1507,7 @@ impl App {
     // ------------------------------------------------------------ the pick
 
     /// What Enter would do with the highlighted row, as standalone.rs's
-    /// parse_pick reads it.
+    /// `parse_pick` reads it.
     fn pick(&self) -> String {
         let Some(item) = self.selected_item() else {
             return String::new();
@@ -1575,7 +1688,7 @@ impl App {
     }
 
     /// Keys while the snooze prompt is open: type, Enter (see
-    /// finish_snooze), or Escape or ctrl-c to close it.
+    /// `finish_snooze`), or Escape or ctrl-c to close it.
     fn snooze_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
@@ -1603,7 +1716,7 @@ impl App {
     }
 
     /// Keys while the chooser is open: move, or Escape or ctrl-c to close
-    /// it. Enter never gets here (standalone_key opens the pick).
+    /// it. Enter never gets here (`standalone_key` opens the pick).
     fn chooser_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(c) = &mut self.chooser else { return };
@@ -1691,9 +1804,9 @@ impl App {
 
     /// Keys while the reply box has focus: edit it (alt- or shift-Enter for
     /// a newline), scroll the preview with the page keys or shift and the
-    /// arrows, Enter (see finish_reply), or Escape to leave it (Tab too,
+    /// arrows, Enter (see `finish_reply`), or Escape to leave it (Tab too,
     /// while it's empty). ctrl-c clears the message, then leaves the box;
-    /// ctrl-g edits it in the editor (see edit_reply).
+    /// ctrl-g edits it in the editor (see `edit_reply`).
     fn reply_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
@@ -1807,28 +1920,11 @@ impl App {
             return self.reply_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
-        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
-        let page = self.page();
         // ctrl-x arms an archive; on a worktree with uncommitted changes, the
         // next ctrl-x (typed by the config when Enter answers `ask`) moves on
         // to "are you sure". Enter and Escape never get here.
         if matches!(k.code, KeyCode::Char('x') if ctrl) {
-            let dirty = self.selected_task().is_some_and(|t| t.dirty > 0);
-            if !self.armable() {
-                let why = if self.selected_task().is_some() {
-                    "its worktree is already gone: nothing to archive"
-                } else {
-                    "no agent here: ctrl-x archives agent tabs"
-                };
-                self.note = Some((why.into(), true));
-            }
-            self.armed = match self.armed {
-                _ if !self.armable() => Armed::No,
-                Armed::Archive | Armed::Force if dirty => Armed::Force,
-                armed if armed.archives() => armed,
-                _ => Armed::Archive,
-            };
+            self.arm_archive();
             return;
         }
         // standalone_key acts on Enter before it gets here.
@@ -1837,47 +1933,83 @@ impl App {
             return;
         }
         self.armed = Armed::No;
-        if self.view == View::Usage {
-            let delta = match k.code {
-                KeyCode::Up | KeyCode::Char('p' | 'k') if k.code == KeyCode::Up || ctrl => Some(-1),
-                KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => {
-                    Some(1)
-                }
-                KeyCode::PageUp => Some(-page),
-                KeyCode::PageDown => Some(page),
-                KeyCode::Home => {
-                    self.usage.offset = 0;
-                    return;
-                }
-                KeyCode::End => {
-                    self.usage.offset = usize::MAX;
-                    return;
-                }
-                _ => None,
-            };
-            if let Some(delta) = delta {
-                self.usage.offset = self.usage.offset.saturating_add_signed(delta);
-                return;
-            }
+        if self.view == View::Usage && self.usage_key(k) {
+            return;
         }
+        self.list_key(k);
+    }
+
+    /// ctrl-x: arm the selected task's archive, or move an armed archive of
+    /// a dirty worktree on to forcing it; a note says why when it can't.
+    fn arm_archive(&mut self) {
+        let dirty = self.selected_task().is_some_and(|t| t.dirty > 0);
+        if !self.armable() {
+            let why = if self.selected_task().is_some() {
+                "its worktree is already gone: nothing to archive"
+            } else {
+                "no agent here: ctrl-x archives agent tabs"
+            };
+            self.note = Some((why.into(), true));
+        }
+        self.armed = match self.armed {
+            _ if !self.armable() => Armed::No,
+            Armed::Archive | Armed::Force if dirty => Armed::Force,
+            armed if armed.archives() => armed,
+            _ => Armed::Archive,
+        };
+    }
+
+    /// The Usage view's scrolling keys; false for keys it leaves to the
+    /// list.
+    fn usage_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let page = self.page();
+        let delta = match k.code {
+            KeyCode::Up | KeyCode::Char('p' | 'k') if k.code == KeyCode::Up || ctrl => Some(-1),
+            KeyCode::Down | KeyCode::Char('n' | 'j') if k.code == KeyCode::Down || ctrl => Some(1),
+            KeyCode::PageUp => Some(-page),
+            KeyCode::PageDown => Some(page),
+            KeyCode::Home => {
+                self.usage.offset = 0;
+                return true;
+            }
+            KeyCode::End => {
+                self.usage.offset = usize::MAX;
+                return true;
+            }
+            _ => None,
+        };
+        if let Some(delta) = delta {
+            self.usage.offset = self.usage.offset.saturating_add_signed(delta);
+            return true;
+        }
+        false
+    }
+
+    /// The list's keys: search, moving, views and the floats they open.
+    fn list_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
+        let page = self.page();
         match k.code {
             // standalone_key acts on ctrl-b and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('r') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
-                self.expanded = !self.expanded
+                self.expanded = !self.expanded;
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
-            KeyCode::Char('p') | KeyCode::Char('k') if ctrl => self.step(-1),
-            KeyCode::Char('n') | KeyCode::Char('j') if ctrl => self.step(1),
+            KeyCode::Char('p' | 'k') if ctrl => self.step(-1),
+            KeyCode::Char('n' | 'j') if ctrl => self.step(1),
             // The archive is long and has no transcript, so ctrl-u and
             // ctrl-d page through it by half a page, as in scrollback.
             KeyCode::Char('u') if ctrl && self.view == View::Archive => {
-                self.step(-(page / 2).max(1))
+                self.step(-(page / 2).max(1));
             }
             KeyCode::Char('d') if ctrl && self.view == View::Archive => {
-                self.step((page / 2).max(1))
+                self.step((page / 2).max(1));
             }
             KeyCode::Char('u') if ctrl => {
                 self.query.clear();
@@ -1918,7 +2050,7 @@ impl App {
             // do with it expanded, goes into scrollback; it is already at
             // its end.
             KeyCode::Up | KeyCode::PageUp if shift || self.expanded => {
-                self.enter_scrollback(Some(k))
+                self.enter_scrollback(Some(k));
             }
             KeyCode::Home if self.expanded => self.enter_scrollback(Some(k)),
             KeyCode::Down | KeyCode::PageDown if shift || self.expanded => {}
@@ -1938,15 +2070,16 @@ impl App {
     /// How far the page keys move: a list's height in rows, less two for
     /// context (two-line rows in the sidebar).
     fn page(&self) -> isize {
-        let lines = (self.list_area.height as isize - 2).max(1);
-        if self.sidebar && !self.expanded {
-            (lines / SIDE_ROW_LINES as isize).max(1)
+        let lines = usize::from(self.list_area.height.saturating_sub(2).max(1));
+        let rows = if self.sidebar && !self.expanded {
+            (lines / SIDE_ROW_LINES).max(1)
         } else {
             lines
-        }
+        };
+        isize::try_from(rows).unwrap_or(isize::MAX)
     }
 
-    /// Scroll the preview back (positive) or forward; draw_preview keeps it
+    /// Scroll the preview back (positive) or forward; `draw_preview` keeps it
     /// within the capture.
     fn scroll_preview(&mut self, delta: isize) {
         self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
@@ -2000,20 +2133,20 @@ impl App {
         let Some(lines) = self.transcript_text() else {
             return self.leave_scrollback();
         };
-        let h = self.transcript.height as usize;
+        let height = self.transcript.height as usize;
         let Some(sb) = &mut self.scrollback else {
             return;
         };
-        match sb.key(k, &lines, h) {
-            scrollback::Outcome::Stay => sb.sync(lines.len(), h),
+        match sb.key(k, &lines, height) {
+            scrollback::Outcome::Stay => sb.sync(lines.len(), height),
             scrollback::Outcome::Exit => self.leave_scrollback(),
-            scrollback::Outcome::Copy(a, b) => {
-                let Some(text) = self.preview.as_ref().and_then(|pv| pv.source(a, b)) else {
+            scrollback::Outcome::Copy(from, to) => {
+                let Some(text) = self.preview.as_ref().and_then(|pv| pv.source(from, to)) else {
                     return self.leave_scrollback();
                 };
-                let n = text.lines().count();
+                let count = text.lines().count();
                 self.note = Some((
-                    format!("copied {n} line{}", if n == 1 { "" } else { "s" }),
+                    format!("copied {count} line{}", if count == 1 { "" } else { "s" }),
                     false,
                 ));
                 self.copied = Some(text);
@@ -2128,21 +2261,23 @@ impl App {
     }
 
     /// Rows the right side's header takes in `width`: the name line, its
-    /// work items' titles (at most DETAIL_LINK_ROWS), then the status
-    /// message wrapped to at most DETAIL_MSG_ROWS.
+    /// work items' titles (at most `DETAIL_LINK_ROWS`), then the status
+    /// message wrapped to at most `DETAIL_MSG_ROWS`.
     fn detail_rows(&self, width: u16) -> u16 {
         let Some(item) = self.selected_item() else {
             return 1;
         };
         let t = self.flat(item);
-        let titles = titled(t.links).count() as u16;
+        let titles = cells(titled(t.links).count());
         if t.msg.is_empty() {
             return 1 + titles;
         }
         1 + titles
-            + preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1))
-                .len()
-                .min(DETAIL_MSG_ROWS) as u16
+            + cells(
+                preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1))
+                    .len()
+                    .min(DETAIL_MSG_ROWS),
+            )
     }
 
     /// The right side's header: the highlighted row's status, project and
@@ -2158,7 +2293,7 @@ impl App {
             return;
         };
         let t = self.flat(item);
-        let titles = titled(t.links).count() as u16;
+        let titles = cells(titled(t.links).count());
         let [line, titles_area, msg_area] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Length(titles),
@@ -2476,22 +2611,21 @@ impl App {
     /// what Tab would do.
     fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
         let p = self.p;
-        let unfocused = match self.reply {
-            Some(_) => None,
-            None => {
-                let label = self.preview_want().map(|_| self.selected_label());
-                let blocked = self
-                    .selected_item()
-                    .is_some_and(|i| self.flat(i).state == "blocked");
-                Some(match label {
-                    Some(l) if blocked => (
-                        format!("{l} is waiting on a prompt; answer it in its tab"),
-                        Some(l),
-                    ),
-                    Some(l) => ("Tab to type a message".to_string(), Some(l)),
-                    None => ("Highlight an agent to message it".to_string(), None),
-                })
-            }
+        let unfocused = if self.reply.is_some() {
+            None
+        } else {
+            let label = self.preview_want().map(|_| self.selected_label());
+            let blocked = self
+                .selected_item()
+                .is_some_and(|i| self.flat(i).state == "blocked");
+            Some(match label {
+                Some(l) if blocked => (
+                    format!("{l} is waiting on a prompt; answer it in its tab"),
+                    Some(l),
+                ),
+                Some(l) => ("Tab to type a message".to_string(), Some(l)),
+                None => ("Highlight an agent to message it".to_string(), None),
+            })
         };
         let tokens = self.tokens_label();
         let (prompt, label, focused) = match (&mut self.reply, unfocused) {
@@ -2548,18 +2682,13 @@ impl App {
     /// The ctrl-s prompt, when open: a small box over the list with the
     /// typed text and when it means, or why it can't be read.
     fn draw_snooze(&self, f: &mut Frame, area: Rect) {
-        let Some(z) = &self.snooze else { return };
+        let Some(prompt) = &self.snooze else { return };
         let p = &self.p;
-        let w = 60.min(area.width);
-        let h = 4.min(area.height);
-        let r = Rect {
-            x: area.x + (area.width - w) / 2,
-            y: area.y + (area.height - h) / 2,
-            width: w,
-            height: h,
-        };
+        let width = 60.min(area.width);
+        let height = 4.min(area.height);
+        let r = centered(area, width, height);
         f.render_widget(Clear, r);
-        let title = format!(" Snooze {} ", z.label);
+        let title = format!(" Snooze {} ", prompt.label);
         let block = Block::new()
             .borders(Borders::ALL)
             .border_style(Style::new().fg(p.iris))
@@ -2573,7 +2702,7 @@ impl App {
         let input = Line::from(vec![
             Span::styled(" until ", Style::new().fg(p.muted)),
             Span::styled(
-                z.text.clone(),
+                prompt.text.clone(),
                 Style::new().fg(p.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled("▏", Style::new().fg(p.iris)),
@@ -2587,12 +2716,12 @@ impl App {
             height: 1,
             ..inner
         };
-        let line = match (&z.until, z.text.trim().is_empty()) {
+        let line = match (&prompt.until, prompt.text.trim().is_empty()) {
             (Ok(0), _) => Line::from(vec![
                 Span::styled(
                     format!(
                         " Snoozed until {} · ",
-                        snooze::describe(z.current, self.now)
+                        snooze::describe(prompt.current, self.now)
                     ),
                     Style::new().fg(p.muted),
                 ),
@@ -2634,14 +2763,9 @@ impl App {
             })
             .max()
             .unwrap_or(0);
-        let w = (want as u16 + 2).min(area.width);
-        let h = (c.links.len() as u16 + 2).min(area.height);
-        let r = Rect {
-            x: area.x + (area.width - w) / 2,
-            y: area.y + (area.height - h) / 2,
-            width: w,
-            height: h,
-        };
+        let width = cells(want).saturating_add(2).min(area.width);
+        let height = cells(c.links.len()).saturating_add(2).min(area.height);
+        let r = centered(area, width, height);
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -2655,7 +2779,7 @@ impl App {
             let selected = i == c.selected;
             let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
-                y: inner.y + i as u16,
+                y: inner.y + cells(i),
                 height: 1,
                 ..inner
             };
@@ -2755,7 +2879,7 @@ impl App {
         let spin = SPINNER[tick(self.started) % SPINNER.len()];
         match self.tasks_load {
             Tasks::Waiting | Tasks::Live if self.sidebar => {
-                right.push(Span::styled(format!("{spin}  "), Style::new().fg(p.muted)))
+                right.push(Span::styled(format!("{spin}  "), Style::new().fg(p.muted)));
             }
             Tasks::Waiting => right.push(Span::styled(
                 format!("{spin} loading tasks  "),
@@ -2792,17 +2916,16 @@ impl App {
                 }
             }
         }
-        let (total, kind) = match self.view {
-            View::Archive => (
+        let (total, kind) = if self.view == View::Archive {
+            (
                 self.tasks.iter().filter(|t| t.ended.is_some()).count(),
                 "ended",
-            ),
-            _ => {
-                let listed = (0..self.tabs.len())
-                    .filter(|&t| self.listed(Item::Tab(t)))
-                    .count();
-                (listed + self.orphans().count(), "tabs")
-            }
+            )
+        } else {
+            let listed = (0..self.tabs.len())
+                .filter(|&t| self.listed(Item::Tab(t)))
+                .count();
+            (listed + self.orphans().count(), "tabs")
         };
         if typing || shown != total {
             right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));
@@ -2881,7 +3004,7 @@ impl App {
         let cols = (proj_w, name_w);
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect {
-                y: area.y + (i - self.offset) as u16,
+                y: area.y + cells(i - self.offset),
                 height: 1,
                 ..list
             };
@@ -2935,21 +3058,7 @@ impl App {
             Profile::All => None,
             profile => Some(profile.name()),
         };
-        let lines = if !self.query.trim().is_empty() {
-            vec![
-                icon(ICON_SEARCH, p.hl_high),
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("Nothing matches ", Style::new().fg(p.subtle)),
-                    Span::styled(format!("“{}”", self.query), Style::new().fg(p.text)),
-                ]),
-                if self.view == View::Archive {
-                    draw::key_hint(p, "⌃W", " deletes a word of the search")
-                } else {
-                    draw::key_hint(p, "⌃U", " clears the search")
-                },
-            ]
-        } else {
+        let lines = if self.query.trim().is_empty() {
             match self.view {
                 View::Usage => Vec::new(),
                 View::Inbox => match &self.load {
@@ -3001,6 +3110,20 @@ impl App {
                     ],
                 },
             }
+        } else {
+            vec![
+                icon(ICON_SEARCH, p.hl_high),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("Nothing matches ", Style::new().fg(p.subtle)),
+                    Span::styled(format!("“{}”", self.query), Style::new().fg(p.text)),
+                ]),
+                if self.view == View::Archive {
+                    draw::key_hint(p, "⌃W", " deletes a word of the search")
+                } else {
+                    draw::key_hint(p, "⌃U", " clears the search")
+                },
+            ]
         };
         draw::centered(f, area, lines);
     }
@@ -3170,7 +3293,7 @@ impl App {
         let tab = match item {
             Item::Tab(t) => &self.tabs[t],
             Item::Task(k) => return (self.tasks[k].project.clone(), true),
-            _ => return (String::new(), false),
+            Item::Status(_) => return (String::new(), false),
         };
         if let Some(k) = tab.task {
             return (self.tasks[k].project.clone(), true);
@@ -3199,7 +3322,7 @@ impl App {
     }
 
     /// Inbox's list as the sidebar: each tab or task on two lines (see
-    /// draw_side_row) under the one-line status headings, scrolled to keep
+    /// `draw_side_row`) under the one-line status headings, scrolled to keep
     /// the highlighted row, and the heading over it, in view. When it all
     /// fits, the Snoozed group sits at the bottom, the free space above it.
     fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
@@ -3238,9 +3361,9 @@ impl App {
             if y >= h {
                 break;
             }
-            let rows = heights[i].min(h - y) as u16;
+            let rows = cells(heights[i].min(h - y));
             let r = Rect {
-                y: area.y + y as u16,
+                y: area.y + cells(y),
                 height: rows,
                 ..list
             };
@@ -3474,100 +3597,8 @@ impl App {
     /// highlighted row's actions as the footer used to name them.
     fn help_sections(&self) -> Vec<help::Section> {
         use help::Section;
-        let own = |keys: Vec<(&str, &str)>| {
-            keys.into_iter()
-                .map(|(k, d)| (k.to_string(), d.to_string()))
-                .collect()
-        };
         let mut sections = Vec::new();
-        if self.view != View::Usage {
-            let task = self.selected_task();
-            let mut row: Vec<(&str, &str)> = match task {
-                Some(t) if t.ended.is_some() && t.left && t.safe() => {
-                    vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")]
-                }
-                Some(t) if t.ended.is_some() && t.left => {
-                    vec![("⏎", "resume"), ("⌃X", "remove worktree")]
-                }
-                Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
-                Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
-                Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
-                None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
-                None if self.selected_item().is_some() => vec![("⏎", "go")],
-                None => vec![],
-            };
-            // ⌃B opens the task's only work item, or a chooser over several.
-            let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
-            match links.as_slice() {
-                [] => {}
-                [link] => row.push((
-                    "⌃B",
-                    if link.kind == "pr" {
-                        "open PR"
-                    } else {
-                        "open link"
-                    },
-                )),
-                _ => row.push(("⌃B", "choose a link to open")),
-            }
-            if !links.is_empty() {
-                row.push(("⌃R", "work items: open, comment, close, mark ready"));
-            }
-            if self.can_pin() {
-                row.push((
-                    "⌃T",
-                    if task.is_some_and(|t| t.pinned) {
-                        "unpin"
-                    } else {
-                        "pin"
-                    },
-                ));
-            }
-            if self.can_snooze() {
-                row.push((
-                    "⌃S",
-                    if task.is_some_and(|t| t.is_snoozed(self.now)) {
-                        "wake"
-                    } else {
-                        "snooze"
-                    },
-                ));
-            }
-            if self.preview_want().is_some() {
-                row.push(("⇥", "message the agent"));
-            }
-            if !row.is_empty() {
-                sections.push(Section {
-                    title: "Highlighted row",
-                    keys: own(row),
-                });
-            }
-            let mut moving = vec![
-                ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
-                ("PgUp PgDn", "page"),
-                ("Home End", "first, last"),
-            ];
-            if self.view == View::Inbox {
-                moving.push(("⌥↑↓", "previous, next group"));
-            }
-            if self.view == View::Archive {
-                moving.extend([
-                    ("⌃D ⌃U", "half a page"),
-                    ("type", "search"),
-                    ("⌃W ⌥⌫", "delete a word"),
-                ]);
-            } else {
-                moving.extend([
-                    ("type", "search"),
-                    ("⌃W ⌥⌫", "delete a word"),
-                    ("⌃U", "clear the search"),
-                ]);
-            }
-            sections.push(Section {
-                title: "Moving and searching",
-                keys: own(moving),
-            });
-        } else {
+        if self.view == View::Usage {
             sections.push(Section::new(
                 "Usage",
                 &[
@@ -3576,7 +3607,124 @@ impl App {
                     ("Home End", "top, bottom"),
                 ],
             ));
+        } else {
+            let row = self.row_keys();
+            if !row.is_empty() {
+                sections.push(Section::new("Highlighted row", &row));
+            }
+            sections.push(Section::new("Moving and searching", &self.moving_keys()));
         }
+        sections.push(self.views_section());
+        sections.extend(help_float_sections());
+        // Where John is goes first.
+        let here = if self.scrollback.is_some() {
+            Some("Scrollback")
+        } else if self.reply.is_some() {
+            Some("Reply box")
+        } else if self.snooze.is_some() {
+            Some("Snooze prompt")
+        } else if self.chooser.is_some() {
+            Some("Link chooser")
+        } else if self.items.is_some() {
+            Some("Work items")
+        } else {
+            None
+        };
+        if let Some(i) = here.and_then(|t| sections.iter().position(|s| s.title == t)) {
+            let s = sections.remove(i);
+            sections.insert(0, s);
+        }
+        sections
+    }
+
+    /// The help float's keys for the highlighted row, as it stands.
+    fn row_keys(&self) -> Vec<(&'static str, &'static str)> {
+        let task = self.selected_task();
+        let mut row: Vec<(&str, &str)> = match task {
+            Some(t) if t.ended.is_some() && t.left && t.safe() => {
+                vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")]
+            }
+            Some(t) if t.ended.is_some() && t.left => {
+                vec![("⏎", "resume"), ("⌃X", "remove worktree")]
+            }
+            Some(t) if t.ended.is_some() => vec![("⏎", "resume")],
+            Some(t) if t.safe() => vec![("⏎", "go"), ("⌃X", "archive (merged)")],
+            Some(_) => vec![("⏎", "go"), ("⌃X", "archive")],
+            None if self.selected_agent_tab().is_some() => vec![("⏎", "go"), ("⌃X", "archive")],
+            None if self.selected_item().is_some() => vec![("⏎", "go")],
+            None => vec![],
+        };
+        // ⌃B opens the task's only work item, or a chooser over several.
+        let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
+        match links.as_slice() {
+            [] => {}
+            [link] => row.push((
+                "⌃B",
+                if link.kind == "pr" {
+                    "open PR"
+                } else {
+                    "open link"
+                },
+            )),
+            _ => row.push(("⌃B", "choose a link to open")),
+        }
+        if !links.is_empty() {
+            row.push(("⌃R", "work items: open, comment, close, mark ready"));
+        }
+        if self.can_pin() {
+            row.push((
+                "⌃T",
+                if task.is_some_and(|t| t.pinned) {
+                    "unpin"
+                } else {
+                    "pin"
+                },
+            ));
+        }
+        if self.can_snooze() {
+            row.push((
+                "⌃S",
+                if task.is_some_and(|t| t.is_snoozed(self.now)) {
+                    "wake"
+                } else {
+                    "snooze"
+                },
+            ));
+        }
+        if self.preview_want().is_some() {
+            row.push(("⇥", "message the agent"));
+        }
+        row
+    }
+
+    /// The help float's keys for moving and searching in this view.
+    fn moving_keys(&self) -> Vec<(&'static str, &'static str)> {
+        let mut moving = vec![
+            ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
+            ("PgUp PgDn", "page"),
+            ("Home End", "first, last"),
+        ];
+        if self.view == View::Inbox {
+            moving.push(("⌥↑↓", "previous, next group"));
+        }
+        if self.view == View::Archive {
+            moving.extend([
+                ("⌃D ⌃U", "half a page"),
+                ("type", "search"),
+                ("⌃W ⌥⌫", "delete a word"),
+            ]);
+        } else {
+            moving.extend([
+                ("type", "search"),
+                ("⌃W ⌥⌫", "delete a word"),
+                ("⌃U", "clear the search"),
+            ]);
+        }
+        moving
+    }
+
+    /// The help float's keys for switching views and what this view shows.
+    fn views_section(&self) -> help::Section {
         let profile = format!("show {}", self.profile.next().name());
         let mut views = vec![
             ("⌃H ⌃L", "previous, next view"),
@@ -3611,98 +3759,7 @@ impl App {
             View::Usage => {}
         }
         views.push(("? F1", "these keys"));
-        sections.push(Section {
-            title: "Views",
-            keys: own(views),
-        });
-        sections.push(Section::new(
-            "Transcript",
-            &[
-                ("⌃V", "scroll back"),
-                ("⇧↑ ⇧PgUp", "scroll back from here"),
-                ("⇥", "message the agent"),
-            ],
-        ));
-        sections.push(Section::new(
-            "Scrollback",
-            &[
-                ("j k ↑↓", "move a line"),
-                ("⌃D ⌃U", "half a page"),
-                ("⌃F ⌃B PgDn PgUp", "a page"),
-                ("{ }", "previous, next blank line"),
-                ("g G Home End", "top, bottom"),
-                ("/ ?", "search forward, back"),
-                ("n N", "next, previous match"),
-                ("v V Space", "start or drop a selection"),
-                ("y ⏎", "copy and leave"),
-                ("esc", "drop selection, search, then leave"),
-                ("q ⌃C ⌃V", "leave"),
-            ],
-        ));
-        sections.push(Section::new(
-            "Reply box",
-            &[
-                ("⏎", "send"),
-                ("⌥⏎ ⇧⏎", "new line"),
-                ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
-                ("⌃V", "scroll back, then back here"),
-                ("⌃G", "edit in the editor"),
-                ("⌃C", "clear, then leave"),
-                ("esc", "leave"),
-            ],
-        ));
-        sections.push(Section::new(
-            "Snooze prompt",
-            &[
-                ("⏎", "snooze (empty: wake)"),
-                ("⌃U", "clear"),
-                ("esc", "cancel"),
-            ],
-        ));
-        sections.push(Section::new(
-            "Link chooser",
-            &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")],
-        ));
-        sections.push(Section::new(
-            "Work items",
-            &[
-                ("⏎ o", "open in the browser"),
-                ("c", "comment on a card (asks first)"),
-                ("x", "close a card (asks first)"),
-                ("r", "mark a draft PR ready (asks first)"),
-                ("⏎ y", "confirm; other keys go back"),
-                ("↑↓ j k", "move"),
-                ("esc ⌃R", "close"),
-            ],
-        ));
-        sections.push(Section::new(
-            "This float",
-            &[
-                ("/", "filter"),
-                ("⌃U", "clear the filter"),
-                ("j k ↑↓", "scroll"),
-                ("esc q", "close"),
-            ],
-        ));
-        // Where John is goes first.
-        let here = if self.scrollback.is_some() {
-            Some("Scrollback")
-        } else if self.reply.is_some() {
-            Some("Reply box")
-        } else if self.snooze.is_some() {
-            Some("Snooze prompt")
-        } else if self.chooser.is_some() {
-            Some("Link chooser")
-        } else if self.items.is_some() {
-            Some("Work items")
-        } else {
-            None
-        };
-        if let Some(i) = here.and_then(|t| sections.iter().position(|s| s.title == t)) {
-            let s = sections.remove(i);
-            sections.insert(0, s);
-        }
-        sections
+        help::Section::new("Views", &views)
     }
 
     /// Scrollback's footer: the search being typed, else its keys, with
@@ -3726,28 +3783,27 @@ impl App {
         );
         let right_w = str_width(&right.content);
         let room = (area.width as usize).saturating_sub(right_w + 1);
-        let mut spans = match &sb.note {
-            Some(note) => vec![
+        let mut spans = if let Some(note) = &sb.note {
+            vec![
                 Span::raw(" "),
                 Span::styled(note.clone(), Style::new().fg(p.love)),
-            ],
-            None => {
-                let select = if sb.anchor.is_some() {
-                    "copy selection"
-                } else {
-                    "copy line"
-                };
-                draw::hints(
-                    p,
-                    &[
-                        ("y", select, p.subtle),
-                        ("q", "done", p.subtle),
-                        ("F1", "keys", p.subtle),
-                    ],
-                    room,
-                )
-                .0
-            }
+            ]
+        } else {
+            let select = if sb.anchor.is_some() {
+                "copy selection"
+            } else {
+                "copy line"
+            };
+            draw::hints(
+                p,
+                &[
+                    ("y", select, p.subtle),
+                    ("q", "done", p.subtle),
+                    ("F1", "keys", p.subtle),
+                ],
+                room,
+            )
+            .0
         };
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
         spans.push(Span::raw(
@@ -3801,6 +3857,70 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The footer while ctrl-x has armed the selected task's archive: what
+    /// Enter will do, and what it throws away.
+    fn armed_task_spans(&self, t: &Task) -> Vec<Span<'static>> {
+        let p = &self.p;
+        let mut spans = vec![Span::raw(" ")];
+        let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
+        let files = || {
+            let mut list = t.dirty_files.join(", ");
+            if t.dirty > t.dirty_files.len() as u64 {
+                let _ = write!(list, " +{}", t.dirty - t.dirty_files.len() as u64);
+            }
+            list
+        };
+        match self.armed {
+            Armed::Archive if t.dirty > 0 => {
+                spans.push(Span::styled("⏎", key));
+                spans.push(Span::styled(
+                    format!(" archive {}", t.label()),
+                    Style::new().fg(p.love),
+                ));
+                spans.push(Span::styled(
+                    format!(" (uncommitted: {})", files()),
+                    Style::new().fg(p.gold),
+                ));
+                spans.push(Span::styled(
+                    " · other keys cancel",
+                    Style::new().fg(p.muted),
+                ));
+            }
+            Armed::Force => {
+                spans.push(Span::styled(
+                    "Are you sure? ",
+                    Style::new().fg(p.love).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::styled("⏎", key));
+                spans.push(Span::styled(
+                    format!(" throws away {}", files()),
+                    Style::new().fg(p.love),
+                ));
+                spans.push(Span::styled(
+                    " · other keys cancel",
+                    Style::new().fg(p.muted),
+                ));
+            }
+            _ => {
+                let what = if t.ended.is_some() {
+                    "removes worktree"
+                } else {
+                    "closes tab, removes worktree"
+                };
+                spans.push(Span::styled("⏎", key));
+                spans.push(Span::styled(
+                    format!(" archive {}", t.label()),
+                    Style::new().fg(p.love),
+                ));
+                spans.push(Span::styled(
+                    format!(": {what} · other keys cancel"),
+                    Style::new().fg(p.muted),
+                ));
+            }
+        }
+        spans
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
@@ -3860,64 +3980,7 @@ impl App {
             return;
         }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_task()) {
-            let mut spans = vec![Span::raw(" ")];
-            let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
-            let files = || {
-                let mut list = t.dirty_files.join(", ");
-                if t.dirty > t.dirty_files.len() as u64 {
-                    list.push_str(&format!(" +{}", t.dirty - t.dirty_files.len() as u64));
-                }
-                list
-            };
-            match self.armed {
-                Armed::Archive if t.dirty > 0 => {
-                    spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(
-                        format!(" archive {}", t.label()),
-                        Style::new().fg(p.love),
-                    ));
-                    spans.push(Span::styled(
-                        format!(" (uncommitted: {})", files()),
-                        Style::new().fg(p.gold),
-                    ));
-                    spans.push(Span::styled(
-                        " · other keys cancel",
-                        Style::new().fg(p.muted),
-                    ));
-                }
-                Armed::Force => {
-                    spans.push(Span::styled(
-                        "Are you sure? ",
-                        Style::new().fg(p.love).add_modifier(Modifier::BOLD),
-                    ));
-                    spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(
-                        format!(" throws away {}", files()),
-                        Style::new().fg(p.love),
-                    ));
-                    spans.push(Span::styled(
-                        " · other keys cancel",
-                        Style::new().fg(p.muted),
-                    ));
-                }
-                _ => {
-                    let what = if t.ended.is_some() {
-                        "removes worktree"
-                    } else {
-                        "closes tab, removes worktree"
-                    };
-                    spans.push(Span::styled("⏎", key));
-                    spans.push(Span::styled(
-                        format!(" archive {}", t.label()),
-                        Style::new().fg(p.love),
-                    ));
-                    spans.push(Span::styled(
-                        format!(": {what} · other keys cancel"),
-                        Style::new().fg(p.muted),
-                    ));
-                }
-            }
-            f.render_widget(Line::from(spans), area);
+            f.render_widget(Line::from(self.armed_task_spans(t)), area);
             return;
         }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_agent_tab()) {
@@ -3963,7 +4026,7 @@ impl App {
 // ---------------------------------------------------------------- standalone
 
 impl App {
-    /// Start a standalone picker's data (see standalone::Feed).
+    /// Start a standalone picker's data (see `standalone::Feed`).
     fn start_feed(&mut self) {
         self.feed = Some(standalone::Feed::start(self.quick));
     }
@@ -4010,11 +4073,8 @@ impl App {
     fn take_fetched(&mut self) {
         let Some(feed) = &self.feed else { return };
         let mut got = Vec::new();
-        loop {
-            match feed.rx.try_recv() {
-                Ok(text) => got.push(text),
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(text) = feed.rx.try_recv() {
+            got.push(text);
         }
         for text in got {
             self.paste(&text);
@@ -4031,119 +4091,23 @@ impl App {
         // The work items float has every key while it lasts; this runs
         // what it asks for (see items.rs).
         if self.items.is_some() {
-            match self.items_key(k) {
-                Some(items::Outcome::Open(url)) => {
-                    self.note = Some(match standalone::open_url(&url) {
-                        Ok(()) => (format!("opened {url}"), false),
-                        Err(e) => (e, true),
-                    });
-                }
-                Some(items::Outcome::Run { action, item, body }) => {
-                    let profile = self
-                        .items
-                        .as_ref()
-                        .map(|i| i.profile.clone())
-                        .unwrap_or_default();
-                    let url = self
-                        .items
-                        .as_ref()
-                        .map(|i| i.entries[i.selected].link.url.clone())
-                        .unwrap_or_default();
-                    self.busy(term, format!("{} {}…", action.verb(), item.name()));
-                    match standalone::item_action(action, &item, &body, &profile, &url) {
-                        Ok(msg) => {
-                            self.items = None;
-                            self.note = Some((msg, false));
-                            self.refetch();
-                        }
-                        Err(e) => {
-                            if let Some(i) = &mut self.items {
-                                i.failed(action, body);
-                            }
-                            self.note = Some((e, true));
-                        }
-                    }
-                }
-                _ => {}
-            }
+            self.run_items_key(k, term);
             return true;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
-        if let Some(r) = &self.reply {
-            let newline = k
-                .modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
-            if k.code != KeyCode::Enter || newline {
-                return false;
-            }
-            let text = r.prompt.text();
-            if text.is_empty() {
-                return true;
-            }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else {
-                return true;
-            };
-            let label = r.label.clone();
-            self.busy(term, format!("sending to {label}…"));
-            self.note = Some(match standalone::message(&pick, &text) {
-                Ok(msg) => {
-                    self.close_reply();
-                    (msg, false)
-                }
-                Err(e) => (format!("{label}: {e}"), true),
-            });
-            return true;
+        if self.reply.is_some() {
+            return self.send_reply(k, term);
         }
         // The snooze prompt's Enter saves the snooze; other keys edit it.
-        if let Some(z) = &self.snooze {
-            // Unreadable text: Enter does nothing.
-            let Ok(until) = z.until else {
-                return matches!(k.code, KeyCode::Enter);
-            };
-            if !matches!(k.code, KeyCode::Enter) {
-                return false;
-            }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else {
-                return true;
-            };
-            let label = z.label.clone();
-            self.note = Some(match standalone::snooze(&pick, until) {
-                Ok(msg) => {
-                    self.finish_snooze();
-                    let msg = if until > 0 {
-                        format!("{msg} until {}", snooze::describe(until, self.now))
-                    } else {
-                        msg
-                    };
-                    (msg, false)
-                }
-                Err(e) => {
-                    self.snooze = None;
-                    (format!("{label}: {e}"), true)
-                }
-            });
-            self.refetch();
-            return true;
+        if self.snooze.is_some() {
+            return self.save_snooze(k);
         }
         // Pin or unpin in the registry, then here.
         if matches!(k.code, KeyCode::Char('t') if ctrl) {
-            if !self.can_pin() {
-                return true;
-            }
-            let Some(pick) = standalone::parse_pick(&self.pick()) else {
-                return true;
-            };
-            self.note = Some(match standalone::pin(&pick) {
-                Ok(msg) => {
-                    self.toggle_pin();
-                    (msg, false)
-                }
-                Err(e) => (e, true),
-            });
-            self.refetch();
+            self.pin_selected();
             return true;
         }
         // The chooser's pick opens on Enter (or ctrl-b again); other keys
@@ -4227,6 +4191,128 @@ impl App {
         true
     }
 
+    /// Run what the work items float asks for on `k`: open a URL, or take
+    /// an action on its item, keeping the float open with the text if it
+    /// fails.
+    fn run_items_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
+        match self.items_key(k) {
+            Some(items::Outcome::Open(url)) => {
+                self.note = Some(match standalone::open_url(&url) {
+                    Ok(()) => (format!("opened {url}"), false),
+                    Err(e) => (e, true),
+                });
+            }
+            Some(items::Outcome::Run { action, item, body }) => {
+                let profile = self
+                    .items
+                    .as_ref()
+                    .map(|i| i.profile.clone())
+                    .unwrap_or_default();
+                let url = self
+                    .items
+                    .as_ref()
+                    .map(|i| i.entries[i.selected].link.url.clone())
+                    .unwrap_or_default();
+                self.busy(term, format!("{} {}…", action.verb(), item.name()));
+                match standalone::item_action(action, &item, &body, &profile, &url) {
+                    Ok(msg) => {
+                        self.items = None;
+                        self.note = Some((msg, false));
+                        self.refetch();
+                    }
+                    Err(e) => {
+                        if let Some(i) = &mut self.items {
+                            i.failed(action, body);
+                        }
+                        self.note = Some((e, true));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// ctrl-t: pin or unpin the selected row in the registry, then here.
+    fn pin_selected(&mut self) {
+        if !self.can_pin() {
+            return;
+        }
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return;
+        };
+        self.note = Some(match standalone::pin(&pick) {
+            Ok(msg) => {
+                self.toggle_pin();
+                (msg, false)
+            }
+            Err(e) => (e, true),
+        });
+        self.refetch();
+    }
+
+    /// The reply box's Enter: send the message; other keys (false) edit
+    /// it. A failed send keeps the box, so the message isn't lost.
+    fn send_reply(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        let Some(r) = &self.reply else { return false };
+        let newline = k
+            .modifiers
+            .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
+        if k.code != KeyCode::Enter || newline {
+            return false;
+        }
+        let text = r.prompt.text();
+        if text.is_empty() {
+            return true;
+        }
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return true;
+        };
+        let label = r.label.clone();
+        self.busy(term, format!("sending to {label}…"));
+        self.note = Some(match standalone::message(&pick, &text) {
+            Ok(msg) => {
+                self.close_reply();
+                (msg, false)
+            }
+            Err(e) => (format!("{label}: {e}"), true),
+        });
+        true
+    }
+
+    /// The snooze prompt's Enter: save the snooze; other keys (false) edit
+    /// it.
+    fn save_snooze(&mut self, k: KeyEvent) -> bool {
+        let Some(z) = &self.snooze else { return false };
+        // Unreadable text: Enter does nothing.
+        let Ok(until) = z.until else {
+            return matches!(k.code, KeyCode::Enter);
+        };
+        if !matches!(k.code, KeyCode::Enter) {
+            return false;
+        }
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return true;
+        };
+        let label = z.label.clone();
+        self.note = Some(match standalone::snooze(&pick, until) {
+            Ok(msg) => {
+                self.finish_snooze();
+                let msg = if until > 0 {
+                    format!("{msg} until {}", snooze::describe(until, self.now))
+                } else {
+                    msg
+                };
+                (msg, false)
+            }
+            Err(e) => {
+                self.snooze = None;
+                (format!("{label}: {e}"), true)
+            }
+        });
+        self.refetch();
+        true
+    }
+
     /// The quick float's keys: typing searches and the arrows (or ctrl-n,
     /// ctrl-p) move; Enter jumps to the highlighted tab and Escape (or
     /// ctrl-c, ctrl-g) closes the float. Whether to quit.
@@ -4271,7 +4357,7 @@ impl App {
                 if !shift =>
             {
                 self.note = None;
-                self.key(k)
+                self.key(k);
             }
             _ => {}
         }
@@ -4292,6 +4378,187 @@ impl App {
         self.note = Some((msg, false));
         let _ = term.draw(|f| self.draw(f));
     }
+}
+
+// ---------------------------------------------------------------- main
+
+/// The project a folder is in: the repository a `.worktrees` worktree
+/// belongs to, else the folder's own name (`~` for home).
+fn folder_project(dir: &str) -> String {
+    let dir = match dir.trim_end_matches('/') {
+        "" => return dir.to_string(),
+        d => d,
+    };
+    let dir = dir.split_once("/.worktrees/").map_or(dir, |(repo, _)| repo);
+    dir.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(dir)
+        .to_string()
+}
+
+fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
+    loop {
+        app.take_fetched();
+        app.take_archived();
+        app.ask_preview();
+        app.sync_commands();
+        let before = app.now;
+        app.now = now();
+        // A snooze ran out: back to its group.
+        if app
+            .tasks
+            .iter()
+            .any(|t| t.snoozed_until > before && t.snoozed_until <= app.now)
+        {
+            app.refilter();
+        }
+        term.draw(|f| app.draw(f))?;
+        app.save_reply();
+        let animate = app.archiving.is_some()
+            || matches!(app.load, Load::Waiting)
+            || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
+            || app.tabs.iter().any(|t| t.state == State::Working);
+        let wait = if animate {
+            Duration::from_millis(90)
+        } else {
+            Duration::from_millis(250)
+        };
+        if !event::poll(wait)? {
+            continue;
+        }
+        match event::read()? {
+            Event::Key(k) if k.kind != KeyEventKind::Release && app.quick => {
+                if app.quick_key(k, term) {
+                    return Ok(());
+                }
+            }
+            Event::Key(k) if k.kind != KeyEventKind::Release => {
+                if app.standalone_key(k, term) {
+                    continue;
+                }
+                app.note = None;
+                app.key(k);
+                if std::mem::take(&mut app.edit_requested) {
+                    app.edit_reply(term)?;
+                }
+                if let Some(text) = app.copied.take() {
+                    use std::io::Write;
+                    let mut out = io::stdout();
+                    let _ = out
+                        .write_all(scrollback::osc52(&text).as_bytes())
+                        .and_then(|()| out.flush());
+                }
+            }
+            // cmd+k's `current`, and John's own pastes, for the reply box.
+            Event::Paste(text)
+                if app.reply.is_some()
+                    || protocol::data(&text).is_some_and(|(k, _)| k == "current") =>
+            {
+                app.paste(&text);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The picker from a terminal: it fetches its own tabs and tasks and acts on
+/// Enter itself. `current` is the SESSION/WINDOW to highlight, if any.
+///
+/// # Errors
+///
+/// Returns an error if the terminal cannot be drawn to or read from.
+pub fn standalone(view: View, current: Option<&str>) -> io::Result<()> {
+    start(view, current, false)
+}
+
+/// The cmd+k quick jump float (see lua/switchyard/tab-picker.lua): Inbox's
+/// list alone over the current tab, `current` highlighted. Enter shows the
+/// highlighted tab and quits, closing the float; Escape just quits.
+///
+/// # Errors
+///
+/// Returns an error if the terminal cannot be drawn to or read from.
+pub fn quick(current: Option<&str>) -> io::Result<()> {
+    start(View::Inbox, current, true)
+}
+
+fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
+    standalone::detach_env();
+    let mut app = App::new((String::new(), String::new()), view);
+    app.quick = quick;
+    app.excluded_raw = switchyard_core::config::read()
+        .map(|c| c.inbox.exclude)
+        .unwrap_or_default();
+    app.excluded = resolve_folders(&app.excluded_raw);
+    if let Some(c) = current {
+        app.set_current(c);
+    }
+    app.start_feed();
+    picker(app)
+}
+
+/// Sanitized usage accounting as JSON: per-model totals across configured
+/// hosts (what the Usage view renders), or with `local` this host's raw
+/// samples (the remote collector protocol, deduplicated by the caller).
+///
+/// # Errors
+///
+/// Returns an error if the accounting cannot be serialized.
+pub fn usage_json(local: bool) -> io::Result<()> {
+    let mut collector = switchyard_core::usage::Collector::default();
+    let json = if local {
+        let settings = switchyard_core::config::read()
+            .map(|c| c.usage)
+            .unwrap_or_default();
+        serde_json::to_string(&collector.local(
+            &settings,
+            &switchyard_core::rex::local_label(),
+            now(),
+        ))
+    } else {
+        serde_json::to_string(&collector.collect().summary())
+    };
+    println!("{}", json.map_err(io::Error::other)?);
+    Ok(())
+}
+
+fn picker(mut app: App) -> io::Result<()> {
+    let mut term = ratatui::init();
+    // Raw mode is on and nothing has read stdin yet: ask about graphics now,
+    // for the reply box's rounded corners.
+    if let Some(cell) = chrome::detect(Duration::from_millis(300)) {
+        app.cell = Some(cell);
+        app.corners =
+            chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
+    }
+    // No mouse capture, so the terminal's own selection and copy work. Kitty
+    // key reporting makes the reply box's shift-Enter arrive as one
+    // crossterm can decode, as in the new-session picker.
+    let _ = execute!(
+        io::stdout(),
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
+    let result = run(&mut term, &mut app);
+    // Never leave an archive half done: wait for one still running.
+    if let Some(rx) = app.archiving.take() {
+        app.note = Some(("Finishing the archive…".into(), false));
+        let _ = term.draw(|f| app.draw(f));
+        let _ = rx.recv();
+    }
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste
+    );
+    if let Some(corners) = &app.corners {
+        let _ = corners.delete(&mut io::stdout());
+    }
+    ratatui::restore();
+    // A message typed but never sent.
+    app.close_reply();
+    result
 }
 
 #[cfg(test)]
@@ -4350,7 +4617,7 @@ mod tests {
         let picked = app.selected_key();
         assert!(picked.is_some());
         app.paste("rex-data:current\n");
-        assert!(app.query.is_empty());
+        assert_eq!(app.query, "");
         assert_eq!(app.selected_key(), picked);
     }
 
@@ -4471,7 +4738,7 @@ mod tests {
                 {"session_id":"s", "window_id":"lead", "name":"lead", "parent_window":"grand"}
             ]).to_string()).unwrap().remove(0));
         });
-        assert!(app.rows.iter().filter(|r| selectable(r)).count() == 6);
+        assert_eq!(app.rows.iter().filter(|r| selectable(r)).count(), 6);
         let mut seen = HashSet::new();
         assert!(app.rows.iter().all(|r| !selectable(r) || seen.insert(*r)));
     }
@@ -4509,7 +4776,7 @@ mod tests {
         assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Task(2)]);
         app.query = "no-match".into();
         app.refilter();
-        assert!(app.rows.is_empty());
+        assert_eq!(app.rows, [] as [Item; 0]);
         assert!(app.selected.is_none());
     }
 
@@ -4527,7 +4794,7 @@ mod tests {
         app.edge(false);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
         app.selected = Some(4);
-        assert!(app.pick().is_empty());
+        assert_eq!(app.pick(), "");
         assert!(app.selected_key().is_none());
         assert!(app.selected_task().is_none());
     }
@@ -4592,7 +4859,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             !text.contains("waiting") && text.contains("1 done"),
@@ -4605,7 +4872,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("Pinned") && text.contains("Snoozed") && text.contains("snoozed  1h"),
@@ -4774,7 +5041,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("Snooze /woke") && text.contains("until 2h"),
@@ -4832,7 +5099,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("to /woke") && text.contains("report") && text.contains("F1 keys"),
@@ -4883,7 +5150,7 @@ mod tests {
                 .buffer()
                 .content
                 .iter()
-                .map(|c| c.symbol())
+                .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>()
         };
         let text = screen(&mut app);
@@ -4945,7 +5212,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(text.contains("PR #57 ✓ merged · issue #42"), "{text}");
         assert!(text.contains("merged"));
@@ -4956,7 +5223,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(text.contains("? keys"), "{text}");
         assert!(help_text(&app).contains("⌃B choose a link to open"));
@@ -5001,7 +5268,7 @@ mod tests {
         assert_eq!(url(&app).as_deref(), Some("https://p"));
         // Other keys don't type into the search.
         app.key(plain(KeyCode::Char('x')));
-        assert!(app.query.is_empty());
+        assert_eq!(app.query, "");
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
         terminal.draw(|f| app.draw(f)).unwrap();
         let text: String = terminal
@@ -5009,7 +5276,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"),
@@ -5032,7 +5299,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(text.contains("  card 1041  Work item titles"), "{text}");
     }
@@ -5064,9 +5331,12 @@ mod tests {
         assert!(app.items.is_some());
         // Its letters don't search, and x asks first, naming the card.
         app.key(plain(KeyCode::Char('x')));
-        assert!(app.query.is_empty());
+        assert_eq!(app.query, "");
         assert_eq!(
-            app.items.as_ref().and_then(|i| i.question()).as_deref(),
+            app.items
+                .as_ref()
+                .and_then(super::items::Items::question)
+                .as_deref(),
             Some("Close card 1042?")
         );
         let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
@@ -5076,7 +5346,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("Work items")
@@ -5122,12 +5392,12 @@ mod tests {
                 .buffer()
                 .content
                 .iter()
-                .map(|c| c.symbol())
+                .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>()
         };
         let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.key(plain('?'));
-        assert!(app.query.is_empty());
+        assert_eq!(app.query, "");
         let text = screen(&mut app);
         assert!(
             text.contains(" Keys ") && text.contains("Highlighted row") && text.contains("archive"),
@@ -5177,7 +5447,7 @@ mod tests {
                 .buffer()
                 .content
                 .iter()
-                .map(|c| c.symbol())
+                .map(ratatui::buffer::Cell::symbol)
                 .collect::<String>()
         };
         let text = screen(&mut app);
@@ -5264,7 +5534,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(
             text.contains("archive claude") && text.contains("removes its worktree"),
@@ -5323,7 +5593,11 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).unwrap();
         terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
         let buffer = terminal.backend().buffer();
-        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        let text: String = buffer
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
         for label in ["Waiting", "Failed", "Done", "Working", "Idle", "No status"] {
             assert!(text.contains(label), "missing status heading: {label}");
         }
@@ -5377,7 +5651,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         // Each row names its project and how it ended; no headings.
         assert!(text.contains("beta") && text.contains("closed"), "{text}");
@@ -5397,7 +5671,7 @@ mod tests {
             assert!(view.next(true).next(false) == view);
         }
         app.set_view(View::Usage);
-        assert!(app.rows.is_empty());
+        assert_eq!(app.rows, [] as [Item; 0]);
         assert_eq!(app.pick(), "");
         assert!(!app.can_pin() && !app.can_snooze() && !app.armable());
         app.paste("rex-data:usage\n{\"fetched\":1,\"totals\":[],\"quotas\":[],\"warnings\":[\"remote host unavailable\"]}");
@@ -5408,7 +5682,7 @@ mod tests {
             assert_eq!(app.pick(), "");
         }
         app.set_view(View::Inbox);
-        assert!(!app.rows.is_empty());
+        assert_ne!(app.rows, [] as [Item; 0]);
     }
 
     #[test]
@@ -5495,7 +5769,7 @@ mod tests {
         let mut rows = String::from("S\t-\tlocal\ts\tdemo\n");
         let mut tasks = Vec::new();
         for i in 0..12 {
-            rows.push_str(&format!("T\tw{i}\tworking\tt{i}\n"));
+            let _ = writeln!(rows, "T\tw{i}\tworking\tt{i}");
             tasks.push(serde_json::json!({"session_id":"s", "window_id":format!("w{i}"), "name":format!("task-{i:02}"),
                 "project":"proj", "status":"working", "status_msg":format!("step {i}"), "status_at":900}));
         }
@@ -5527,7 +5801,7 @@ mod tests {
             (0..20u16)
                 .find_map(|y| {
                     let row: String = (0..50).map(|x| buf[(x, y)].symbol().to_string()).collect();
-                    row.find(text).map(|i| (row[..i].chars().count() as u16, y))
+                    row.find(text).map(|i| (cells(row[..i].chars().count()), y))
                 })
                 .unwrap()
         };
@@ -5565,173 +5839,4 @@ mod tests {
         assert_eq!(folder_project("~"), "~");
         assert_eq!(folder_project("/"), "/");
     }
-}
-
-// ---------------------------------------------------------------- main
-
-/// The project a folder is in: the repository a `.worktrees` worktree
-/// belongs to, else the folder's own name (`~` for home).
-fn folder_project(dir: &str) -> String {
-    let dir = match dir.trim_end_matches('/') {
-        "" => return dir.to_string(),
-        d => d,
-    };
-    let dir = dir.split_once("/.worktrees/").map_or(dir, |(repo, _)| repo);
-    dir.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(dir)
-        .to_string()
-}
-
-fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
-    loop {
-        app.take_fetched();
-        app.take_archived();
-        app.ask_preview();
-        app.sync_commands();
-        let before = app.now;
-        app.now = now();
-        // A snooze ran out: back to its group.
-        if app
-            .tasks
-            .iter()
-            .any(|t| t.snoozed_until > before && t.snoozed_until <= app.now)
-        {
-            app.refilter();
-        }
-        term.draw(|f| app.draw(f))?;
-        app.save_reply();
-        let animate = app.archiving.is_some()
-            || matches!(app.load, Load::Waiting)
-            || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
-            || app.tabs.iter().any(|t| t.state == State::Working);
-        let wait = if animate {
-            Duration::from_millis(90)
-        } else {
-            Duration::from_millis(250)
-        };
-        if !event::poll(wait)? {
-            continue;
-        }
-        match event::read()? {
-            Event::Key(k) if k.kind != KeyEventKind::Release && app.quick => {
-                if app.quick_key(k, term) {
-                    return Ok(());
-                }
-            }
-            Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if app.standalone_key(k, term) {
-                    continue;
-                }
-                app.note = None;
-                app.key(k);
-                if std::mem::take(&mut app.edit_requested) {
-                    app.edit_reply(term)?;
-                }
-                if let Some(text) = app.copied.take() {
-                    use std::io::Write;
-                    let mut out = io::stdout();
-                    let _ = out
-                        .write_all(scrollback::osc52(&text).as_bytes())
-                        .and_then(|()| out.flush());
-                }
-            }
-            // cmd+k's `current`, and John's own pastes, for the reply box.
-            Event::Paste(text)
-                if app.reply.is_some()
-                    || protocol::data(&text).is_some_and(|(k, _)| k == "current") =>
-            {
-                app.paste(&text)
-            }
-            _ => {}
-        }
-    }
-}
-
-/// The picker from a terminal: it fetches its own tabs and tasks and acts on
-/// Enter itself. `current` is the SESSION/WINDOW to highlight, if any.
-pub fn standalone(view: View, current: Option<&str>) -> io::Result<()> {
-    start(view, current, false)
-}
-
-/// The cmd+k quick jump float (see lua/switchyard/tab-picker.lua): Inbox's
-/// list alone over the current tab, `current` highlighted. Enter shows the
-/// highlighted tab and quits, closing the float; Escape just quits.
-pub fn quick(current: Option<&str>) -> io::Result<()> {
-    start(View::Inbox, current, true)
-}
-
-fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
-    standalone::detach_env();
-    let mut app = App::new((String::new(), String::new()), view);
-    app.quick = quick;
-    app.excluded_raw = switchyard_core::config::read()
-        .map(|c| c.inbox.exclude)
-        .unwrap_or_default();
-    app.excluded = resolve_folders(&app.excluded_raw);
-    if let Some(c) = current {
-        app.set_current(c);
-    }
-    app.start_feed();
-    picker(app)
-}
-
-/// Sanitized usage accounting as JSON: per-model totals across configured
-/// hosts (what the Usage view renders), or with `local` this host's raw
-/// samples (the remote collector protocol, deduplicated by the caller).
-pub fn usage_json(local: bool) -> io::Result<()> {
-    let mut collector = switchyard_core::usage::Collector::default();
-    let json = if local {
-        let settings = switchyard_core::config::read()
-            .map(|c| c.usage)
-            .unwrap_or_default();
-        serde_json::to_string(&collector.local(
-            &settings,
-            &switchyard_core::rex::local_label(),
-            now(),
-        ))
-    } else {
-        serde_json::to_string(&collector.collect().summary())
-    };
-    println!("{}", json.map_err(io::Error::other)?);
-    Ok(())
-}
-
-fn picker(mut app: App) -> io::Result<()> {
-    let mut term = ratatui::init();
-    // Raw mode is on and nothing has read stdin yet: ask about graphics now,
-    // for the reply box's rounded corners.
-    if let Some(cell) = chrome::detect(Duration::from_millis(300)) {
-        app.cell = Some(cell);
-        app.corners =
-            chrome::Corners::new(cell, &[app.p.overlay, app.p.surface], &mut io::stdout()).ok();
-    }
-    // No mouse capture, so the terminal's own selection and copy work. Kitty
-    // key reporting makes the reply box's shift-Enter arrive as one
-    // crossterm can decode, as in the new-session picker.
-    let _ = execute!(
-        io::stdout(),
-        EnableBracketedPaste,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    );
-    let result = run(&mut term, &mut app);
-    // Never leave an archive half done: wait for one still running.
-    if let Some(rx) = app.archiving.take() {
-        app.note = Some(("Finishing the archive…".into(), false));
-        let _ = term.draw(|f| app.draw(f));
-        let _ = rx.recv();
-    }
-    let _ = execute!(
-        io::stdout(),
-        PopKeyboardEnhancementFlags,
-        DisableBracketedPaste
-    );
-    if let Some(corners) = &app.corners {
-        let _ = corners.delete(&mut io::stdout());
-    }
-    ratatui::restore();
-    // A message typed but never sent.
-    app.close_reply();
-    result
 }

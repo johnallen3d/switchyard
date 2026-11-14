@@ -3,6 +3,7 @@
 //! harnesses keep sessions per working directory, which is why a resume
 //! recreates the worktree at the same path.
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,6 +11,7 @@ use std::process::Command;
 use crate::rex::{home, host_bash, sh_quote};
 
 /// A random (v4) UUID, the form Claude requires for `--session-id`.
+#[must_use]
 pub fn new_session_id() -> String {
     let mut b = [0u8; 16];
     if std::fs::File::open("/dev/urandom")
@@ -19,14 +21,16 @@ pub fn new_session_id() -> String {
         // Not expected; fall back on the clock and pid.
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-            ^ ((std::process::id() as u128) << 64);
+            .map_or(0, |d| d.as_nanos())
+            ^ (u128::from(std::process::id()) << 64);
         b = seed.to_le_bytes();
     }
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
-    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    let h = b.iter().fold(String::with_capacity(32), |mut h, x| {
+        let _ = write!(h, "{x:02x}");
+        h
+    });
     format!(
         "{}-{}-{}-{}-{}",
         &h[0..8],
@@ -53,17 +57,15 @@ pub(crate) fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathB
             .or_else(|| std::env::var(k).ok())
     };
     if harness == "pi" {
-        let root = var("PI_CODING_AGENT_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config/pi"));
+        let root =
+            var("PI_CODING_AGENT_DIR").map_or_else(|| home().join(".config/pi"), PathBuf::from);
         let flat = worktree
             .trim_start_matches('/')
             .replace(['/', '\\', ':'], "-");
         root.join("sessions").join(format!("--{flat}--"))
     } else {
         let root = var("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home().join(".config/claude-personal"));
+            .map_or_else(|| home().join(".config/claude-personal"), PathBuf::from);
         let flat: String = worktree
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
@@ -88,6 +90,7 @@ pub fn newest_session_here(profile: &str, harness: &str, worktree: &str) -> Opti
 }
 
 /// Whether this host has the agent session for `worktree`.
+#[must_use]
 pub fn session_exists_here(profile: &str, harness: &str, worktree: &str, id: &str) -> bool {
     let dir = session_dir(profile, harness, worktree);
     std::fs::read_dir(dir).is_ok_and(|entries| {
@@ -102,6 +105,7 @@ pub fn session_exists_here(profile: &str, harness: &str, worktree: &str, id: &st
 /// The newest agent session for a task's worktree, asked of its host
 /// (`switchyard task session-of`). None when there is none or the host can't
 /// be reached.
+#[must_use]
 pub fn newest_session(task: &serde_json::Value) -> Option<String> {
     let f = |k: &str| task[k].as_str().unwrap_or("").to_string();
     let host = f("host");
@@ -121,6 +125,11 @@ pub fn newest_session(task: &serde_json::Value) -> Option<String> {
 }
 
 /// The environment ~/dev/src/amfaro's mise config sets, as `mise env -J`.
+///
+/// # Errors
+///
+/// Fails when mise can't run, exits unsuccessfully, or prints output that
+/// isn't a JSON object.
 pub fn work_env() -> Result<Vec<(String, String)>, String> {
     let out = Command::new("mise")
         .arg("-C")

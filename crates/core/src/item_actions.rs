@@ -32,6 +32,7 @@ pub enum Action {
 
 impl Action {
     /// What the action does, for confirmations: "close card 1041".
+    #[must_use]
     pub fn verb(self) -> &'static str {
         match self {
             Action::Comment => "comment on",
@@ -57,6 +58,7 @@ pub enum Item {
 impl Item {
     /// The item a link names, when actions can be taken on it: a Fizzy card
     /// whose URL names its account, or a GitHub PR.
+    #[must_use]
     pub fn from_link(
         kind: &str,
         system: &str,
@@ -87,6 +89,7 @@ impl Item {
 
     /// The actions this item takes: comment on and close a card; mark a
     /// draft PR ready. An open PR has none.
+    #[must_use]
     pub fn actions(&self) -> Vec<Action> {
         match self {
             Item::Card { .. } => vec![Action::Comment, Action::Close],
@@ -96,6 +99,7 @@ impl Item {
     }
 
     /// How a confirmation names it: `card 1041`, `PR owner/repo#57`.
+    #[must_use]
     pub fn name(&self) -> String {
         match self {
             Item::Card { number, .. } => format!("card {number}"),
@@ -105,6 +109,7 @@ impl Item {
 }
 
 /// The account a Fizzy card URL names: `https://app.fizzy.do/ACCOUNT/cards/N`.
+#[must_use]
 pub fn fizzy_account(url: &str) -> Option<&str> {
     let rest = url.strip_prefix("https://app.fizzy.do/")?;
     let mut parts = rest.split('/');
@@ -117,7 +122,11 @@ type Plan = (&'static str, Vec<String>, Vec<(String, String)>);
 
 /// The call an action runs. `body` is a comment's text.
 fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
-    let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let s = |v: &[&str]| {
+        v.iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+    };
     match (action, item) {
         (Action::Comment, Item::Card { account, number }) => {
             if body.trim().is_empty() {
@@ -148,6 +157,11 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
 
 /// Run `action` on `item` (a comment's text in `body`; gh under
 /// `profile`); Ok is the outcome to show, Err the CLI's message.
+///
+/// # Errors
+///
+/// Fails when `action` doesn't apply to `item`, the work environment can't
+/// be loaded, or the CLI fails or times out.
 pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<String, String> {
     let (program, args, env) = plan(action, item, body)?;
     let mut cmd = Command::new(program);
@@ -283,7 +297,7 @@ mod tests {
         assert_eq!(draft.actions(), [Action::Ready]);
         assert_eq!(draft.name(), "PR o/r#57");
         let open = Item::from_link("pr", "github", "o/r#57", "u", "open").unwrap();
-        assert!(open.actions().is_empty());
+        assert_eq!(open.actions(), [] as [Action; 0]);
         assert_eq!(Item::from_link("issue", "github", "o/r#3", "u", ""), None);
         assert_eq!(Item::from_link("commit", "github", "abc", "u", ""), None);
     }

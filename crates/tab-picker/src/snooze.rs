@@ -6,13 +6,13 @@
 //!   `fri`, `monday 2pm` (the next one; today's only while the time is
 //!   still ahead).
 //!
-//! Times are local, through libc's localtime_r and mktime.
+//! Times are local, through libc's `localtime_r` and mktime.
 
 /// The longest snooze.
 const MAX_SECS: u64 = 365 * 24 * 3600;
 
 /// The hour a day without a time means.
-const MORNING: u32 = 9;
+const MORNING: i32 = 9;
 
 const DAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
@@ -31,10 +31,10 @@ struct Local {
 }
 
 fn local(t: u64) -> Local {
-    let secs = t as libc::time_t;
+    let secs = libc::time_t::try_from(t).unwrap_or(libc::time_t::MAX);
     // SAFETY: localtime_r only writes the tm it is given.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut tm) };
+    unsafe { libc::localtime_r(&raw const secs, &raw mut tm) };
     Local {
         year: tm.tm_year,
         month: tm.tm_mon,
@@ -47,16 +47,17 @@ fn local(t: u64) -> Local {
 
 /// The time at `hour:min` local, `days` after `base`'s day (mktime
 /// carries a day past the month's end into the next).
-fn at(base: Local, days: i32, hour: u32, min: u32) -> u64 {
+fn at(base: Local, days: i32, hour: i32, min: i32) -> u64 {
     // SAFETY: mktime only reads and normalizes the tm it is given.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     tm.tm_year = base.year;
     tm.tm_mon = base.month;
     tm.tm_mday = base.day + days;
-    tm.tm_hour = hour as i32;
-    tm.tm_min = min as i32;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
     tm.tm_isdst = -1;
-    (unsafe { libc::mktime(&mut tm) }).max(0) as u64
+    // Before the epoch (or mktime's -1 for an error) is the epoch.
+    u64::try_from(unsafe { libc::mktime(&raw mut tm) }).unwrap_or(0)
 }
 
 /// `2h`, `1h30m`, `1h 30m`: seconds, or None if it isn't a duration.
@@ -92,7 +93,7 @@ fn duration(s: &str) -> Option<u64> {
 }
 
 /// `9`, `9am`, `9:30pm`, `17:00`: (hour, minute), or None.
-fn clock(s: &str) -> Option<(u32, u32)> {
+fn clock(s: &str) -> Option<(i32, i32)> {
     let s = s.trim();
     let (s, half) = match s.strip_suffix("am").or_else(|| s.strip_suffix('a')) {
         Some(rest) => (rest.trim_end(), Some(false)),
@@ -113,7 +114,7 @@ fn clock(s: &str) -> Option<(u32, u32)> {
     {
         return None;
     }
-    let (mut hour, min): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    let (mut hour, min): (i32, i32) = (h.parse().ok()?, m.parse().ok()?);
     if min > 59 {
         return None;
     }
@@ -144,7 +145,7 @@ fn weekday(s: &str) -> Option<i32> {
     let alt = ["sun", "mon", "tues", "wed", "thur", "fri", "sat"];
     (0..7)
         .find(|&i| s == DAYS[i] || s == full[i] || s == alt[i] || (i == 4 && s == "thurs"))
-        .map(|i| i as i32)
+        .and_then(|i| i32::try_from(i).ok())
 }
 
 /// When a snooze typed at `now` ends, or why it can't be read.
@@ -230,20 +231,24 @@ pub fn describe(until: u64, now: u64) -> String {
     let (u, n) = (local(until), local(now));
     let days = |l: Local| at(l, 0, 12, 0);
     // Days apart, by local noons (so a DST change can't shift it).
-    let apart = (days(u) as i64 - days(n) as i64 + 43200).div_euclid(86400);
+    let apart = (i128::from(days(u)) - i128::from(days(n)) + 43200).div_euclid(86400);
     let time = clock_text(u);
     match apart {
         0 => time,
         1 => format!("tomorrow {time}"),
         2..7 => {
-            let day = DAYS[u.weekday as usize];
+            let day = DAYS[usize::try_from(u.weekday).unwrap_or(0)];
             format!("{}{} {time}", day[..1].to_uppercase(), &day[1..])
         }
         _ => {
             const MONTHS: [&str; 12] = [
                 "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
             ];
-            format!("{} {} {time}", MONTHS[u.month as usize], u.day)
+            format!(
+                "{} {} {time}",
+                MONTHS[usize::try_from(u.month).unwrap_or(0)],
+                u.day
+            )
         }
     }
 }
@@ -322,6 +327,6 @@ mod tests {
         assert_eq!(describe(tomorrow, NOW), "tomorrow 9:00am");
         assert!(describe(NOW + 60, NOW).ends_with("am") || describe(NOW + 60, NOW).ends_with("pm"));
         assert!(!describe(NOW + 3 * 86400, NOW).starts_with("tomorrow"));
-        assert!(describe(NOW + 30 * 86400, NOW).split(' ').count() == 3);
+        assert_eq!(describe(NOW + 30 * 86400, NOW).split(' ').count(), 3);
     }
 }

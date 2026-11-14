@@ -21,6 +21,7 @@
 //! with a merged PR does; a card whose state is unknown blocks it.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -49,6 +50,7 @@ pub struct Card {
 }
 
 /// The card in `fizzy card show --json` output (the envelope or bare data).
+#[must_use]
 pub fn parse_card(json: &str) -> Option<Card> {
     let v: Value = serde_json::from_str(json.trim()).ok()?;
     let card = if v["data"].is_object() {
@@ -100,8 +102,7 @@ fn key(link: &Value) -> String {
 
 fn cache_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"))
+        .map_or_else(|_| home().join(".local/state"), PathBuf::from)
         .join("rex/switchyard-cards.json")
 }
 
@@ -284,7 +285,7 @@ fn forget_in(cache: &mut Value, account: &str, number: &str) -> bool {
 }
 
 /// Add each card link's live state from `cards` (not saved).
-pub fn add_live(task: &mut Value, cards: &HashMap<String, Card>) {
+pub fn add_live<S: BuildHasher>(task: &mut Value, cards: &HashMap<String, Card, S>) {
     let Some(links) = task["links"].as_array_mut() else {
         return;
     };
@@ -302,6 +303,7 @@ pub fn add_live(task: &mut Value, cards: &HashMap<String, Card>) {
 /// them was closed (from the lookup cache, however old). One open card, or
 /// one whose state is unknown (never looked up, or its latest lookup
 /// failed), means work may remain.
+#[must_use]
 pub fn cards_closed(task: &Value) -> bool {
     all_closed(task, &load_cache())
 }

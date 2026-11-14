@@ -14,7 +14,7 @@ use ratatui::widgets::Clear;
 use switchyard_core::commands::SlashCommand;
 
 use crate::Palette;
-use crate::draw::str_width;
+use crate::draw::{cells, cycle, str_width};
 
 /// The most commands the menu shows at once; more scroll.
 pub const MENU_ROWS: usize = 8;
@@ -34,6 +34,7 @@ pub struct Word {
 /// where a command can go: anywhere after a line start or a space when
 /// `anywhere`, else only first in the message. A word with a second `/`
 /// (a path) isn't one.
+#[must_use]
 pub fn word_at(lines: &[String], cursor: (usize, usize), anywhere: bool) -> Option<Word> {
     let (row, col) = cursor;
     let chars: Vec<char> = lines.get(row)?.chars().collect();
@@ -80,6 +81,7 @@ pub struct Hit {
 /// first and in their listed order among equals; all of them, in order,
 /// for an empty query. Pi's `skill:` prefix needs no typing: `fiz` finds
 /// `skill:fizzy`.
+#[must_use]
 pub fn matches(commands: &[SlashCommand], query: &str) -> Vec<Hit> {
     if query.is_empty() {
         return (0..commands.len())
@@ -112,7 +114,7 @@ pub fn matches(commands: &[SlashCommand], query: &str) -> Vec<Hit> {
             Some((score, Hit { index, chars }))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
     scored.into_iter().map(|(_, h)| h).collect()
 }
 
@@ -136,6 +138,7 @@ impl Menu {
         self.selected = 0;
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
@@ -150,7 +153,7 @@ impl Menu {
         if word != self.seen {
             self.selected = 0;
             self.dismissed = false;
-            self.seen = word.clone();
+            self.seen.clone_from(&word);
         }
         let word = word.filter(|_| !self.dismissed)?;
         let found = matches(&self.commands, &word.query);
@@ -168,10 +171,11 @@ impl Menu {
 
     pub fn step(&mut self, by: isize, count: usize) {
         if count > 0 {
-            self.selected = (self.selected as isize + by).rem_euclid(count as isize) as usize;
+            self.selected = cycle(self.selected, by, count);
         }
     }
 
+    #[must_use]
     pub fn command(&self, i: usize) -> &SlashCommand {
         &self.commands[i]
     }
@@ -179,7 +183,7 @@ impl Menu {
     /// Draw the menu for `found` (the highlight on `selected`) just above
     /// `card` in `bounds`, or below it when there is no room above.
     pub fn draw(&self, f: &mut Frame, p: &Palette, found: &[Hit], card: Rect, bounds: Rect) {
-        let rows = found.len().min(MENU_ROWS) as u16;
+        let rows = cells(found.len().min(MENU_ROWS));
         let above = card.y.saturating_sub(bounds.y);
         let below = (bounds.y + bounds.height).saturating_sub(card.y + card.height);
         let (y, rows) = if above >= rows || above >= below {
@@ -197,10 +201,10 @@ impl Menu {
             height: rows,
         };
         f.render_widget(Clear, area);
-        let first = self.selected.saturating_sub(rows as usize - 1);
-        let w = area.width as usize;
-        for (n, hit) in found.iter().enumerate().skip(first).take(rows as usize) {
-            let c = &self.commands[hit.index];
+        let first = self.selected.saturating_sub(usize::from(rows) - 1);
+        let width = usize::from(area.width);
+        for (n, hit) in found.iter().enumerate().skip(first).take(usize::from(rows)) {
+            let cmd = &self.commands[hit.index];
             let bg = if n == self.selected {
                 p.hl_med
             } else {
@@ -215,7 +219,7 @@ impl Menu {
             ];
             let mut run = String::new();
             let mut run_hit = false;
-            for (k, ch) in c.name.chars().enumerate() {
+            for (k, ch) in cmd.name.chars().enumerate() {
                 let is_hit = hit.chars.binary_search(&k).is_ok();
                 if is_hit != run_hit && !run.is_empty() {
                     spans.push(Span::styled(
@@ -229,27 +233,27 @@ impl Menu {
             if !run.is_empty() {
                 spans.push(Span::styled(run, if run_hit { picked } else { plain }));
             }
-            if !c.hint.is_empty() {
+            if !cmd.hint.is_empty() {
                 spans.push(Span::styled(
-                    format!(" {}", c.hint),
+                    format!(" {}", cmd.hint),
                     Style::new().fg(p.subtle).bg(bg),
                 ));
             }
             let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            if !c.description.is_empty() && used + 4 < w {
-                let first_line = c.description.lines().next().unwrap_or("");
+            if !cmd.description.is_empty() && used + 4 < width {
+                let first_line = cmd.description.lines().next().unwrap_or("");
                 spans.push(Span::styled(
-                    format!("  {}", clip(first_line, w - used - 3)),
+                    format!("  {}", clip(first_line, width - used - 3)),
                     Style::new().fg(p.muted).bg(bg),
                 ));
             }
             let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
             spans.push(Span::styled(
-                " ".repeat(w.saturating_sub(used)),
+                " ".repeat(width.saturating_sub(used)),
                 Style::new().bg(bg),
             ));
             let row = Rect {
-                y: area.y + (n - first) as u16,
+                y: area.y + cells(n - first),
                 height: 1,
                 ..area
             };

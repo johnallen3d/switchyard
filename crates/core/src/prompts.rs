@@ -16,8 +16,7 @@ const PROMPT_KEEP_SECS: u64 = 24 * 60 * 60;
 
 pub fn prompt_dir() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"))
+        .map_or_else(|_| home().join(".local/state"), PathBuf::from)
         .join(PROMPT_DIR)
 }
 
@@ -40,6 +39,10 @@ pub fn prune_prompts() {
 
 /// Split a `LABEL:ID` prompt reference, refusing anything that isn't a
 /// plain host label and picker id, since both end up in a path and a script.
+///
+/// # Errors
+///
+/// Fails when `r` isn't `LABEL:ID` with a plain host label and a picker id.
 pub fn parse_prompt_ref(r: &str) -> Result<(&str, &str), String> {
     let bad = || format!("bad prompt reference {r:?}");
     let (label, id) = r.split_once(':').ok_or_else(bad)?;
@@ -61,6 +64,12 @@ fn prompt_script(cmd: &str, id: &str) -> String {
     format!("{cmd} \"${{XDG_STATE_HOME:-$HOME/.local/state}}/{PROMPT_DIR}/{id}\"\n")
 }
 
+/// The text of the prompt file `prompt_ref` (`LABEL:ID`) names.
+///
+/// # Errors
+///
+/// Fails when the reference is malformed, its host can't be reached, or
+/// the file is missing.
 pub fn fetch_prompt(prompt_ref: &str) -> Result<String, String> {
     let (label, id) = parse_prompt_ref(prompt_ref)?;
     let out = host_bash(label, &prompt_script("cat", id))

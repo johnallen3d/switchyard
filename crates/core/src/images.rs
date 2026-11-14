@@ -102,6 +102,10 @@ fn shell_word(s: &str) -> (String, usize) {
 /// `to` and replaced by the copy's path. Text without uploads comes back
 /// as it is. Fails, rather than hand the agent a path it can't open, when
 /// an upload is gone (Rex keeps them only for a while) or can't be copied.
+///
+/// # Errors
+///
+/// Fails when an upload can't be read on `from` or written on `to`.
 pub fn carry(from: &str, to: &str, text: &str) -> Result<String, String> {
     let found = uploads(text);
     if found.is_empty() {
@@ -218,9 +222,15 @@ mod tests {
 
     #[test]
     fn leaves_other_paths_and_words_alone() {
-        assert!(uploads("see /etc/hosts and ~/rex/uploads/x.png, rex/uploads/y.png").is_empty());
-        assert!(uploads("/home/j/.local/state/rex/uploads/").is_empty());
-        assert!(uploads("").is_empty());
+        assert_eq!(
+            uploads("see /etc/hosts and ~/rex/uploads/x.png, rex/uploads/y.png"),
+            [] as [Upload; 0]
+        );
+        assert_eq!(
+            uploads("/home/j/.local/state/rex/uploads/"),
+            [] as [Upload; 0]
+        );
+        assert_eq!(uploads(""), [] as [Upload; 0]);
         let linux = uploads("é /home/j/.local/state/rex/uploads/a/b/c.png");
         assert_eq!(linux[0].path, "/home/j/.local/state/rex/uploads/a/b/c.png");
     }

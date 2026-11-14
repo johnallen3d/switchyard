@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// This host's Rex label: its short hostname.
+#[must_use]
 pub fn local_label() -> String {
     Command::new("hostname")
         .arg("-s")
@@ -19,6 +20,10 @@ pub fn local_label() -> String {
 
 /// Run the rex CLI against `host` (no -S for the local server) and parse
 /// its JSON output.
+///
+/// # Errors
+///
+/// Fails when rex can't run, exits unsuccessfully, or prints invalid JSON.
 pub fn rex_json(host: &str, args: &[&str]) -> Result<serde_json::Value, String> {
     let mut cmd = Command::new("rex");
     if host != local_label() {
@@ -43,6 +48,7 @@ pub fn rex_json(host: &str, args: &[&str]) -> Result<serde_json::Value, String> 
 /// reaches hosts; their login shell is Fish), or locally for the config
 /// host. None when it can't be started or the host can't be reached;
 /// otherwise the output whatever the script's exit status.
+#[must_use]
 pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
     let mut cmd = if host == local_label() {
         let mut c = Command::new("bash");
@@ -71,10 +77,11 @@ pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
 /// An ssh command to `host` (a Rex label, as the dev hosts are named in
 /// ~/.ssh/config) that never prompts, gives up connecting after 3 s, and
 /// shares a connection with the other calls to that host for a few minutes
-/// (ControlMaster), so only the first call in a while pays for connecting.
+/// (`ControlMaster`), so only the first call in a while pays for connecting.
 /// The control sockets live in `runtime_dir`, whose short path keeps them
 /// under macOS's 104-byte socket path limit; without it, each call connects
 /// on its own. Like any ssh, it exits 255 when it can't connect.
+#[must_use]
 pub fn ssh(host: &str) -> Command {
     let mut cmd = Command::new("ssh");
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]);
@@ -93,6 +100,7 @@ pub fn ssh(host: &str) -> Command {
 /// one (Linux), else `/tmp/switchyard-UID`: macOS's `$TMPDIR` is too long
 /// for socket paths. Created on first use; None when it can't be made or
 /// someone else owns it.
+#[must_use]
 pub fn runtime_dir() -> Option<PathBuf> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     // SAFETY: getuid has no preconditions and can't fail.
@@ -121,9 +129,8 @@ pub fn runtime_dir() -> Option<PathBuf> {
 /// (`$XDG_STATE_HOME/rex/spawn.log`); the action drops `task launch`'s stderr
 /// on success.
 pub fn log(line: &str) {
-    let state = std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"));
+    let state =
+        std::env::var("XDG_STATE_HOME").map_or_else(|_| home().join(".local/state"), PathBuf::from);
     let dir = state.join("rex");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -154,22 +161,28 @@ pub fn diagnose(line: &str) {
     }
 }
 
+#[must_use]
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
+#[must_use]
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()))
 }
 
+#[must_use]
 pub fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// Run the rex CLI against `host` and return an error with its stderr.
+///
+/// # Errors
+///
+/// Fails when rex can't run or exits unsuccessfully.
 pub fn rex(host: &str, args: &[&str]) -> Result<(), String> {
     let mut cmd = Command::new("rex");
     if host != local_label() {
@@ -193,6 +206,10 @@ pub fn rex(host: &str, args: &[&str]) -> Result<(), String> {
 /// The home directory of `host`'s account: this host's own, or a dev host's
 /// /home/ACCOUNT (the dev hosts are Linux and their Rex server's account is
 /// the one that works there). Empty when the account can't be read.
+///
+/// # Errors
+///
+/// Fails when `host`'s Rex server can't be asked who it runs as.
 pub fn host_home(host: &str) -> Result<String, String> {
     if host == local_label() {
         return Ok(home().display().to_string());
@@ -210,6 +227,10 @@ pub fn host_home(host: &str) -> Result<String, String> {
 
 /// Show a tab in its host's Rex app, as the config's jumps do; with no
 /// window, the session's own.
+///
+/// # Errors
+///
+/// Fails when rex can't run or exits unsuccessfully.
 pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
     let mut cmd = Command::new("rex");
     if host != local_label() {

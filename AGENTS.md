@@ -61,6 +61,20 @@ completion.
   or unreachable hosts as partial deployment; distinguish interactive checks
   from installed-artifact verification.
 
+## Rust style
+
+- Run `cargo fmt --all` before handing off Rust changes.
+- The workspace enables `clippy::pedantic` (`[workspace.lints]` in
+  `Cargo.toml`; new crates opt in with `[lints] workspace = true`). Keep
+  `cargo clippy --workspace --all-targets -- -D warnings` clean.
+- CI fails on either: `nix flake check` runs the `fmt` and `clippy` checks.
+  They use the flake's nixpkgs toolchain, which may have newer lints than a
+  local rustup one, so run them before handing off.
+- Fix findings rather than silencing them: write `# Errors`/`# Panics` docs,
+  use `try_from`/`From` over lossy `as` casts, and split long functions.
+  Allow a lint only where the fix would make the code worse, on the narrowest
+  item, with a comment saying why. Never allow it crate- or workspace-wide.
+
 ## Source map
 
 - `crates/tab-picker`: tabs, agent tasks, archive, and standalone mode

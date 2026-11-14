@@ -11,6 +11,14 @@ use unicode_width::UnicodeWidthChar;
 use crate::Palette;
 use crate::glyphs::{CAP_L, CAP_R, ICON_SEARCH};
 
+/// A count of rows or columns as a terminal coordinate, saturating at
+/// `u16::MAX` (far past any screen) rather than wrapping.
+#[must_use]
+pub fn cells(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
+#[must_use]
 pub fn str_width(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
@@ -18,10 +26,7 @@ pub fn str_width(s: &str) -> usize {
 /// Drop the query's last word, as ctrl-w does in a shell.
 pub fn delete_word(s: &mut String) {
     let trimmed = s.trim_end();
-    let cut = trimmed
-        .rfind(char::is_whitespace)
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let cut = trimmed.rfind(char::is_whitespace).map_or(0, |i| i + 1);
     s.truncate(cut);
 }
 
@@ -101,14 +106,17 @@ pub fn search(
         format!(" {ICON_SEARCH}  "),
         Style::new().fg(if active { p.iris } else { p.subtle }),
     );
-    let prompt_w = str_width(&prompt.content) as u16;
+    let prompt_w = cells(str_width(&prompt.content));
     let text = if query.is_empty() {
         Span::styled(placeholder.to_string(), Style::new().fg(p.muted))
     } else {
         Span::styled(query.to_string(), Style::new().fg(p.text))
     };
     f.render_widget(Line::from(vec![prompt, text]), area);
-    let x = area.x + prompt_w + str_width(query) as u16;
+    let x = area
+        .x
+        .saturating_add(prompt_w)
+        .saturating_add(cells(str_width(query)));
     if cursor && x < area.x + area.width {
         f.set_cursor_position((x, area.y));
     }
@@ -116,9 +124,9 @@ pub fn search(
 
 /// An empty list's lines, centred a third of the way down `area`.
 pub fn centered(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
-    let top = area.y + area.height.saturating_sub(lines.len() as u16) / 3;
+    let top = area.y + area.height.saturating_sub(cells(lines.len())) / 3;
     for (i, line) in lines.into_iter().enumerate() {
-        let y = top + i as u16;
+        let y = top.saturating_add(cells(i));
         if y >= area.y + area.height {
             break;
         }
@@ -134,6 +142,7 @@ pub fn centered(f: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
 }
 
 /// An empty state's hint: a key cap, then what it does.
+#[must_use]
 pub fn key_hint(p: &Palette, key: &str, does: &str) -> Line<'static> {
     Line::from(vec![
         Span::styled(key.to_string(), Style::new().fg(p.subtle).bg(p.overlay)),
@@ -148,7 +157,7 @@ pub fn scrollbar(f: &mut Frame, p: &Palette, area: Rect, offset: usize, total: u
     let top = offset * (h - thumb) / (total - h).max(1);
     for y in 0..h {
         let on = y >= top && y < top + thumb;
-        let cell = &mut f.buffer_mut()[(area.x + area.width - 1, area.y + y as u16)];
+        let cell = &mut f.buffer_mut()[(area.x + area.width - 1, area.y + cells(y))];
         cell.set_symbol(if on { "┃" } else { "│" });
         cell.set_fg(if on { p.hl_high } else { p.surface });
     }
@@ -157,6 +166,7 @@ pub fn scrollbar(f: &mut Frame, p: &Palette, area: Rect, offset: usize, total: u
 /// The scroll offset that keeps row `selected` in a list `height` rows tall.
 /// Scrolling back up keeps the group header above it in view when
 /// `header_above`.
+#[must_use]
 pub fn keep_in_view(offset: usize, selected: usize, height: usize, header_above: bool) -> usize {
     if selected < offset {
         if header_above { selected - 1 } else { selected }
@@ -167,30 +177,46 @@ pub fn keep_in_view(offset: usize, selected: usize, height: usize, header_above:
     }
 }
 
+/// Move `by` from `at` among `count` entries, wrapping around either end.
+/// `count` must not be zero.
+#[must_use]
+pub fn cycle(at: usize, by: isize, count: usize) -> usize {
+    // A step back by `shift` is a step forward by `count - shift`.
+    let shift = by.unsigned_abs() % count;
+    let shift = if by < 0 { count - shift } else { shift };
+    (at % count + shift) % count
+}
+
 /// Move `delta` selectable rows from `at` in a list with header rows,
 /// stopping at either end.
 pub fn step<T>(rows: &[T], at: usize, delta: isize, selectable: impl Fn(&T) -> bool) -> usize {
-    let n = rows.len() as isize;
     let mut at = at;
-    let mut remaining = delta.unsigned_abs();
-    while remaining > 0 {
-        let mut next = at as isize;
-        loop {
-            next += delta.signum();
-            if next < 0 || next >= n || selectable(&rows[next as usize]) {
-                break;
+    for _ in 0..delta.unsigned_abs() {
+        // The next selectable row in delta's direction, if any.
+        let mut next = at;
+        let found = loop {
+            next = match if delta > 0 {
+                next.checked_add(1)
+            } else {
+                next.checked_sub(1)
+            } {
+                Some(n) if n < rows.len() => n,
+                _ => break None,
+            };
+            if selectable(&rows[next]) {
+                break Some(next);
             }
+        };
+        match found {
+            Some(n) => at = n,
+            None => break,
         }
-        if next < 0 || next >= n {
-            break;
-        }
-        at = next as usize;
-        remaining -= 1;
     }
     at
 }
 
 /// A rounded chip around `spans`, filled `bg`, sitting on `on`.
+#[must_use]
 pub fn pill(spans: Vec<Span<'static>>, bg: Color, on: Color) -> Vec<Span<'static>> {
     let mut out = vec![Span::styled(CAP_L, Style::new().fg(bg).bg(on))];
     out.extend(spans.into_iter().map(|s| {
@@ -203,6 +229,7 @@ pub fn pill(spans: Vec<Span<'static>>, bg: Color, on: Color) -> Vec<Span<'static
 
 /// Footer key hints (key, label, key colour), as many as fit in `width`
 /// after a leading space; also returns the columns used.
+#[must_use]
 pub fn hints(
     p: &Palette,
     hints: &[(&str, &str, Color)],
@@ -231,6 +258,7 @@ pub fn hints(
 
 /// Spans for `text` fitted to `room` columns, with matched characters
 /// styled `hl`. `keep_end` truncates from the left (for paths).
+#[must_use]
 pub fn highlight(
     text: &str,
     hits: &[usize],

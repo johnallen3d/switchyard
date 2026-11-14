@@ -71,7 +71,7 @@ pub fn start(endpoint: Endpoint, port: u16) {
         Ok(l) => {
             crate::log(&format!("mcp: listening on http://127.0.0.1:{port}/mcp"));
             let endpoint = endpoint.clone();
-            thread::spawn(move || accept(l, endpoint));
+            thread::spawn(move || accept(&l, &endpoint));
         }
         Err(e) => crate::log(&format!("mcp: 127.0.0.1:{port}: {e}")),
     }
@@ -81,7 +81,7 @@ pub fn start(endpoint: Endpoint, port: u16) {
                 match TcpListener::bind((ip, port)) {
                     Ok(l) => {
                         crate::log(&format!("mcp: listening on http://{ip}:{port}/mcp"));
-                        return accept(l, endpoint);
+                        return accept(&l, &endpoint);
                     }
                     Err(e) => crate::log(&format!("mcp: {ip}:{port}: {e}")),
                 }
@@ -99,14 +99,16 @@ fn tailscale_ipv4() -> Option<Ipv4Addr> {
     // address is read as sockaddr_in only when its family says AF_INET.
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-        if libc::getifaddrs(&mut list) != 0 {
+        if libc::getifaddrs(&raw mut list) != 0 {
             return None;
         }
         let mut cur = list;
         while !cur.is_null() {
             let addr = (*cur).ifa_addr;
-            if !addr.is_null() && (*addr).sa_family as i32 == libc::AF_INET {
-                let sin = &*(addr as *const libc::sockaddr_in);
+            if !addr.is_null() && i32::from((*addr).sa_family) == libc::AF_INET {
+                // ifa_addr is typed as the 2-byte-aligned sockaddr, so read
+                // the sockaddr_in it points to without assuming alignment.
+                let sin = addr.cast::<libc::sockaddr_in>().read_unaligned();
                 let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
                 if in_tailnet(IpAddr::V4(ip)) {
                     found = Some(ip);
@@ -120,7 +122,7 @@ fn tailscale_ipv4() -> Option<Ipv4Addr> {
     found
 }
 
-/// Tailscale's address ranges: 100.64.0.0/10 and fd7a:115c:a1e0::/48.
+/// Tailscale's address ranges: 100.64.0.0/10 and `fd7a:115c:a1e0::/48`.
 fn in_tailnet(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -136,16 +138,13 @@ fn in_tailnet(ip: IpAddr) -> bool {
 
 fn allowed_peer(peer: SocketAddr) -> bool {
     let ip = match peer.ip() {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(v6)),
-        ip => ip,
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        ip @ IpAddr::V4(_) => ip,
     };
     ip.is_loopback() || in_tailnet(ip)
 }
 
-fn accept(listener: TcpListener, endpoint: Endpoint) {
+fn accept(listener: &TcpListener, endpoint: &Endpoint) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -311,7 +310,7 @@ fn route(req: &Request, endpoint: &Endpoint) -> (u16, Option<Value>) {
         return (
             403,
             Some(rpc_error(
-                Value::Null,
+                &Value::Null,
                 -32600,
                 "browser requests are refused",
             )),
@@ -324,7 +323,7 @@ fn route(req: &Request, endpoint: &Endpoint) -> (u16, Option<Value>) {
         return (405, None);
     }
     let Ok(message) = serde_json::from_slice::<Value>(&req.body) else {
-        return (400, Some(rpc_error(Value::Null, -32700, "parse error")));
+        return (400, Some(rpc_error(&Value::Null, -32700, "parse error")));
     };
     // Batches came and went between revisions; answering them costs little.
     let replies: Vec<Value> = match &message {
@@ -341,7 +340,7 @@ fn route(req: &Request, endpoint: &Endpoint) -> (u16, Option<Value>) {
     }
 }
 
-fn rpc_error(id: Value, code: i64, message: &str) -> Value {
+fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
@@ -352,7 +351,7 @@ fn handle(message: &Value, caller: &Caller, endpoint: &Endpoint) -> Option<Value
         return message
             .get("id")
             .is_none()
-            .then(|| rpc_error(Value::Null, -32600, "invalid request"));
+            .then(|| rpc_error(&Value::Null, -32600, "invalid request"));
     };
     let id = message.get("id")?.clone();
     let params = &message["params"];
@@ -391,7 +390,7 @@ fn handle(message: &Value, caller: &Caller, endpoint: &Endpoint) -> Option<Value
                 Err(e) => json!({ "content": [{ "type": "text", "text": e }], "isError": true }),
             }
         }
-        _ => return Some(rpc_error(id, -32601, &format!("unknown method {method}"))),
+        _ => return Some(rpc_error(&id, -32601, &format!("unknown method {method}"))),
     };
     Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
@@ -488,24 +487,21 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
         "spawn_task" => spawn(args, caller, endpoint),
         "read_task" => {
             let task = find_open(str_arg(args, "task")?, endpoint)?;
-            let wanted = args["entries"]
-                .as_u64()
-                .map_or(READ_DEFAULT, |n| (n as usize).clamp(1, READ_MAX));
+            let wanted = args["entries"].as_u64().map_or(READ_DEFAULT, |n| {
+                usize::try_from(n).unwrap_or(usize::MAX).clamp(1, READ_MAX)
+            });
             let (host, session, window) = tab(&task);
             let mut log = transcript::fetch_on(host, session, window);
             let mut out = summary(&task);
             // The task is there even when its log isn't (yet: an agent just
             // spawned writes none until it starts), so a poller still gets
             // its status.
-            match log["entries"].as_array_mut() {
-                Some(entries) => {
-                    let skip = entries.len().saturating_sub(wanted);
-                    out["transcript"] = entries.drain(skip..).collect::<Vec<_>>().into();
-                }
-                None => {
-                    out["transcript"] = json!([]);
-                    out["transcript_error"] = log["error"].take();
-                }
+            if let Some(entries) = log["entries"].as_array_mut() {
+                let skip = entries.len().saturating_sub(wanted);
+                out["transcript"] = entries.drain(skip..).collect::<Vec<_>>().into();
+            } else {
+                out["transcript"] = json!([]);
+                out["transcript_error"] = log["error"].take();
             }
             Ok(out)
         }

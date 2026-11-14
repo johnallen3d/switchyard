@@ -5,7 +5,7 @@
 //! a name, harness, optional work item and optional prompt. Titles are
 //! `rex-new:session/HOST/PATH` and
 //! `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`, the
-//! fields hex encoded; PROMPT_REF is empty when only a work item follows.
+//! fields hex encoded; `PROMPT_REF` is empty when only a work item follows.
 //!
 //! In a catalog project, the work item field lists the project's open cards
 //! or issues (core's `items`) once it has focus: ↓ or typing shows the
@@ -48,7 +48,7 @@ use switchyard_core::prompts::prune_prompts;
 use switchyard_core::rex::{local_label, log, select};
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
-use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
+use switchyard_ui::draw::{self, cells, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
 use switchyard_ui::prompt_box::{self, PromptBox, place_cursor, text_field, text_key};
@@ -66,6 +66,7 @@ pub enum Kind {
 }
 
 impl Kind {
+    #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "session" => Some(Kind::Session),
@@ -159,6 +160,36 @@ fn folder_rows(
     rows
 }
 
+/// How a list row is drawn: its background, the edge at its left (iris on
+/// the focused pick), and the style of the query's hits.
+struct RowLook {
+    edge: Span<'static>,
+    bg: Color,
+    hl: Style,
+}
+
+/// What a key asked the event loop to do once it has been handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Request {
+    /// A standalone Enter: launch the pick.
+    Launch,
+    /// ctrl-g: hand the prompt to `$EDITOR`.
+    Edit,
+}
+
+/// The work item menu: whether it was asked for (↓ or typing in the field),
+/// its matches for the field's text (item index and title hits), the
+/// highlighted match, the text they are for, and where the form's fields
+/// were drawn, within what.
+#[derive(Default)]
+struct ItemMenu {
+    open: bool,
+    hits: Vec<(usize, Vec<usize>)>,
+    selected: usize,
+    query: Option<String>,
+    card: Option<(Rect, Rect)>,
+}
+
 struct App {
     p: Palette,
     kind: Kind,
@@ -200,15 +231,7 @@ struct App {
     open_items: HashMap<String, Option<OpenItems>>,
     items_tx: Sender<(String, Result<OpenItems, String>)>,
     items_rx: Receiver<(String, Result<OpenItems, String>)>,
-    /// The work item menu: whether it was asked for (↓ or typing in the
-    /// field), its matches for the field's text (item index and title hits),
-    /// the highlighted match, the text they are for, and where the form's
-    /// fields were drawn, within what.
-    item_menu: bool,
-    item_hits: Vec<(usize, Vec<usize>)>,
-    item_selected: usize,
-    item_query: Option<String>,
-    item_card: Option<(Rect, Rect)>,
+    item_menu: ItemMenu,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -222,15 +245,13 @@ struct App {
     away: bool,
     /// Whether Escape was pressed once with a prompt, so the next one closes.
     confirm_close: bool,
-    /// Whether ctrl-g asked for the prompt in `$EDITOR`.
-    edit_requested: bool,
+    /// What the last key asked the event loop to do (see `Request`).
+    request: Option<Request>,
     /// The terminal's cell size, to send the corner images again.
     cell: Option<chrome::CellSize>,
     /// Run from a shell rather than in the config's float: Enter reaches the
     /// picker, which opens the pick itself (see `standalone_launch`).
     standalone: bool,
-    /// Whether a standalone Enter asked for the launch.
-    launch_requested: bool,
     /// The last standalone launch's progress or failure (and whether it
     /// failed), shown in the footer until the next key.
     note: Option<(String, bool)>,
@@ -290,11 +311,7 @@ impl App {
             open_items: HashMap::new(),
             items_tx,
             items_rx,
-            item_menu: false,
-            item_hits: Vec::new(),
-            item_selected: 0,
-            item_query: None,
-            item_card: None,
+            item_menu: ItemMenu::default(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -305,10 +322,9 @@ impl App {
             corners: None,
             away: false,
             confirm_close: false,
-            edit_requested: false,
             cell: None,
             standalone: false,
-            launch_requested: false,
+            request: None,
             note: None,
             exit_note: None,
             started: Instant::now(),
@@ -397,7 +413,6 @@ impl App {
                 self.prompt.set_commands(list.clone(), anywhere);
                 self.commands_for = Some(probe);
             }
-            Some(None) => self.prompt.set_commands(Vec::new(), anywhere),
             None if self.focus == Focus::Prompt => {
                 self.prompt.set_commands(Vec::new(), anywhere);
                 self.commands.insert(probe.clone(), None);
@@ -407,7 +422,8 @@ impl App {
                     let _ = tx.send((probe, got));
                 });
             }
-            None => self.prompt.set_commands(Vec::new(), anywhere),
+            // Still being fetched, or not wanted until the prompt has focus.
+            Some(None) | None => self.prompt.set_commands(Vec::new(), anywhere),
         }
     }
 
@@ -460,16 +476,16 @@ impl App {
     /// one of their URLs (chosen) or the menu isn't showing.
     fn match_items(&mut self) {
         let query = self.typed_item();
-        if self.item_query.as_ref() != Some(&query) {
-            self.item_selected = 0;
-            self.item_query = Some(query.clone());
+        if self.item_menu.query.as_ref() != Some(&query) {
+            self.item_menu.selected = 0;
+            self.item_menu.query = Some(query.clone());
         }
         // Leaving the field closes the menu, so tabbing back through it
         // never picks an item by accident.
         if self.focus != Focus::Item {
-            self.item_menu = false;
+            self.item_menu.open = false;
         }
-        let showing = self.kind == Kind::Agent && self.focus == Focus::Item && self.item_menu;
+        let showing = self.kind == Kind::Agent && self.focus == Focus::Item && self.item_menu.open;
         let list = match self.item_list() {
             Some(list) if showing && !list.items.iter().any(|i| i.url == query) => {
                 list.items.clone()
@@ -492,16 +508,17 @@ impl App {
             }
         }
         // Best first, in listed order among equals.
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        self.item_hits = scored.into_iter().map(|(_, i, h)| (i, h)).collect();
-        self.item_selected = self
-            .item_selected
-            .min(self.item_hits.len().saturating_sub(1));
+        scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+        self.item_menu.hits = scored.into_iter().map(|(_, i, h)| (i, h)).collect();
+        self.item_menu.selected = self
+            .item_menu
+            .selected
+            .min(self.item_menu.hits.len().saturating_sub(1));
     }
 
     /// The item highlighted in the showing work item menu.
     fn chosen_item(&self) -> Option<&OpenItem> {
-        let (i, _) = self.item_hits.get(self.item_selected)?;
+        let (i, _) = self.item_menu.hits.get(self.item_menu.selected)?;
         self.item_list()?.items.get(*i)
     }
 
@@ -511,29 +528,33 @@ impl App {
     fn item_menu_key(&mut self, k: KeyEvent) -> bool {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         self.match_items();
-        if self.item_hits.is_empty() {
-            if k.code != KeyCode::Down || self.item_menu {
+        if self.item_menu.hits.is_empty() {
+            if k.code != KeyCode::Down || self.item_menu.open {
                 return false;
             }
-            self.item_menu = true;
+            self.item_menu.open = true;
             self.match_items();
-            return !self.item_hits.is_empty();
+            return !self.item_menu.hits.is_empty();
         }
-        let n = self.item_hits.len() as isize;
-        let step = |at: usize, by: isize| (at as isize + by).rem_euclid(n) as usize;
+        let count = self.item_menu.hits.len();
+        let step = |at: usize, by: isize| draw::cycle(at, by, count);
         match k.code {
-            KeyCode::Down => self.item_selected = step(self.item_selected, 1),
-            KeyCode::Char('n') if ctrl => self.item_selected = step(self.item_selected, 1),
-            KeyCode::Up => self.item_selected = step(self.item_selected, -1),
-            KeyCode::Char('p') if ctrl => self.item_selected = step(self.item_selected, -1),
+            KeyCode::Down => self.item_menu.selected = step(self.item_menu.selected, 1),
+            KeyCode::Char('n') if ctrl => {
+                self.item_menu.selected = step(self.item_menu.selected, 1);
+            }
+            KeyCode::Up => self.item_menu.selected = step(self.item_menu.selected, -1),
+            KeyCode::Char('p') if ctrl => {
+                self.item_menu.selected = step(self.item_menu.selected, -1);
+            }
             KeyCode::Tab => {
                 if let Some(url) = self.chosen_item().map(|i| i.url.clone()) {
                     self.item.clear();
                     self.item.insert_str(&url);
                 }
-                self.item_menu = false;
+                self.item_menu.open = false;
             }
-            KeyCode::Esc => self.item_menu = false,
+            KeyCode::Esc => self.item_menu.open = false,
             _ => return false,
         }
         self.match_items();
@@ -816,7 +837,7 @@ impl App {
             Focus::Item => {
                 self.item
                     .insert_str(text.chars().filter(|&c| item_char(c)).collect::<String>());
-                self.item_menu = true;
+                self.item_menu.open = true;
             }
             Focus::Prompt => self.prompt.paste(&text),
         }
@@ -845,7 +866,6 @@ impl App {
         if self.focus == Focus::Item && self.item_menu_key(k) {
             return true;
         }
-        let page = (self.list_area.height as isize - 2).max(1);
         // The prompt keeps ctrl-n/p/j/k as readline's line keys; elsewhere
         // they move through the list, like the tab picker. The name keeps
         // ctrl-k for deleting to the end.
@@ -858,12 +878,12 @@ impl App {
             // Standalone, plain Enter acts from any field, as the config's
             // mode makes it do in the float.
             KeyCode::Enter if self.standalone && !alt && !shift && !ctrl => {
-                self.launch_requested = true;
+                self.request = Some(Request::Launch);
                 return true;
             }
             // ctrl-g hands the prompt to $EDITOR, as in other harnesses.
             KeyCode::Char('g') if ctrl && self.focus == Focus::Prompt => {
-                self.edit_requested = true;
+                self.request = Some(Request::Edit);
                 return true;
             }
             // As in a shell, ctrl-c in the prompt throws its text away (ctrl-z
@@ -894,72 +914,82 @@ impl App {
             }
             KeyCode::Char('p' | 'k') if ctrl && list_key => self.step(-1),
             KeyCode::Char('n' | 'j') if ctrl && list_key => self.step(1),
-            _ => match self.focus {
-                Focus::Project => match k.code {
-                    KeyCode::Char('u') if ctrl => {
-                        self.query.clear();
-                        self.refilter();
-                    }
-                    KeyCode::Char('w') if ctrl => {
-                        delete_word(&mut self.query);
-                        self.refilter();
-                    }
-                    KeyCode::Backspace if alt || ctrl => {
-                        delete_word(&mut self.query);
-                        self.refilter();
-                    }
-                    KeyCode::Backspace => {
-                        self.query.pop();
-                        self.refilter();
-                    }
-                    KeyCode::Char(c) if !ctrl && !alt => {
-                        self.query.push(c);
-                        self.refilter();
-                    }
-                    KeyCode::Up => self.step(-1),
-                    KeyCode::Down => self.step(1),
-                    KeyCode::PageUp => self.step(-page),
-                    KeyCode::PageDown => self.step(page),
-                    _ => {}
-                },
-                Focus::Name => match k.code {
-                    KeyCode::Up => self.focus = Focus::Project,
-                    KeyCode::Down => self.focus = Focus::Item,
-                    KeyCode::Enter => {}
-                    KeyCode::Char(c) if !ctrl && !alt => {
-                        if let Some(c) = name_char(c) {
-                            self.name.insert_char(c);
-                        }
-                    }
-                    _ => text_key(&mut self.name, k),
-                },
-                Focus::Item => match k.code {
-                    KeyCode::Up => self.focus = Focus::Name,
-                    KeyCode::Down => self.focus = Focus::Prompt,
-                    KeyCode::Enter => {}
-                    KeyCode::Char(c) if !ctrl && !alt => {
-                        if item_char(c) {
-                            self.item.insert_char(c);
-                            self.item_menu = true;
-                        }
-                    }
-                    _ => {
-                        let before = self.typed_item();
-                        text_key(&mut self.item, k);
-                        self.item_menu |= self.typed_item() != before;
-                    }
-                },
-                // Rex's mode takes plain Enter to act, so a newline is alt- or
-                // shift-Enter (or arrives in a paste).
-                Focus::Prompt => match k.code {
-                    KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => {
-                        self.focus = Focus::Item
-                    }
-                    _ => self.prompt.key(k),
-                },
-            },
+            _ => self.field_key(k),
         }
         true
+    }
+
+    /// A key the focused field has rather than the whole form.
+    fn field_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let page = isize::try_from(self.list_area.height.saturating_sub(2))
+            .unwrap_or(isize::MAX)
+            .max(1);
+        match self.focus {
+            Focus::Project => match k.code {
+                KeyCode::Char('u') if ctrl => {
+                    self.query.clear();
+                    self.refilter();
+                }
+                KeyCode::Char('w') if ctrl => {
+                    delete_word(&mut self.query);
+                    self.refilter();
+                }
+                KeyCode::Backspace if alt || ctrl => {
+                    delete_word(&mut self.query);
+                    self.refilter();
+                }
+                KeyCode::Backspace => {
+                    self.query.pop();
+                    self.refilter();
+                }
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    self.query.push(c);
+                    self.refilter();
+                }
+                KeyCode::Up => self.step(-1),
+                KeyCode::Down => self.step(1),
+                KeyCode::PageUp => self.step(-page),
+                KeyCode::PageDown => self.step(page),
+                _ => {}
+            },
+            Focus::Name => match k.code {
+                KeyCode::Up => self.focus = Focus::Project,
+                KeyCode::Down => self.focus = Focus::Item,
+                KeyCode::Enter => {}
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    if let Some(c) = name_char(c) {
+                        self.name.insert_char(c);
+                    }
+                }
+                _ => text_key(&mut self.name, k),
+            },
+            Focus::Item => match k.code {
+                KeyCode::Up => self.focus = Focus::Name,
+                KeyCode::Down => self.focus = Focus::Prompt,
+                KeyCode::Enter => {}
+                KeyCode::Char(c) if !ctrl && !alt => {
+                    if item_char(c) {
+                        self.item.insert_char(c);
+                        self.item_menu.open = true;
+                    }
+                }
+                _ => {
+                    let before = self.typed_item();
+                    text_key(&mut self.item, k);
+                    self.item_menu.open |= self.typed_item() != before;
+                }
+            },
+            // Rex's mode takes plain Enter to act, so a newline is alt- or
+            // shift-Enter (or arrives in a paste).
+            Focus::Prompt => match k.code {
+                KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => {
+                    self.focus = Focus::Item;
+                }
+                _ => self.prompt.key(k),
+            },
+        }
     }
 
     // ------------------------------------------------------------ drawing
@@ -969,7 +999,7 @@ impl App {
         let title = if agent { "Agent work" } else { "New session" };
         let inner = draw::frame(f, &self.p, title, Vec::new(), "", Margin::new(2, 1));
         self.prompt_card = None;
-        self.item_card = None;
+        self.item_menu.card = None;
         // Everything but the list (at least 3 rows) and the prompt's text is
         // fixed; the prompt box grows only into what the list can spare.
         let spare = inner.height.saturating_sub(11 + 3 + PROMPT_CHROME_ROWS);
@@ -1011,7 +1041,7 @@ impl App {
         if let Some((card, bounds)) = self.prompt_card {
             self.prompt.draw_menu(f, &self.p, card, bounds);
         }
-        if let Some((fields, bounds)) = self.item_card {
+        if let Some((fields, bounds)) = self.item_menu.card {
             self.draw_item_menu(f, fields, bounds);
         }
     }
@@ -1022,7 +1052,9 @@ impl App {
         let Some(list) = self.item_list() else { return };
         let p = &self.p;
         let room = fields.y.saturating_sub(bounds.y);
-        let rows = (self.item_hits.len() as u16).min(ITEM_MENU_ROWS).min(room);
+        let rows = cells(self.item_menu.hits.len())
+            .min(ITEM_MENU_ROWS)
+            .min(room);
         if rows == 0 || fields.width < 12 {
             return;
         }
@@ -1033,24 +1065,26 @@ impl App {
             height: rows,
         };
         f.render_widget(Clear, area);
-        let first = self.item_selected.saturating_sub(rows as usize - 1);
+        let first = self.item_menu.selected.saturating_sub(rows as usize - 1);
         let w = area.width as usize;
         let number_w = self
-            .item_hits
+            .item_menu
+            .hits
             .iter()
             .map(|(i, _)| list.items[*i].number.to_string().len())
             .max()
             .unwrap_or(1)
             + 1;
         for (n, (i, hits)) in self
-            .item_hits
+            .item_menu
+            .hits
             .iter()
             .enumerate()
             .skip(first)
             .take(rows as usize)
         {
             let item = &list.items[*i];
-            let selected = n == self.item_selected;
+            let selected = n == self.item_menu.selected;
             let bg = if selected { p.hl_med } else { p.surface };
             let mut spans = vec![
                 Span::styled(
@@ -1089,7 +1123,7 @@ impl App {
                 Style::new().bg(bg),
             ));
             let row = Rect {
-                y: area.y + (n - first) as u16,
+                y: area.y + cells(n - first),
                 height: 1,
                 ..area
             };
@@ -1153,18 +1187,18 @@ impl App {
             self.offset = draw::keep_in_view(self.offset, sel, h, header_above);
         }
         let overflow = self.rows.len() > h && h > 0;
-        let list = Rect {
+        let row_area = Rect {
             width: area.width.saturating_sub(if overflow { 2 } else { 0 }),
             ..area
         };
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect {
-                y: area.y + (i - self.offset) as u16,
+                y: area.y + cells(i - self.offset),
                 height: 1,
-                ..list
+                ..row_area
             };
-            let last = !self.rows.get(i + 1).is_some_and(selectable);
-            self.draw_row(f, r, row, self.selected == Some(i), last);
+            let last_in_group = !self.rows.get(i + 1).is_some_and(selectable);
+            self.draw_row(f, r, row, self.selected == Some(i), last_in_group);
         }
         if overflow {
             draw::scrollbar(f, &self.p, area, self.offset, self.rows.len());
@@ -1200,14 +1234,14 @@ impl App {
         draw::centered(f, area, lines);
     }
 
-    fn draw_row(&self, f: &mut Frame, r: Rect, item: &Item, selected: bool, last: bool) {
+    fn draw_row(&self, f: &mut Frame, row: Rect, item: &Item, selected: bool, last: bool) {
         let p = &self.p;
-        let width = r.width as usize;
+        let width = usize::from(row.width);
         // The list keeps showing its pick while another field has focus, but
         // only the focused list gets the iris edge.
         let active = selected && self.focus == Focus::Project;
         let bg = if selected { p.overlay } else { p.base };
-        f.buffer_mut().set_style(r, Style::new().bg(bg));
+        f.buffer_mut().set_style(row, Style::new().bg(bg));
         let edge = if active {
             Span::styled("▎", Style::new().fg(p.iris).bg(bg))
         } else {
@@ -1221,9 +1255,9 @@ impl App {
         // the kind.
         let folder_ok = self.kind == Kind::Session;
         match item {
-            Item::Group(g) => {
-                let group = &self.groups[*g];
-                let n = self.projects.iter().filter(|x| &x.profile == group).count();
+            Item::Group(index) => {
+                let group = &self.groups[*index];
+                let count = self.projects.iter().filter(|x| &x.profile == group).count();
                 let spans = vec![
                     edge,
                     Span::styled(ICON_GROUP, Style::new().fg(p.subtle).bg(bg)),
@@ -1233,88 +1267,19 @@ impl App {
                         Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD),
                     ),
                 ];
-                f.render_widget(Line::from(spans), r);
-                let text = format!("{n} project{}", if n == 1 { "" } else { "s" });
+                f.render_widget(Line::from(spans), row);
+                let text = format!("{count} project{}", if count == 1 { "" } else { "s" });
                 let mut right = pill(
                     vec![Span::styled(text, Style::new().fg(p.subtle))],
                     p.overlay,
                     bg,
                 );
                 right.push(Span::styled(" ", Style::new().bg(bg)));
-                f.render_widget(Line::from(right).right_aligned(), r);
+                f.render_widget(Line::from(right).right_aligned(), row);
             }
-            Item::Folders => {
-                let (text, color) = match self.loads.get(self.listed()) {
-                    Some(Load::Ready(_)) => {
-                        let n = self
-                            .rows
-                            .iter()
-                            .filter(|i| matches!(i, Item::Folder(_)))
-                            .count();
-                        (
-                            format!("{n} folder{}", if n == 1 { "" } else { "s" }),
-                            p.muted,
-                        )
-                    }
-                    Some(Load::Failed(err)) => (err.clone(), p.love),
-                    _ => (
-                        format!("{} listing…", SPINNER[tick(self.started) % SPINNER.len()]),
-                        p.foam,
-                    ),
-                };
-                let spans = vec![
-                    Span::styled(" ", Style::new().bg(p.base)),
-                    Span::styled(ICON_FOLDER, Style::new().fg(p.subtle)),
-                    Span::styled(
-                        format!("  Folders on {}", self.listed()),
-                        Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                f.render_widget(Line::from(spans), r);
-                let mut right = vec![Span::styled(text, Style::new().fg(color))];
-                right.push(Span::styled(" ", Style::new().bg(p.base)));
-                f.render_widget(Line::from(right).right_aligned(), r);
-            }
-            Item::Project(i) => {
-                let project = &self.projects[*i];
-                let (name_hits, path_hits) = self.hits.get(item).cloned().unwrap_or_default();
-                let guide = if last { "╰─ " } else { "├─ " };
-                let lead = 1 + 1 + 3 + 2;
-                let path_room = (width.saturating_sub(lead) / 2).min(48);
-                let path_w = str_width(&project.path).min(path_room);
-                let name_room = width.saturating_sub(lead + path_w + 3);
-                let name_style = if selected {
-                    Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::new().fg(p.text).bg(bg)
-                };
-                let mut spans = vec![
-                    edge,
-                    Span::styled(" ", Style::new().bg(bg)),
-                    Span::styled(guide, Style::new().fg(p.hl_med).bg(bg)),
-                    Span::styled(
-                        ICON_REPO,
-                        Style::new()
-                            .fg(if selected { p.iris } else { p.muted })
-                            .bg(bg),
-                    ),
-                    Span::styled(" ", Style::new().bg(bg)),
-                ];
-                spans.extend(highlight(
-                    &project.name,
-                    &name_hits,
-                    name_room,
-                    false,
-                    name_style,
-                    hl,
-                ));
-                f.render_widget(Line::from(spans), r);
-                let path_style = Style::new()
-                    .fg(if selected { p.subtle } else { p.muted })
-                    .bg(bg);
-                let mut path = highlight(&project.path, &path_hits, path_w, true, path_style, hl);
-                path.push(Span::styled(" ", Style::new().bg(bg)));
-                f.render_widget(Line::from(path).right_aligned(), r);
+            Item::Folders => self.draw_folders_row(f, row),
+            Item::Project(_) => {
+                self.draw_project_row(f, row, item, selected, last, RowLook { edge, bg, hl });
             }
             Item::Folder(j) => {
                 let Some(folder) = self.folder_at(*j) else {
@@ -1341,9 +1306,102 @@ impl App {
                 let lead: usize = spans.iter().map(|s| str_width(&s.content)).sum();
                 let room = width.saturating_sub(lead + 1);
                 spans.extend(highlight(&folder.display, &hits, room, true, text, hl));
-                f.render_widget(Line::from(spans), r);
+                f.render_widget(Line::from(spans), row);
             }
         }
+    }
+
+    /// The header over a host's folders: where they are listed from and how
+    /// the listing went.
+    fn draw_folders_row(&self, f: &mut Frame, row: Rect) {
+        let p = &self.p;
+        let (text, color) = match self.loads.get(self.listed()) {
+            Some(Load::Ready(_)) => {
+                let n = self
+                    .rows
+                    .iter()
+                    .filter(|i| matches!(i, Item::Folder(_)))
+                    .count();
+                (
+                    format!("{n} folder{}", if n == 1 { "" } else { "s" }),
+                    p.muted,
+                )
+            }
+            Some(Load::Failed(err)) => (err.clone(), p.love),
+            _ => (
+                format!("{} listing…", SPINNER[tick(self.started) % SPINNER.len()]),
+                p.foam,
+            ),
+        };
+        let spans = vec![
+            Span::styled(" ", Style::new().bg(p.base)),
+            Span::styled(ICON_FOLDER, Style::new().fg(p.subtle)),
+            Span::styled(
+                format!("  Folders on {}", self.listed()),
+                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+            ),
+        ];
+        f.render_widget(Line::from(spans), row);
+        let mut right = vec![Span::styled(text, Style::new().fg(color))];
+        right.push(Span::styled(" ", Style::new().bg(p.base)));
+        f.render_widget(Line::from(right).right_aligned(), row);
+    }
+
+    /// A catalog project `item` under its group, with the query's hits.
+    fn draw_project_row(
+        &self,
+        f: &mut Frame,
+        row: Rect,
+        item: &Item,
+        selected: bool,
+        last: bool,
+        look: RowLook,
+    ) {
+        let Item::Project(index) = item else {
+            return;
+        };
+        let RowLook { edge, bg, hl } = look;
+        let p = &self.p;
+        let width = usize::from(row.width);
+        let project = &self.projects[*index];
+        let (name_hits, path_hits) = self.hits.get(item).cloned().unwrap_or_default();
+        let guide = if last { "╰─ " } else { "├─ " };
+        let lead = 1 + 1 + 3 + 2;
+        let path_room = (width.saturating_sub(lead) / 2).min(48);
+        let path_w = str_width(&project.path).min(path_room);
+        let name_room = width.saturating_sub(lead + path_w + 3);
+        let name_style = if selected {
+            Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
+        } else {
+            Style::new().fg(p.text).bg(bg)
+        };
+        let mut spans = vec![
+            edge,
+            Span::styled(" ", Style::new().bg(bg)),
+            Span::styled(guide, Style::new().fg(p.hl_med).bg(bg)),
+            Span::styled(
+                ICON_REPO,
+                Style::new()
+                    .fg(if selected { p.iris } else { p.muted })
+                    .bg(bg),
+            ),
+            Span::styled(" ", Style::new().bg(bg)),
+        ];
+        spans.extend(highlight(
+            &project.name,
+            &name_hits,
+            name_room,
+            false,
+            name_style,
+            hl,
+        ));
+        f.render_widget(Line::from(spans), row);
+        let path_style = Style::new()
+            .fg(if selected { p.subtle } else { p.muted })
+            .bg(bg);
+        let mut path = highlight(&project.path, &path_hits, path_w, true, path_style, hl);
+        path.push(Span::styled(" ", Style::new().bg(bg)));
+        f.render_widget(Line::from(path).right_aligned(), row);
     }
 
     fn draw_form(&mut self, f: &mut Frame, area: Rect, prompt_rows: u16) {
@@ -1399,7 +1457,7 @@ impl App {
             }
         };
         let hint = candidates.into_iter().find(|h| str_width(h) <= room);
-        let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
+        let hint_w = cells(hint.as_deref().map_or(0, str_width));
         if let Some(hint) = hint {
             f.render_widget(
                 Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(),
@@ -1423,8 +1481,8 @@ impl App {
         }
 
         self.draw_item(f, item_row, label_w);
-        if self.focus == Focus::Item && !self.item_hits.is_empty() {
-            self.item_card = Some((
+        if self.focus == Focus::Item && !self.item_menu.hits.is_empty() {
+            self.item_menu.card = Some((
                 Rect {
                     height: 2,
                     ..name_row
@@ -1487,7 +1545,7 @@ impl App {
         };
         let room = (row.width as usize).saturating_sub(label_w as usize + str_width(&item) + 2);
         let hint = hints.into_iter().find(|h| str_width(h) <= room);
-        let hint_w = hint.as_deref().map(str_width).unwrap_or(0) as u16;
+        let hint_w = cells(hint.as_deref().map_or(0, str_width));
         if let Some(hint) = hint {
             f.render_widget(
                 Line::from(Span::styled(hint, Style::new().fg(color))).right_aligned(),
@@ -1637,7 +1695,7 @@ impl App {
             ));
         }
         let ready = !self.pick().is_empty();
-        let (send_bg, send_fg) = if ready {
+        let (send_fill, send_text) = if ready {
             (p.pine, p.text)
         } else {
             (chip_bg, p.muted)
@@ -1650,9 +1708,9 @@ impl App {
         let right = pill(
             vec![Span::styled(
                 label,
-                Style::new().fg(send_fg).add_modifier(Modifier::BOLD),
+                Style::new().fg(send_text).add_modifier(Modifier::BOLD),
             )],
-            send_bg,
+            send_fill,
             fill,
         );
         (left, right)
@@ -1681,7 +1739,7 @@ impl App {
                     let next = match self.focus {
                         Focus::Project => "name",
                         Focus::Name => "work item",
-                        Focus::Item if !self.item_hits.is_empty() => "fill item",
+                        Focus::Item if !self.item_menu.hits.is_empty() => "fill item",
                         Focus::Item => "prompt",
                         Focus::Prompt => "project",
                     };
@@ -1714,7 +1772,7 @@ impl App {
                 }
             }
             hints.push(("⌃O", "host", p.subtle));
-            let esc = if self.focus == Focus::Item && !self.item_hits.is_empty() {
+            let esc = if self.focus == Focus::Item && !self.item_menu.hits.is_empty() {
                 "hide items"
             } else {
                 "close"
@@ -1924,11 +1982,14 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 if !app.key(k) {
                     return Ok(());
                 }
-                if std::mem::take(&mut app.launch_requested) && standalone_launch(term, app)? {
-                    return Ok(());
-                }
-                if std::mem::take(&mut app.edit_requested) {
-                    edit_prompt(term, app)?;
+                match app.request.take() {
+                    Some(Request::Launch) => {
+                        if standalone_launch(term, app)? {
+                            return Ok(());
+                        }
+                    }
+                    Some(Request::Edit) => edit_prompt(term, app)?,
+                    None => {}
                 }
             }
             Event::Paste(text) => app.paste(&text),
@@ -1963,11 +2024,11 @@ fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     let _ = execute!(io::stdout(), EnableFocusChange);
     app.away = true;
     app.rearm_mode();
-    if let Some(text) = edited? {
-        if text != before {
-            app.prompt.clear();
-            app.paste(&text);
-        }
+    if let Some(text) = edited?
+        && text != before
+    {
+        app.prompt.clear();
+        app.paste(&text);
     }
     Ok(())
 }
@@ -2023,12 +2084,12 @@ mod tests {
         );
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(
-            !app.launch_requested,
+            app.request.is_none(),
             "float still dispatches Enter through Lua"
         );
         app.standalone = true;
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.launch_requested);
+        assert_eq!(app.request, Some(Request::Launch));
     }
 
     #[test]
@@ -2051,7 +2112,7 @@ mod tests {
             )
         );
         app.prompt.saved_ok = false;
-        assert!(app.pick().is_empty());
+        assert_eq!(app.pick(), "");
     }
 
     #[test]
@@ -2141,13 +2202,16 @@ mod tests {
         );
         app.focus = Focus::Item;
         app.sync_items();
-        assert!(app.item_hits.is_empty(), "the menu waits to be asked for");
+        assert!(
+            app.item_menu.hits.is_empty(),
+            "the menu waits to be asked for"
+        );
         assert!(
             app.pick().is_empty(),
             "nothing chosen, nothing to name it from"
         );
         key(&mut app, KeyCode::Down);
-        assert_eq!(app.item_hits.len(), 2);
+        assert_eq!(app.item_menu.hits.len(), 2);
         key(&mut app, KeyCode::Down);
         let base = format!(
             "agent/{}/{}//{}",
@@ -2164,29 +2228,35 @@ mod tests {
         // Typing filters by title or number; Tab fills the field and closes.
         app.paste("spawn");
         app.sync_items();
-        assert_eq!(app.item_hits.iter().map(|h| h.0).collect::<Vec<_>>(), [0]);
+        assert_eq!(
+            app.item_menu.hits.iter().map(|h| h.0).collect::<Vec<_>>(),
+            [0]
+        );
         key(&mut app, KeyCode::Tab);
         assert_eq!(app.typed_item(), "https://app.fizzy.do/1/cards/1158");
-        assert!(app.item_hits.is_empty() && app.focus == Focus::Item);
+        assert!(app.item_menu.hits.is_empty() && app.focus == Focus::Item);
         // A ref matching nothing is sent as typed.
         app.item.clear();
         app.paste("ENG-12");
         app.sync_items();
-        assert!(app.item_hits.is_empty());
+        assert_eq!(app.item_menu.hits, [] as [(usize, Vec<usize>); 0]);
         assert_eq!(app.item_text(), "ENG-12");
         // Escape hides the menu rather than closing; leaving the field closes it.
         app.item.clear();
         key(&mut app, KeyCode::Down);
-        assert!(!app.item_hits.is_empty());
+        assert_ne!(app.item_menu.hits, [] as [(usize, Vec<usize>); 0]);
         assert!(app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         app.sync_items();
-        assert!(app.item_hits.is_empty());
+        assert_eq!(app.item_menu.hits, [] as [(usize, Vec<usize>); 0]);
         key(&mut app, KeyCode::Down);
         app.focus = Focus::Prompt;
         app.sync_items();
         app.focus = Focus::Item;
         app.sync_items();
-        assert!(app.item_hits.is_empty(), "tabbing back never reopens it");
+        assert!(
+            app.item_menu.hits.is_empty(),
+            "tabbing back never reopens it"
+        );
     }
 
     #[test]
@@ -2219,7 +2289,7 @@ mod tests {
         app.query = "local".into();
         app.refilter();
         app.name.clear();
-        assert!(app.pick().is_empty());
+        assert_eq!(app.pick(), "");
         app.kind = Kind::Session;
         assert_eq!(
             app.pick(),

@@ -124,8 +124,9 @@ impl Scrollback {
             return Outcome::Stay;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let page = height.max(2) as isize - 1;
-        let half = (height as isize / 2).max(1);
+        let height = isize::try_from(height).unwrap_or(isize::MAX);
+        let page = height.max(2) - 1;
+        let half = (height / 2).max(1);
         let last = lines.len().saturating_sub(1);
         match k.code {
             KeyCode::Char('c' | 'v') if ctrl => return Outcome::Exit,
@@ -142,25 +143,25 @@ impl Scrollback {
             KeyCode::Char('}') => {
                 self.cursor = (self.cursor + 1..=last)
                     .find(|&i| lines[i].is_empty())
-                    .unwrap_or(last)
+                    .unwrap_or(last);
             }
             KeyCode::Char('{') => {
                 self.cursor = (0..self.cursor)
                     .rev()
                     .find(|&i| lines[i].is_empty())
-                    .unwrap_or(0)
+                    .unwrap_or(0);
             }
             KeyCode::Char('/') => {
                 self.typing = Some(Typing {
                     forward: true,
                     query: String::new(),
-                })
+                });
             }
             KeyCode::Char('?') => {
                 self.typing = Some(Typing {
                     forward: false,
                     query: String::new(),
-                })
+                });
             }
             KeyCode::Char('n') => self.repeat(lines, false),
             KeyCode::Char('N') => self.repeat(lines, true),
@@ -357,7 +358,7 @@ mod tests {
             "● second",
         ]
         .iter()
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
     }
 

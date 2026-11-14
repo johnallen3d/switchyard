@@ -98,16 +98,12 @@ impl Help {
     /// their group titles.
     pub fn draw(&mut self, f: &mut Frame, p: &Palette, area: Rect, sections: &[Section]) {
         let lines = self.lines(p, sections);
-        let w = 64.min(area.width.saturating_sub(4));
-        let h = (lines.len() as u16 + 4)
+        let width = 64.min(area.width.saturating_sub(4));
+        let height = crate::cells(lines.len())
+            .saturating_add(4)
             .clamp(8, area.height.saturating_sub(2).max(8))
             .min(area.height);
-        let r = Rect {
-            x: area.x + (area.width - w) / 2,
-            y: area.y + (area.height - h) / 2,
-            width: w,
-            height: h,
-        };
+        let r = crate::centered(area, width, height);
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -239,7 +235,7 @@ mod tests {
         let text: Vec<String> = h
             .lines(&p, &sections)
             .iter()
-            .map(|l| l.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert_eq!(text.len(), 2, "{text:?}");
         assert!(text[0].contains("Scrollback") && text[1].contains("copy"));
@@ -248,7 +244,7 @@ mod tests {
         let text: Vec<String> = h
             .lines(&p, &sections)
             .iter()
-            .map(|l| l.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         assert!(text.len() == 2 && text[1].contains("archive"), "{text:?}");
         // A group's name matches all of it.
@@ -259,7 +255,7 @@ mod tests {
         assert_eq!(h.filter, "pickerq");
         press(&mut h, KeyCode::Enter);
         assert_eq!(press(&mut h, KeyCode::Esc), Outcome::Stay);
-        assert!(h.filter.is_empty());
+        assert_eq!(h.filter, "");
         assert_eq!(press(&mut h, KeyCode::Esc), Outcome::Close);
     }
 }

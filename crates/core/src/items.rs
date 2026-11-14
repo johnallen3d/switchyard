@@ -41,6 +41,11 @@ pub struct OpenItems {
 }
 
 /// The open items of `project`'s tracker, as this host's CLIs see them.
+///
+/// # Errors
+///
+/// Fails when the tracker names no board or repository, or its CLI fails
+/// or gives output that can't be parsed.
 pub fn list_open(project: &Project) -> Result<OpenItems, String> {
     let tracker = Tracker::new(
         &tracker_or_fizzy(&project.tracker, &local_board(&project.path)),
@@ -164,7 +169,7 @@ mod tests {
                 },
             ]
         );
-        assert!(parse("[]").unwrap().is_empty());
+        assert_eq!(parse("[]").unwrap(), [] as [OpenItem; 0]);
         assert!(parse("{\"ok\": false}").is_err());
         assert!(parse("not json").is_err());
     }

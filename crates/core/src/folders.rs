@@ -17,6 +17,10 @@ pub struct Folder {
 /// another host's from switchyard-server's cache when it answers (only on
 /// the config host, where it runs), else over SSH. Err when that host
 /// can't be reached.
+///
+/// # Errors
+///
+/// Fails when zoxide can't run here or `host` can't be reached.
 pub fn list(host: &str, current: &str, home: &str, home_folders: &str) -> Result<String, String> {
     if host == current {
         return zoxide_here();
@@ -31,6 +35,10 @@ pub fn list(host: &str, current: &str, home: &str, home_folders: &str) -> Result
 }
 
 /// This host's zoxide folders.
+///
+/// # Errors
+///
+/// Fails when zoxide can't be run.
 pub fn zoxide_here() -> Result<String, String> {
     let out = Command::new("zoxide")
         .args(["query", "-l"])
@@ -42,6 +50,10 @@ pub fn zoxide_here() -> Result<String, String> {
 }
 
 /// Another host's zoxide folders over SSH.
+///
+/// # Errors
+///
+/// Fails when ssh can't be run or can't connect to `host`.
 pub fn zoxide_on(host: &str) -> Result<String, String> {
     let out = ssh(host)
         .arg("zoxide query -l")
@@ -57,6 +69,7 @@ pub fn zoxide_on(host: &str) -> Result<String, String> {
 }
 
 /// The output of `list` as folders.
+#[must_use]
 pub fn parse(text: &str) -> Vec<Folder> {
     text.lines()
         .filter(|l| !l.is_empty())
@@ -68,6 +81,7 @@ pub fn parse(text: &str) -> Vec<Folder> {
 }
 
 /// `/home/USER` and `/Users/USER` as ~, whichever host the path is from.
+#[must_use]
 pub fn home_relative(dir: &str) -> String {
     for root in ["/home/", "/Users/"] {
         if let Some(rest) = dir.strip_prefix(root) {
@@ -84,6 +98,11 @@ pub fn home_relative(dir: &str) -> String {
 /// Find or create the session named after `dir` on `host` and return its ID.
 /// A catalog path starting with ~/ is expanded for `host`, so the session
 /// starts in the project rather than the home directory.
+///
+/// # Errors
+///
+/// Fails when `host`'s home directory can't be found for a `~/` path, or
+/// Rex can't list or create the session.
 pub fn open(host: &str, dir: &str) -> Result<String, String> {
     let dir = match dir.strip_prefix("~/") {
         Some(rest) => {

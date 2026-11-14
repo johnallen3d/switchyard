@@ -1,5 +1,5 @@
 //! Colours come from the managed theme through the runtime config's
-//! `[palette]` (switchyard_core::config), falling back to Rosé Pine. Every cell gets an
+//! `[palette]` (`switchyard_core::config`), falling back to Rosé Pine. Every cell gets an
 //! explicit background: a Rex float shows the pane beneath through cells left
 //! on the terminal's default background.
 //!
@@ -28,32 +28,35 @@ pub struct Palette {
 }
 
 /// `#rrggbb` (the `#` optional) as a colour.
+#[must_use]
 pub fn color(s: &str) -> Option<Color> {
     let s = s.trim().trim_start_matches('#');
     if s.len() != 6 {
         return None;
     }
-    let v = u32::from_str_radix(s, 16).ok()?;
-    Some(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8))
+    let value = u32::from_str_radix(s, 16).ok()?;
+    let [_, red, green, blue] = value.to_be_bytes();
+    Some(Color::Rgb(red, green, blue))
 }
 
 impl Palette {
+    #[must_use]
     pub fn load() -> Self {
         let mut p = Palette {
-            base: color("191724").unwrap(),
-            surface: color("1f1d2e").unwrap(),
-            overlay: color("26233a").unwrap(),
-            hl_med: color("403d52").unwrap(),
-            hl_high: color("524f67").unwrap(),
-            text: color("e0def4").unwrap(),
-            subtle: color("908caa").unwrap(),
-            muted: color("6e6a86").unwrap(),
-            love: color("eb6f92").unwrap(),
-            gold: color("f6c177").unwrap(),
-            rose: color("ebbcba").unwrap(),
-            pine: color("31748f").unwrap(),
-            foam: color("9ccfd8").unwrap(),
-            iris: color("c4a7e7").unwrap(),
+            base: Color::Rgb(0x19, 0x17, 0x24),
+            surface: Color::Rgb(0x1f, 0x1d, 0x2e),
+            overlay: Color::Rgb(0x26, 0x23, 0x3a),
+            hl_med: Color::Rgb(0x40, 0x3d, 0x52),
+            hl_high: Color::Rgb(0x52, 0x4f, 0x67),
+            text: Color::Rgb(0xe0, 0xde, 0xf4),
+            subtle: Color::Rgb(0x90, 0x8c, 0xaa),
+            muted: Color::Rgb(0x6e, 0x6a, 0x86),
+            love: Color::Rgb(0xeb, 0x6f, 0x92),
+            gold: Color::Rgb(0xf6, 0xc1, 0x77),
+            rose: Color::Rgb(0xeb, 0xbc, 0xba),
+            pine: Color::Rgb(0x31, 0x74, 0x8f),
+            foam: Color::Rgb(0x9c, 0xcf, 0xd8),
+            iris: Color::Rgb(0xc4, 0xa7, 0xe7),
         };
         let names = switchyard_core::config::load()
             .map(|c| &c.palette)

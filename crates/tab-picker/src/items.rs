@@ -9,7 +9,7 @@
 //! then a confirmation naming the item (Enter or `y` runs it, anything
 //! else goes back). Escape, ctrl-c or ctrl-r again close the float.
 //!
-//! This holds the float's state and keys; standalone_key runs what they
+//! This holds the float's state and keys; `standalone_key` runs what they
 //! ask for (see `Outcome`) and shows the outcome in the footer.
 
 use ratatui::Frame;
@@ -56,7 +56,7 @@ pub enum Mode {
 }
 
 pub struct Items {
-    /// The task's tab, as (session_id, window_id), which stays highlighted.
+    /// The task's tab, as (`session_id`, `window_id`), which stays highlighted.
     pub key: (String, String),
     pub label: String,
     /// The task's profile, for gh.
@@ -294,14 +294,11 @@ impl Items {
             ])
             .max()
             .unwrap_or(0);
-        let w = (want as u16 + 2).min(area.width);
-        let h = (self.entries.len() as u16 + 4).min(area.height);
-        let r = Rect {
-            x: area.x + (area.width - w) / 2,
-            y: area.y + (area.height - h) / 2,
-            width: w,
-            height: h,
-        };
+        let width = crate::cells(want).saturating_add(2).min(area.width);
+        let height = crate::cells(self.entries.len())
+            .saturating_add(4)
+            .min(area.height);
+        let r = crate::centered(area, width, height);
         f.render_widget(Clear, r);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -316,7 +313,7 @@ impl Items {
             let selected = i == self.selected;
             let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
-                y: inner.y + i as u16,
+                y: inner.y + crate::cells(i),
                 height: 1,
                 ..inner
             };
@@ -361,6 +358,12 @@ impl Items {
             height: 1,
             ..inner
         };
+        f.render_widget(self.mode_line(p), bottom);
+    }
+
+    /// The box's bottom line for its mode: the list's keys, the comment
+    /// being typed, or the question Enter answers.
+    fn mode_line(&self, p: &Palette) -> Line<'static> {
         let key = |k: &str| {
             Span::styled(
                 k.to_string(),
@@ -368,7 +371,7 @@ impl Items {
             )
         };
         let muted = |s: &str| Span::styled(s.to_string(), Style::new().fg(p.muted));
-        let line = match &self.mode {
+        match &self.mode {
             Mode::List => {
                 let mut spans = vec![Span::raw(" ")];
                 for (i, (k, d)) in self
@@ -402,8 +405,7 @@ impl Items {
                 key("esc"),
                 muted(" no"),
             ]),
-        };
-        f.render_widget(line, bottom);
+        }
     }
 }
 

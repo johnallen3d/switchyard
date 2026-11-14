@@ -19,6 +19,10 @@ pub struct Project {
 }
 
 /// The catalog projects (from projects.toml), or why the config is unreadable.
+///
+/// # Errors
+///
+/// Fails when the config can't be loaded (see `config::load`).
 pub fn catalog() -> Result<Vec<Project>, String> {
     Ok(config::load()?
         .projects
@@ -48,6 +52,7 @@ pub const AUTO: &str = "auto";
 pub const CONFIG: &str = "config";
 
 /// Linux dev hosts the picker offers (none when the config is unreadable).
+#[must_use]
 pub fn dev_hosts() -> Vec<String> {
     config::load().map(|c| c.hosts.clone()).unwrap_or_default()
 }
@@ -55,6 +60,7 @@ pub fn dev_hosts() -> Vec<String> {
 /// Hosts `auto` chooses from for a project: its own `hosts`, else its
 /// group's pool, else every dev host. "config" stays unresolved here; see
 /// `resolve`.
+#[must_use]
 pub fn pool(project: &Project) -> Vec<String> {
     match config::load() {
         Ok(c) => pool_in(c, &project.hosts, &project.profile),
@@ -63,6 +69,7 @@ pub fn pool(project: &Project) -> Vec<String> {
 }
 
 /// `pool` for a project's `hosts` override and profile under `config`.
+#[must_use]
 pub fn pool_in(config: &config::Config, hosts: &[String], profile: &str) -> Vec<String> {
     if !hosts.is_empty() {
         return hosts.to_vec();
@@ -76,6 +83,7 @@ pub fn pool_in(config: &config::Config, hosts: &[String], profile: &str) -> Vec<
 }
 
 /// A pool entry as a Rex host label; only called on the config host.
+#[must_use]
 pub fn resolve(host: &str) -> String {
     if host == CONFIG {
         local_label()
@@ -134,6 +142,11 @@ fn parse_metrics(text: &str) -> Option<Metrics> {
 /// the project picker does); Err when it can't be reached or read (the
 /// config host, a Mac, has no /proc). switchyard-server keeps these for
 /// every dev host.
+///
+/// # Errors
+///
+/// Fails when ssh can't run or reach `host`, or its output has no load or
+/// memory figures.
 pub fn metrics(host: &str) -> Result<Metrics, String> {
     let out = ssh(host)
         .arg(METRICS_SCRIPT)
@@ -164,8 +177,9 @@ impl Probe {
     /// Lower is better. Each busy agent counts like half the CPUs being
     /// busy; a host already holding the project is slightly preferred (warm
     /// checkout and build cache); low memory pushes away.
+    #[must_use]
     pub fn new(host: &str, m: Metrics, agents: u32, warm: bool) -> Probe {
-        let score = m.load + 0.5 * agents as f64 - if warm { 0.25 } else { 0.0 }
+        let score = m.load + 0.5 * f64::from(agents) - if warm { 0.25 } else { 0.0 }
             + if m.mem_gib < 4.0 { 1.0 } else { 0.0 };
         Probe {
             host: host.to_string(),
@@ -207,17 +221,25 @@ fn probe(host: &str, project: &str) -> Option<Probe> {
 /// are measured again.
 const PROBE_FRESH_MS: u64 = 60_000;
 
+/// Fresh word about a host from switchyard-server's cache.
+#[derive(Debug, PartialEq)]
+enum Cached {
+    /// A fresh measurement.
+    Measured(Probe),
+    /// Fresh word that it can't be reached.
+    Unreachable,
+}
+
 /// What switchyard-server's cached probe (one entry of its `probes` reply,
-/// see core's `server`) says about a host: Some(Some) a fresh measurement,
-/// Some(None) fresh word that it can't be reached, None nothing to trust
+/// see core's `server`) says about a host, or None for nothing to trust
 /// (missing, stale, or no rows for its agents), so measure it now.
-fn cached_probe(entry: Option<&serde_json::Value>) -> Option<Option<Probe>> {
+fn cached_probe(entry: Option<&serde_json::Value>) -> Option<Cached> {
     let e = entry?;
     if e["age_ms"].as_u64()? > PROBE_FRESH_MS {
         return None;
     }
     if !e["error"].is_null() {
-        return Some(None);
+        return Some(Cached::Unreachable);
     }
     let m = Metrics {
         load: e["load"].as_f64()?,
@@ -226,7 +248,7 @@ fn cached_probe(entry: Option<&serde_json::Value>) -> Option<Option<Probe>> {
     let agents = u32::try_from(e["agents"].as_u64()?).ok()?;
     let mut p = Probe::new(e["host"].as_str()?, m, agents, e["warm"].as_bool()?);
     p.cached = true;
-    Some(Some(p))
+    Some(Cached::Measured(p))
 }
 
 /// Probes for `hosts`: switchyard-server's where fresh (`use_cache`), the
@@ -241,12 +263,13 @@ fn probe_all(hosts: &[String], project: &str, use_cache: bool) -> Vec<Probe> {
     let mut probes = Vec::new();
     let mut handles = Vec::new();
     for host in hosts {
-        match cached_probe(entry(host)) {
-            Some(p) => probes.extend(p),
-            None => {
-                let (host, project) = (host.clone(), project.to_string());
-                handles.push(std::thread::spawn(move || probe(&host, &project)));
+        if let Some(cached) = cached_probe(entry(host)) {
+            if let Cached::Measured(p) = cached {
+                probes.push(p);
             }
+        } else {
+            let (host, project) = (host.clone(), project.to_string());
+            handles.push(std::thread::spawn(move || probe(&host, &project)));
         }
     }
     probes.extend(handles.into_iter().filter_map(|h| h.join().ok().flatten()));
@@ -255,11 +278,19 @@ fn probe_all(hosts: &[String], project: &str, use_cache: bool) -> Vec<Probe> {
 
 /// The project's host, or the least busy reachable one when its pool has
 /// several (probing is Linux only), with a one-line reason for the log.
+///
+/// # Errors
+///
+/// Fails when no host in the project's pool is reachable.
 pub fn choose_host(project: &Project) -> Result<(String, String), String> {
     choose(project, true)
 }
 
 /// `choose_host`, with or without switchyard-server's cached probes.
+///
+/// # Errors
+///
+/// Fails when no host in the project's pool is reachable.
 pub fn choose(project: &Project, use_cache: bool) -> Result<(String, String), String> {
     let hosts = pool(project);
     if let [only] = hosts.as_slice() {
@@ -316,23 +347,26 @@ mod tests {
             load: 0.5,
             mem_gib: 32.0,
         };
-        assert_eq!(Probe::new("a", m, 2, false).score, 1.5);
-        assert_eq!(Probe::new("a", m, 0, true).score, 0.25);
-        assert_eq!(
+        let close = |score: f64, want: f64| (score - want).abs() < 1e-9;
+        assert!(close(Probe::new("a", m, 2, false).score, 1.5));
+        assert!(close(Probe::new("a", m, 0, true).score, 0.25));
+        assert!(close(
             Probe::new("a", Metrics { mem_gib: 2.0, ..m }, 0, false).score,
             1.5
-        );
+        ));
     }
 
     #[test]
     fn cached_probes_count_only_when_fresh_and_whole() {
         let entry = json!({ "host": "miller", "load": 0.5, "mem_gib": 32.0, "agents": 1, "warm": true,
             "age_ms": 1000, "error": null });
-        let p = cached_probe(Some(&entry)).unwrap().unwrap();
+        let Some(Cached::Measured(p)) = cached_probe(Some(&entry)) else {
+            panic!("a fresh measurement");
+        };
         assert_eq!((p.host.as_str(), p.score, p.cached), ("miller", 0.75, true));
         // Fresh word that the host is down: leave it out without asking again.
         let down = json!({ "host": "miller", "age_ms": 1000, "error": "couldn't reach miller" });
-        assert_eq!(cached_probe(Some(&down)), Some(None));
+        assert_eq!(cached_probe(Some(&down)), Some(Cached::Unreachable));
         // Stale, unmeasured or without rows for its agents: measure it now.
         let mut stale = entry.clone();
         stale["age_ms"] = json!(PROBE_FRESH_MS + 1);

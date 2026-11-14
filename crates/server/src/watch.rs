@@ -1,7 +1,7 @@
 //! One watcher per Rex server: a long-lived `rex [-S HOST] do --all -e
 //! SCRIPT` that holds one connection to the server and hears every
 //! session's events. Its Lua runs here, on the server's machine, and is
-//! host_rows.lua (the row logic, kept in one place) wrapped in a
+//! `host_rows.lua` (the row logic, kept in one place) wrapped in a
 //! function it calls at start, shortly after relevant events, and on a slow
 //! timer in case an event is missed. Each run prints the host's rows as one
 //! line; closes and host list changes print a line of their own, for the
@@ -20,21 +20,21 @@ use std::time::{Duration, Instant};
 
 use crate::state::{Shared, split_rows};
 
-/// One server's rows (see host_rows.lua).
+/// One server's rows (see `host_rows.lua`).
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
 
 /// Seconds between runs when no event says the rows changed.
 const SAFETY_SECS: u64 = 30;
 
 /// A watcher that prints nothing for this long has lost its connection
-/// without noticing (the safety timer prints every SAFETY_SECS).
+/// without noticing (the safety timer prints every `SAFETY_SECS`).
 const QUIET: Duration = Duration::from_secs(3 * SAFETY_SECS + 10);
 
 /// Lines a watcher prints start with this, then a kind and a JSON string,
 /// tab separated; rex do's own lines (such as "listening: ...") don't.
 const PREFIX: &str = "switchyard\t";
 
-/// The rest of the watcher's Lua, after host_rows.lua as `host_rows`.
+/// The rest of the watcher's Lua, after `host_rows.lua` as `host_rows`.
 /// Events come in bursts (a layout change, an agent updating its status),
 /// so a run waits a moment for the rest: 0.1 s for changes to statuses,
 /// tabs and sessions, 0.5 s for titles, folders and layout, which change
@@ -42,7 +42,7 @@ const PREFIX: &str = "switchyard\t";
 /// by later events, so a steady stream can't starve it.
 ///
 /// A watcher whose server is killed outright (no chance to stop its
-/// watchers, see main) notices at its next write, within SAFETY_SECS.
+/// watchers, see main) notices at its next write, within `SAFETY_SECS`.
 const WATCH: &str = r#"
 -- A failed write means the server is gone (even killed outright), so stop.
 local function emit(kind, body)
@@ -94,7 +94,10 @@ struct Slot(Option<&'static AtomicI32>);
 
 impl Slot {
     fn take(pid: u32) -> Slot {
-        let pid = pid as i32;
+        // A pid that doesn't fit pid_t can't be signalled anyway.
+        let Ok(pid) = i32::try_from(pid) else {
+            return Slot(None);
+        };
         Slot(PIDS.iter().find(|p| {
             p.compare_exchange(0, pid, Ordering::SeqCst, Ordering::SeqCst)
                 .is_ok()
@@ -170,16 +173,16 @@ pub struct Events {
 
 /// Keep `host`'s watcher running until `stop` is set. `host` is `local` for
 /// this machine's server, else a `rex.servers()` label.
-pub fn supervise(shared: Arc<Shared>, host: String, events: Events, stop: Arc<AtomicBool>) {
+pub fn supervise(shared: &Arc<Shared>, host: &str, events: &Events, stop: &AtomicBool) {
     let script = script();
     let mut wait = Duration::ZERO;
     while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
-        match run(&shared, &host, &script, &events, &stop) {
+        match run(shared, host, &script, events, stop) {
             Ok(()) => break,
             Err(e) => {
                 crate::log(&format!("{host}: {e}"));
-                shared.update(|s| s.set_watching(&host, false) | s.set_error(&host, e));
+                shared.update(|s| s.set_watching(host, false) | s.set_error(host, e));
             }
         }
         wait = backoff(wait, started.elapsed());
@@ -188,7 +191,7 @@ pub fn supervise(shared: Arc<Shared>, host: String, events: Events, stop: Arc<At
             thread::sleep(Duration::from_millis(200));
         }
     }
-    shared.update(|s| s.set_watching(&host, false));
+    shared.update(|s| s.set_watching(host, false));
 }
 
 /// Run one watcher until it exits (Err with why) or `stop` is set (Ok).
@@ -272,7 +275,7 @@ fn watch_child(child: &mut Child, heard: &Mutex<Instant>, stop: &AtomicBool) -> 
         if let Ok(Some(status)) = child.try_wait() {
             return Exit::Exited(status);
         }
-        let quiet = heard.lock().map(|at| at.elapsed() > QUIET).unwrap_or(false);
+        let quiet = heard.lock().is_ok_and(|at| at.elapsed() > QUIET);
         if quiet || stop.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
@@ -296,7 +299,7 @@ fn read_lines(
         }
         match parse_line(&line) {
             Line::Rows(rows) => {
-                shared.update(|s| s.set_rows(host, split_rows(&rows), Instant::now()))
+                shared.update(|s| s.set_rows(host, split_rows(&rows), Instant::now()));
             }
             Line::Error(e) => shared.update(|s| s.set_error(host, e)),
             Line::Closed(_) => {

@@ -39,7 +39,7 @@
 //!   Rex host. HOST `auto` picks from the project's host pool (see core's
 //!   `hosts::pool`), least busy first. A Git folder outside the catalog uses
 //!   its explicit host and primary checkout. Reads the prompt from the
-//!   picker's host (PROMPT_REF may be empty), names the work when NAME is
+//!   picker's host (`PROMPT_REF` may be empty), names the work when NAME is
 //!   empty (see core's `autoname`), leads the prompt with the optional work
 //!   item (see core's `launch::work_item_prompt`), finds or creates the
 //!   project's session on the host, opens a tab running `task run` there,
@@ -74,11 +74,21 @@ pub use crate::run::run;
 
 /// The picker in a float: `home` and `folders` are the config host's label
 /// and zoxide folders, one per line (possibly none).
+///
+/// # Errors
+///
+/// Fails when the catalog can't be read, or when reading the terminal's
+/// events or drawing fails.
 pub fn float(kind: Kind, home: String, folders: String) -> io::Result<()> {
     picker::run_picker(kind, home, folders, false)
 }
 
 /// The picker from a shell on the config host: it opens the pick itself.
+///
+/// # Errors
+///
+/// Fails off the Mac (launches run there), when the catalog can't be read,
+/// or when reading the terminal's events or drawing fails.
 pub fn standalone(kind: Kind) -> io::Result<()> {
     picker::run_standalone(kind)
 }

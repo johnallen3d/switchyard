@@ -9,3 +9,6 @@ switchyard-server.workspace = true
 switchyard-spawn.workspace = true
 switchyard-tabs.workspace = true
 serde_json.workspace = true
+
+[lints]
+workspace = true

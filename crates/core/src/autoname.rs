@@ -52,6 +52,7 @@ const SCHEMA: &str = r#"{
 
 /// A name for work that has none: from `item`'s title when it can be
 /// looked up, otherwise from `prompt`. None when neither gives one.
+#[must_use]
 pub fn name_work(
     profile: &str,
     item: Option<&str>,
@@ -239,7 +240,7 @@ mod tests {
     /// Asks the real on-device model and Fizzy; run with `--ignored` on a
     /// Mac with `fm` set up.
     #[test]
-    #[ignore]
+    #[ignore = "asks the real on-device model and Fizzy"]
     fn live_names_from_prompt_and_card() {
         let fizzy = Tracker::new("fizzy:6284043/board", "");
         for prompt in [

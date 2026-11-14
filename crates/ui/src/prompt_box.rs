@@ -33,7 +33,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::Palette;
 use crate::chrome;
-use crate::draw::str_width;
+use crate::draw::{cells, str_width};
 use crate::slash;
 
 /// The rows a prompt box adds around its text: soft top and bottom edges, a
@@ -135,7 +135,7 @@ impl PromptBox {
         let name = format!("/{}", self.slash.command(i).name);
         let line_len = self.field.lines()[word.row].chars().count();
         self.field
-            .move_cursor(CursorMove::Jump(word.row as u16, word.start as u16));
+            .move_cursor(CursorMove::Jump(cells(word.row), cells(word.start)));
         self.field.delete_str(word.end - word.start);
         self.field.insert_str(&name);
         // Step over a space already there rather than adding a second.
@@ -198,8 +198,8 @@ impl PromptBox {
             // Atomically, so a reader never sees half a prompt.
             let tmp = dir.join(format!("{id}.tmp"));
             std::fs::create_dir_all(&dir)
-                .and_then(|_| std::fs::write(&tmp, &text))
-                .and_then(|_| std::fs::rename(&tmp, &path))
+                .and_then(|()| std::fs::write(&tmp, &text))
+                .and_then(|()| std::fs::rename(&tmp, &path))
                 .is_ok()
         };
         if self.saved_ok {
@@ -217,7 +217,7 @@ impl PromptBox {
     /// Text rows the box needs in a card `card_width` wide, between `min`
     /// and `max`; longer prompts scroll to their end.
     pub fn rows(&self, card_width: u16, min: u16, max: u16) -> u16 {
-        (wrap(&self.field.lines().join("\n"), text_width(card_width)).len() as u16).clamp(min, max)
+        cells(wrap(&self.field.lines().join("\n"), text_width(card_width)).len()).clamp(min, max)
     }
 
     /// Show `text` in the empty box.
@@ -314,6 +314,7 @@ impl PromptBox {
 
 /// An empty text field: word-wrapped, with no line highlight or drawn
 /// cursor (the terminal's own cursor is placed instead).
+#[must_use]
 pub fn text_field() -> TextArea<'static> {
     let mut t = TextArea::default();
     t.set_wrap_mode(WrapMode::WordOrGlyph);
@@ -354,6 +355,12 @@ pub fn text_key(field: &mut TextArea<'static>, k: KeyEvent) {
 /// without trailing newlines, or `None` when it failed (such as nvim's
 /// `:cq`); the caller puts the text back if it changed. The corners are
 /// deleted while the editor runs and drawn again at `cell` in `fills`.
+///
+/// # Errors
+///
+/// Fails when the terminal can't be put back in raw mode on the alternate
+/// screen, or cleared, after the editor exits. Failing to write the file or
+/// run the editor is logged and returns `Ok(None)` instead.
 pub fn edit_in_editor(
     term: &mut DefaultTerminal,
     prompt: &PromptBox,
@@ -369,7 +376,7 @@ pub fn edit_in_editor(
     let path = dir.join(format!("{id}.edit.md"));
     let before = prompt.field.lines().join("\n");
     if let Err(e) =
-        std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, format!("{before}\n")))
+        std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, format!("{before}\n")))
     {
         log(&format!("could not write the prompt for the editor: {e}"));
         return Ok(None);
@@ -417,8 +424,8 @@ pub fn place_cursor(f: &mut Frame, field: &TextArea, area: Rect) {
     let c = field.screen_cursor();
     let (top, left) = field.scroll_offset();
     let (row, col) = (
-        c.row.saturating_sub(top as usize) as u16,
-        c.col.saturating_sub(left as usize) as u16,
+        cells(c.row.saturating_sub(usize::from(top))),
+        cells(c.col.saturating_sub(usize::from(left))),
     );
     if row < area.height && col < area.width {
         f.set_cursor_position((area.x + col, area.y + row));
@@ -427,6 +434,7 @@ pub fn place_cursor(f: &mut Frame, field: &TextArea, area: Rect) {
 
 /// Columns of prompt text in a prompt box `card_width` wide: two of padding
 /// on each side, plus one so the cursor fits after a full row.
+#[must_use]
 pub fn text_width(card_width: u16) -> usize {
     (card_width as usize).saturating_sub(5).max(1)
 }
@@ -435,6 +443,7 @@ pub fn text_width(card_width: u16) -> usize {
 /// newlines starting new rows; a word longer than a row is split. Spaces
 /// stay at the end of the row they follow, so the rows join back into the
 /// text. A full last row gets an empty one after it, where the cursor goes.
+#[must_use]
 pub fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     for line in text.split('\n') {

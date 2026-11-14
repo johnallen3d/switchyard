@@ -10,3 +10,6 @@ nucleo-matcher.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
 unicode-width.workspace = true
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use switchyard_core::usage::{Quota, STALE, Snapshot, Summary, Total};
+use switchyard_core::usage::{Quota, STALE, Snapshot, Summary, Total, Window};
 use switchyard_ui::{Palette, draw};
 
 #[derive(Default)]
@@ -17,14 +17,24 @@ pub struct Usage {
 
 fn amount(n: u64) -> String {
     if n >= 1_000_000_000 {
-        format!("{:.1}b", n as f64 / 1_000_000_000.0)
+        format!("{:.1}b", crate::approx(n) / 1_000_000_000.0)
     } else if n >= 1_000_000 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
+        format!("{:.1}m", crate::approx(n) / 1_000_000.0)
     } else if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
+        format!("{:.1}k", crate::approx(n) / 1000.0)
     } else {
         n.to_string()
     }
+}
+
+/// Cells of a `width`-cell bar for `part` of `whole`, rounded to the
+/// nearest, and at least one for any part at all.
+fn share_cells(part: u64, whole: u64, width: usize) -> usize {
+    let (part, whole) = (u128::from(part), u128::from(whole.max(1)));
+    let cells = (part * width as u128 * 2 + whole) / (whole * 2);
+    usize::try_from(cells)
+        .unwrap_or(width)
+        .clamp(usize::from(part > 0), width)
 }
 
 fn duration(secs: u64) -> String {
@@ -220,52 +230,7 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize, height: usize) -> 
         span(format!("{:>reset_width$}", "RESET IN"), p.subtle),
     ]));
     for w in &q.windows {
-        let used = w.used.filter(|n| n.is_finite());
-        let color = match used {
-            Some(n) if n >= 100.0 => p.love,
-            Some(n) if n >= 90.0 => p.gold,
-            _ if w.status != "ok" => p.gold,
-            _ => p.foam,
-        };
-        let filled =
-            used.map(|n| ((n.clamp(0.0, 100.0) / 100.0) * bar_width as f64).round() as usize);
-        let meter = if let Some(n) = filled {
-            // Half-cell strokes leave gaps between ticks; a thin dashed track
-            // avoids solid blocks merging visually across adjacent quota rows.
-            vec![
-                span("╸".repeat(n), color),
-                span("┄".repeat(bar_width - n), p.hl_med),
-            ]
-        } else {
-            vec![span("·".repeat(bar_width), p.subtle)]
-        };
-        let reset = match w.reset {
-            Some(at) if at > now => duration(at - now),
-            Some(_) => "due ↻".into(),
-            None => "unknown".into(),
-        };
-        let mut row = vec![span(format!("{:<4} ", w.label), p.text)];
-        row.extend(meter);
-        row.push(bold(
-            used.map(|n| format!("{n:>4.0}% "))
-                .unwrap_or_else(|| "   ?  ".into()),
-            color,
-        ));
-        row.push(span(
-            format!("{reset:>reset_width$}"),
-            if w.reset.is_some_and(|at| at <= now) {
-                p.gold
-            } else {
-                p.text
-            },
-        ));
-        body.push(Line::from(row));
-        if w.status != "ok" && w.status != q.status {
-            body.push(Line::from(span(
-                format!("{}: {}", w.label, w.status.replace('_', " ")),
-                p.gold,
-            )));
-        }
+        body.extend(window_lines(w, q, p, now, bar_width, reset_width));
     }
     if q.windows.is_empty() {
         body.push(Line::from(span("No quota windows reported", p.gold)));
@@ -274,7 +239,80 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize, height: usize) -> 
         body.push(Line::from(span(format!("Credits: {credits}"), p.subtle)));
     }
     let border = if attention(q, now) { p.gold } else { p.hl_med };
-    let top = if title_in_border {
+    let title = title_in_border.then_some(title);
+    framed(title, body, border, p, width, height)
+}
+
+/// A quota window's meter row, and a line for its status when that isn't
+/// the card's.
+fn window_lines(
+    w: &Window,
+    q: &Quota,
+    p: &Palette,
+    now: u64,
+    bar_width: usize,
+    reset_width: usize,
+) -> Vec<Line<'static>> {
+    let used = w.used.filter(|n| n.is_finite());
+    let color = match used {
+        Some(n) if n >= 100.0 => p.love,
+        Some(n) if n >= 90.0 => p.gold,
+        _ if w.status != "ok" => p.gold,
+        _ => p.foam,
+    };
+    let filled = used
+        .map(|n| crate::round_cells(n.clamp(0.0, 100.0) / 100.0 * crate::approx(bar_width as u64)));
+    let meter = if let Some(n) = filled {
+        // Half-cell strokes leave gaps between ticks; a thin dashed track
+        // avoids solid blocks merging visually across adjacent quota rows.
+        vec![
+            span("╸".repeat(n), color),
+            span("┄".repeat(bar_width - n), p.hl_med),
+        ]
+    } else {
+        vec![span("·".repeat(bar_width), p.subtle)]
+    };
+    let reset = match w.reset {
+        Some(at) if at > now => duration(at - now),
+        Some(_) => "due ↻".into(),
+        None => "unknown".into(),
+    };
+    let mut row = vec![span(format!("{:<4} ", w.label), p.text)];
+    row.extend(meter);
+    row.push(bold(
+        used.map_or_else(|| "   ?  ".into(), |n| format!("{n:>4.0}% ")),
+        color,
+    ));
+    row.push(span(
+        format!("{reset:>reset_width$}"),
+        if w.reset.is_some_and(|at| at <= now) {
+            p.gold
+        } else {
+            p.text
+        },
+    ));
+    let mut lines = vec![Line::from(row)];
+    if w.status != "ok" && w.status != q.status {
+        lines.push(Line::from(span(
+            format!("{}: {}", w.label, w.status.replace('_', " ")),
+            p.gold,
+        )));
+    }
+    lines
+}
+
+/// `body` in a card's rounded border `width` by at least `height`, with
+/// `title` in the top border when it fits there.
+fn framed(
+    title: Option<Line<'static>>,
+    body: Vec<Line<'static>>,
+    border: Color,
+    p: &Palette,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let inner = width.saturating_sub(4).max(1);
+    let top = if let Some(title) = title {
         let remaining = width - title.width() - 5;
         let mut spans = vec![span("╭─ ", border)];
         spans.extend(title.spans);
@@ -477,41 +515,7 @@ fn session(totals: &[&Total], p: &Palette, width: usize, unfiltered: bool) -> Ve
         )));
         return lines;
     }
-    let tokens: u64 = totals.iter().map(|t| t.tokens.total()).sum();
-    let requests: usize = totals.iter().map(|t| t.requests).sum();
-    let unpriced: usize = totals.iter().map(|t| t.unpriced).sum();
-    let cost: f64 = totals.iter().map(|t| t.cost).sum();
-    let mut summary = vec![
-        bold(amount(tokens), p.text),
-        span(" tokens · ", p.subtle),
-        bold(amount(requests as u64), p.text),
-        span(" requests · ", p.subtle),
-    ];
-    if unpriced == requests {
-        summary.push(span("cost unknown", p.subtle));
-    } else if unpriced > 0 {
-        summary.push(bold(format!("{}+", dollars(cost)), p.gold));
-        summary.push(span(
-            format!(
-                " ({} of {} req priced)",
-                amount((requests - unpriced) as u64),
-                amount(requests as u64)
-            ),
-            p.subtle,
-        ));
-    } else {
-        summary.push(bold(dollars(cost), p.foam));
-        summary.push(span(" est.", p.subtle));
-    }
-    lines.push(Line::from(summary));
-    lines.push(Line::from(span(
-        if unpriced > 0 {
-            "API-equivalent estimate, not a bill · — no price data · + partly priced"
-        } else {
-            "API-equivalent estimate, not a subscription bill"
-        },
-        p.subtle,
-    )));
+    lines.extend(session_summary(totals, p));
     lines.push(Line::default());
 
     let via = |t: &Total| {
@@ -578,53 +582,104 @@ fn session(totals: &[&Total], p: &Palette, width: usize, unfiltered: bool) -> Ve
             lines.push(Line::default());
             continue;
         };
-        let mut header = Vec::new();
-        for (i, &(col, w)) in cols.iter().enumerate() {
-            if i > 0 {
-                header.push(Span::raw("  "));
-            }
-            let h = col.header();
-            header.push(span(
-                if col.left() { fit(h, w) } else { right(h, w) },
-                p.subtle,
-            ));
-        }
-        lines.push(Line::from(header));
+        lines.push(table_header(cols, p));
         for t in group {
-            let mut row = Vec::new();
-            for (i, &(col, w)) in cols.iter().enumerate() {
-                if i > 0 {
-                    row.push(Span::raw("  "));
-                }
-                let num = |n: u64| span(right(&amount(n), w), p.subtle);
-                match col {
-                    Col::Model => row.push(bold(fit(&t.model, w), p.text)),
-                    Col::Via => row.push(span(fit(&via(t), w), p.subtle)),
-                    Col::Tokens => row.push(bold(right(&amount(t.tokens.total()), w), p.foam)),
-                    Col::Share => {
-                        let n =
-                            ((t.tokens.total() as f64 / max as f64) * w as f64).round() as usize;
-                        let n = n.clamp(usize::from(t.tokens.total() > 0), w);
-                        row.push(span("━".repeat(n), p.foam));
-                        row.push(span("─".repeat(w - n), p.hl_med));
-                    }
-                    Col::Requests => row.push(span(right(&t.requests.to_string(), w), p.text)),
-                    Col::Input => row.push(num(t.tokens.input)),
-                    Col::Output => row.push(num(t.tokens.output)),
-                    Col::CacheRead => row.push(num(t.tokens.cache_read)),
-                    Col::CacheWrite => row.push(num(t.tokens.cache_write)),
-                    Col::Cost => {
-                        let c = cost_cell(t, p);
-                        row.push(Span::styled(right(&c.content, w), c.style));
-                    }
-                }
-            }
-            lines.push(Line::from(row));
+            lines.push(table_row(t, cols, p, max, &via(t)));
         }
         lines.push(Line::default());
     }
     lines.pop();
     lines
+}
+
+/// The session table's totals line (tokens, requests, estimated cost) and
+/// what the estimate is.
+fn session_summary(totals: &[&Total], p: &Palette) -> [Line<'static>; 2] {
+    let tokens: u64 = totals.iter().map(|t| t.tokens.total()).sum();
+    let requests: usize = totals.iter().map(|t| t.requests).sum();
+    let unpriced: usize = totals.iter().map(|t| t.unpriced).sum();
+    let cost: f64 = totals.iter().map(|t| t.cost).sum();
+    let mut summary = vec![
+        bold(amount(tokens), p.text),
+        span(" tokens · ", p.subtle),
+        bold(amount(requests as u64), p.text),
+        span(" requests · ", p.subtle),
+    ];
+    if unpriced == requests {
+        summary.push(span("cost unknown", p.subtle));
+    } else if unpriced > 0 {
+        summary.push(bold(format!("{}+", dollars(cost)), p.gold));
+        summary.push(span(
+            format!(
+                " ({} of {} req priced)",
+                amount((requests - unpriced) as u64),
+                amount(requests as u64)
+            ),
+            p.subtle,
+        ));
+    } else {
+        summary.push(bold(dollars(cost), p.foam));
+        summary.push(span(" est.", p.subtle));
+    }
+    [
+        Line::from(summary),
+        Line::from(span(
+            if unpriced > 0 {
+                "API-equivalent estimate, not a bill · — no price data · + partly priced"
+            } else {
+                "API-equivalent estimate, not a subscription bill"
+            },
+            p.subtle,
+        )),
+    ]
+}
+
+/// A model's row in the session table: `cols` of it, its share of the
+/// bar against the largest model's `max` tokens, and `via` (where it ran).
+fn table_row(t: &Total, cols: &[(Col, usize)], p: &Palette, max: u64, via: &str) -> Line<'static> {
+    let mut row = Vec::new();
+    for (i, &(col, w)) in cols.iter().enumerate() {
+        if i > 0 {
+            row.push(Span::raw("  "));
+        }
+        let num = |n: u64| span(right(&amount(n), w), p.subtle);
+        match col {
+            Col::Model => row.push(bold(fit(&t.model, w), p.text)),
+            Col::Via => row.push(span(fit(via, w), p.subtle)),
+            Col::Tokens => row.push(bold(right(&amount(t.tokens.total()), w), p.foam)),
+            Col::Share => {
+                let n = share_cells(t.tokens.total(), max, w);
+                row.push(span("━".repeat(n), p.foam));
+                row.push(span("─".repeat(w - n), p.hl_med));
+            }
+            Col::Requests => row.push(span(right(&t.requests.to_string(), w), p.text)),
+            Col::Input => row.push(num(t.tokens.input)),
+            Col::Output => row.push(num(t.tokens.output)),
+            Col::CacheRead => row.push(num(t.tokens.cache_read)),
+            Col::CacheWrite => row.push(num(t.tokens.cache_write)),
+            Col::Cost => {
+                let c = cost_cell(t, p);
+                row.push(Span::styled(right(&c.content, w), c.style));
+            }
+        }
+    }
+    Line::from(row)
+}
+
+/// The session table's column headings.
+fn table_header(cols: &[(Col, usize)], p: &Palette) -> Line<'static> {
+    let mut header = Vec::new();
+    for (i, &(col, w)) in cols.iter().enumerate() {
+        if i > 0 {
+            header.push(Span::raw("  "));
+        }
+        let h = col.header();
+        header.push(span(
+            if col.left() { fit(h, w) } else { right(h, w) },
+            p.subtle,
+        ));
+    }
+    Line::from(header)
 }
 
 fn union(into: &mut Vec<String>, add: &[String]) {
@@ -634,6 +689,114 @@ fn union(into: &mut Vec<String>, add: &[String]) {
         }
     }
     into.sort();
+}
+
+/// The quota cards, a rule over each profile's, two abreast when they fit.
+fn quota_grid(quotas: &[&Quota], p: &Palette, now: u64, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    // Two cards only when both can hold aligned meters and reset columns.
+    let columns = if width >= 68 { 2 } else { 1 };
+    let card_width = (width.saturating_sub((columns - 1) * 2) / columns).max(5);
+    for (name, group) in by_profile(quotas, |q| &q.profile) {
+        lines.push(profile_rule(&name, "", p, width));
+        lines.push(Line::default());
+        for chunk in group.chunks(columns) {
+            // Every row needs content in every column: the final wrap
+            // pass strips leading padding, which would slide a taller
+            // neighbour's border under a shorter card.
+            let height = chunk
+                .iter()
+                .map(|q| quota_card(q, p, now, card_width, 0).len())
+                .max()
+                .unwrap_or(0);
+            let cards: Vec<_> = chunk
+                .iter()
+                .map(|q| quota_card(q, p, now, card_width, height))
+                .collect();
+            for row in 0..height {
+                let mut spans = Vec::new();
+                for (column, card) in cards.iter().enumerate() {
+                    if column > 0 {
+                        spans.push(Span::raw("  "));
+                    }
+                    if let Some(line) = card.get(row) {
+                        spans.extend(line.spans.iter().cloned());
+                    } else {
+                        spans.push(Span::raw(" ".repeat(card_width)));
+                    }
+                }
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::default());
+        }
+    }
+    lines
+}
+
+/// What the usage covers, and the collectors' warnings about what it
+/// missed.
+fn coverage(warnings: &[String], p: &Palette) -> Vec<Line<'static>> {
+    let secondary = |s: String| Line::from(span(s, p.subtle));
+    let mut lines = Vec::new();
+    lines.push(Line::default());
+    lines.push(Line::from(bold("COVERAGE", p.iris)));
+    lines.push(secondary(
+        "Configured/active profiles only. Missing logs and unknown prices are not zero usage."
+            .into(),
+    ));
+    lines.push(secondary(
+        "Shared account labels deduplicate copied events; distinct accounts need distinct labels."
+            .into(),
+    ));
+    lines.push(Line::default());
+    lines.push(Line::from(bold(
+        format!("! Partial coverage · {} collector warnings", warnings.len()),
+        p.gold,
+    )));
+    lines.extend(
+        warnings
+            .iter()
+            .map(|w| Line::from(span(format!("• {w}"), p.gold))),
+    );
+    lines
+}
+
+/// The subscriptions' heading: how many sources and how many need
+/// attention, then how old the snapshot `fetched` at is.
+fn subscriptions_header(
+    quotas: &[&Quota],
+    p: &Palette,
+    now: u64,
+    fetched: u64,
+) -> [Line<'static>; 2] {
+    let age = now.saturating_sub(fetched);
+    let needs_attention = quotas.iter().filter(|q| attention(q, now)).count();
+    [
+        Line::from(vec![
+            bold("SUBSCRIPTIONS", p.iris),
+            span(format!("  {} sources", quotas.len()), p.subtle),
+            bold(
+                if needs_attention > 0 {
+                    format!(
+                        "  · {needs_attention} {} attention",
+                        if needs_attention == 1 {
+                            "needs"
+                        } else {
+                            "need"
+                        }
+                    )
+                } else {
+                    String::new()
+                },
+                p.gold,
+            ),
+        ]),
+        Line::from(vec![
+            span(format!("Updated {} ago", duration(age)), p.subtle),
+            bold(if age > STALE { " · STALE" } else { "" }, p.gold),
+            span(" · account limits, not summed across hosts", p.subtle),
+        ]),
+    ]
 }
 
 impl Usage {
@@ -648,7 +811,7 @@ impl Usage {
                 self.error = None;
             }
             Err(_) => {
-                self.error = Some("Incompatible usage data; keeping the last snapshot".into())
+                self.error = Some("Incompatible usage data; keeping the last snapshot".into());
             }
         }
     }
@@ -713,69 +876,9 @@ impl Usage {
                 )
             })
             .collect();
-        let age = now.saturating_sub(snap.fetched);
-        let needs_attention = quotas.iter().filter(|q| attention(q, now)).count();
-        lines.push(Line::from(vec![
-            bold("SUBSCRIPTIONS", p.iris),
-            span(format!("  {} sources", quotas.len()), p.subtle),
-            bold(
-                if needs_attention > 0 {
-                    format!(
-                        "  · {needs_attention} {} attention",
-                        if needs_attention == 1 {
-                            "needs"
-                        } else {
-                            "need"
-                        }
-                    )
-                } else {
-                    String::new()
-                },
-                p.gold,
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            span(format!("Updated {} ago", duration(age)), p.subtle),
-            bold(if age > STALE { " · STALE" } else { "" }, p.gold),
-            span(" · account limits, not summed across hosts", p.subtle),
-        ]));
+        lines.extend(subscriptions_header(&quotas, p, now, snap.fetched));
         lines.push(Line::default());
-        // Two cards only when both can hold aligned meters and reset columns.
-        let columns = if width >= 68 { 2 } else { 1 };
-        let card_width = (width.saturating_sub((columns - 1) * 2) / columns).max(5);
-        for (name, group) in by_profile(&quotas, |q| &q.profile) {
-            lines.push(profile_rule(&name, "", p, width));
-            lines.push(Line::default());
-            for chunk in group.chunks(columns) {
-                // Every row needs content in every column: the final wrap
-                // pass strips leading padding, which would slide a taller
-                // neighbour's border under a shorter card.
-                let height = chunk
-                    .iter()
-                    .map(|q| quota_card(q, p, now, card_width, 0).len())
-                    .max()
-                    .unwrap_or(0);
-                let cards: Vec<_> = chunk
-                    .iter()
-                    .map(|q| quota_card(q, p, now, card_width, height))
-                    .collect();
-                for row in 0..height {
-                    let mut spans = Vec::new();
-                    for (column, card) in cards.iter().enumerate() {
-                        if column > 0 {
-                            spans.push(Span::raw("  "));
-                        }
-                        if let Some(line) = card.get(row) {
-                            spans.extend(line.spans.iter().cloned());
-                        } else {
-                            spans.push(Span::raw(" ".repeat(card_width)));
-                        }
-                    }
-                    lines.push(Line::from(spans));
-                }
-                lines.push(Line::default());
-            }
-        }
+        lines.extend(quota_grid(&quotas, p, now, width));
         if quotas.is_empty() {
             lines.push(secondary(if query.is_empty() && profile.is_none() {
                 "No quota data · configure usage.quotas for each account".into()
@@ -802,28 +905,7 @@ impl Usage {
             query.is_empty() && profile.is_none(),
         ));
         if !snap.warnings.is_empty() {
-            lines.push(Line::default());
-            lines.push(Line::from(bold("COVERAGE", p.iris)));
-            lines.push(secondary(
-                "Configured/active profiles only. Missing logs and unknown prices are not zero usage."
-                    .into(),
-            ));
-            lines.push(secondary(
-                "Shared account labels deduplicate copied events; distinct accounts need distinct labels.".into(),
-            ));
-            lines.push(Line::default());
-            lines.push(Line::from(bold(
-                format!(
-                    "! Partial coverage · {} collector warnings",
-                    snap.warnings.len()
-                ),
-                p.gold,
-            )));
-            lines.extend(
-                snap.warnings
-                    .iter()
-                    .map(|w| Line::from(span(format!("• {w}"), p.gold))),
-            );
+            lines.extend(coverage(&snap.warnings, p));
         }
         lines
             .into_iter()
@@ -852,7 +934,7 @@ impl Usage {
             .min(lines.len().saturating_sub(area.height as usize));
         let overflow = lines.len() > area.height as usize;
         let body = Rect {
-            width: width as u16,
+            width: crate::cells(width),
             ..area
         };
         let shown: Vec<_> = lines
@@ -1026,7 +1108,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .map(|c| c.symbol())
+            .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(rendered.contains("at-the-edge"));
         assert!(usage.offset < usize::MAX);

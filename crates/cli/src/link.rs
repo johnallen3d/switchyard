@@ -75,12 +75,12 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn main(args: Vec<String>) -> ExitCode {
+pub fn main(args: &[String]) -> ExitCode {
     if matches!(args.get(1).map(String::as_str), Some("-h" | "--help")) {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
-    match run(&args) {
+    match run(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("switchyard: {e}");

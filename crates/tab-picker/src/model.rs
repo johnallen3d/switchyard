@@ -1,6 +1,6 @@
-//! What the picker shows: Rex tabs grouped by session (from host_rows.lua's
+//! What the picker shows: Rex tabs grouped by session (from `host_rows.lua`'s
 //! rows) and spawned tasks (from `switchyard task list` JSON), linked by
-//! (session_id, window_id) because the two name hosts differently (`local`
+//! (`session_id`, `window_id`) because the two name hosts differently (`local`
 //! against `hostname -s`).
 
 use std::path::PathBuf;
@@ -76,8 +76,8 @@ pub struct Tab {
 }
 
 /// Rows from the config, tab separated:
-///   S  TARGET  HOST  SESSION_ID  SESSION_LABEL
-///   T  WINDOW_ID  STATE  NAME  DIR
+///   S  TARGET  HOST  `SESSION_ID`  `SESSION_LABEL`
+///   T  `WINDOW_ID`  STATE  NAME  DIR
 ///   E  HOST  MESSAGE
 /// A T row belongs to the S row before it. An E row says a host's tabs are
 /// missing or stale (see `failed_hosts`); pickers without them skip it.
@@ -574,8 +574,7 @@ pub fn work_dir(dir: &str) -> bool {
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 pub fn age(secs: u64) -> String {
@@ -661,7 +660,7 @@ mod tests {
             text(&badges(&prs, usize::MAX)),
             "PRs #57 ✓ merged #58 draft"
         );
-        assert!(badges(&[], 10).is_empty());
+        assert_eq!(badges(&[], 10), [] as [(String, Tone); 0]);
     }
 
     #[test]

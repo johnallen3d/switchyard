@@ -109,7 +109,7 @@ impl Preview {
         {
             match spans.last_mut() {
                 Some((last, span)) if last == e => {
-                    *span = span.start.min(r.start)..span.end.max(r.end)
+                    *span = span.start.min(r.start)..span.end.max(r.end);
                 }
                 _ => spans.push((*e, r.clone())),
             }
@@ -186,8 +186,8 @@ pub fn model_label(model: &str) -> &str {
 pub fn tokens_label(n: u64) -> String {
     match n {
         0..1_000 => format!("{n} tokens"),
-        1_000..1_000_000 => format!("{:.1}k tokens", n as f64 / 1e3),
-        _ => format!("{:.1}M tokens", n as f64 / 1e6),
+        1_000..1_000_000 => format!("{:.1}k tokens", crate::approx(n) / 1e3),
+        _ => format!("{:.1}M tokens", crate::approx(n) / 1e6),
     }
 }
 
@@ -218,7 +218,8 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
             "tool" => ("· ", Style::new().fg(p.muted), Style::new().fg(p.subtle)),
             _ => ("● ", Style::new().fg(p.pine), Style::new().fg(p.text)),
         };
-        if !out.lines.is_empty() && !(kind == "tool" && last == "tool") {
+        let between_tools = kind == "tool" && last == "tool";
+        if !out.lines.is_empty() && !between_tools {
             out.push(Line::default(), None);
         }
         last = kind;
@@ -263,8 +264,7 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
 /// line goes between blocks, except between the items of a tight list.
 /// Rules are drawn across the width.
 fn markdown(text: &str, width: usize, p: &Palette) -> Vec<(Line<'static>, Option<Range<usize>>)> {
-    let options =
-        tui_markdown::Options::new(Sheet(*p)).table_width(width.min(u16::MAX as usize) as u16);
+    let options = tui_markdown::Options::new(Sheet(*p)).table_width(crate::cells(width));
     let mut out = Vec::new();
     let mut prev: Option<Range<usize>> = None;
     for (range, rule) in blocks(text) {
@@ -378,13 +378,13 @@ impl tui_markdown::StyleSheet for Sheet {
             s
         }
     }
-    fn heading_marker(&self, _level: u8) -> &str {
+    fn heading_marker(&self, _level: u8) -> &'static str {
         ""
     }
     fn code(&self) -> Style {
         Style::new().fg(self.0.foam)
     }
-    fn code_block_fence(&self) -> &str {
+    fn code_block_fence(&self) -> &'static str {
         ""
     }
     fn link(&self) -> Style {
@@ -419,7 +419,7 @@ impl tui_markdown::StyleSheet for Sheet {
         Style::new().fg(self.0.subtle)
     }
     fn alert(&self, kind: tui_markdown::AlertKind) -> Style {
-        use tui_markdown::AlertKind::*;
+        use tui_markdown::AlertKind::{Caution, Important, Note, Tip, Warning};
         Style::new().fg(match kind {
             Note => self.0.foam,
             Tip => self.0.pine,
@@ -574,23 +574,23 @@ pub fn clip_width(s: &str, room: usize) -> String {
     out
 }
 
-/// Fetch the transcript the standalone picker wants (sent on `wants` as
+/// Fetch the transcript the standalone picker wants (sent on `asks` as
 /// it changes), once the highlight settles and every REFRESH after,
 /// sending each as a paste on `tx`; returns once the picker has gone.
-pub fn follow(wants: Receiver<Option<Pane>>, tx: Sender<String>) {
+pub fn follow(asks: &Receiver<Option<Pane>>, tx: &Sender<String>) {
     let mut want: Option<Pane> = None;
     let mut last: Option<Instant> = None;
     loop {
-        let wait = match (&want, last) {
+        let timeout = match (&want, last) {
             (Some(_), Some(at)) => REFRESH.saturating_sub(at.elapsed()),
             _ => Duration::from_secs(3600),
         };
-        match wants.recv_timeout(wait) {
+        match asks.recv_timeout(timeout) {
             Ok(w) => {
                 want = w;
                 // Let the highlight settle.
                 loop {
-                    match wants.recv_timeout(SETTLE) {
+                    match asks.recv_timeout(SETTLE) {
                         Ok(w) => want = w,
                         Err(RecvTimeoutError::Timeout) => break,
                         Err(RecvTimeoutError::Disconnected) => return,

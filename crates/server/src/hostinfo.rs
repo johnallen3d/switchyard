@@ -6,9 +6,9 @@
 //! never waits on one. Busy agents and the project's session come from the
 //! watchers' rows instead (see `state::State::probes_reply`).
 //!
-//! Load is measured every PROBE_EVERY, which also keeps the SSH connection
-//! to those hosts open; folders every FOLDERS_EVERY, or sooner once a
-//! client is served a listing older than FOLDERS_STALE. A host whose last
+//! Load is measured every `PROBE_EVERY`, which also keeps the SSH connection
+//! to those hosts open; folders every `FOLDERS_EVERY`, or sooner once a
+//! client is served a listing older than `FOLDERS_STALE`. A host whose last
 //! call is still running is skipped, so an unreachable or hung host holds
 //! up nothing else. The host lists come from the config, read again each
 //! round, so an activation that changes them needs no restart.
@@ -60,7 +60,7 @@ pub fn tracked(config: &Config, local: &str) -> (Vec<String>, Vec<String>) {
 
 /// Keep the listings current until the server stops. A wake on `wake`
 /// (a client found folders stale) runs the due work at once.
-pub fn run(shared: Arc<Shared>, wake: Receiver<()>) {
+pub fn run(shared: &Arc<Shared>, wake: &Receiver<()>) {
     let local = local_label();
     loop {
         match config::read() {
@@ -70,7 +70,7 @@ pub fn run(shared: Arc<Shared>, wake: Receiver<()>) {
             }
             Err(e) => crate::log(&format!("hosts: {e}")),
         }
-        start_due(&shared, &local);
+        start_due(shared, &local);
         match wake.recv_timeout(TICK) {
             Ok(()) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
@@ -144,7 +144,7 @@ mod tests {
     fn tracks_the_picker_hosts_and_the_pools_auto_chooses_from() {
         let project = |profile: &str, hosts: &[&str]| ProjectEntry {
             profile: profile.into(),
-            hosts: hosts.iter().map(|h| h.to_string()).collect(),
+            hosts: hosts.iter().map(std::string::ToString::to_string).collect(),
             ..ProjectEntry::default()
         };
         let mut config = Config {

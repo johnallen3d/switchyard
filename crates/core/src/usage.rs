@@ -68,6 +68,7 @@ pub struct Tokens {
 }
 
 impl Tokens {
+    #[must_use]
     pub fn total(&self) -> u64 {
         self.input
             .saturating_add(self.output)
@@ -187,8 +188,7 @@ fn expand(path: &str) -> PathBuf {
 fn active(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .filter(|p| !p.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| expand(fallback))
+        .map_or_else(|| expand(fallback), PathBuf::from)
 }
 
 fn defaults() -> Vec<SessionSource> {
@@ -227,10 +227,20 @@ fn default_quota() -> QuotaSource {
     }
 }
 
+/// A log file as last parsed: its length and modification time when read,
+/// what it held, and how many of its lines were malformed.
+struct ParsedLog {
+    len: u64,
+    modified: SystemTime,
+    samples: Vec<Sample>,
+    quotas: Vec<Quota>,
+    bad: usize,
+}
+
 /// Cache parsed files between refreshes. No cache or source file is written.
 #[derive(Default)]
 pub struct Collector {
-    files: HashMap<PathBuf, (u64, SystemTime, Vec<Sample>, Vec<Quota>, usize)>,
+    files: HashMap<PathBuf, ParsedLog>,
 }
 
 impl Collector {
@@ -245,105 +255,12 @@ impl Collector {
                 "{host}: account mapping not configured; defaults cover active profiles only"
             ));
         }
-        for mut source in settings
-            .quotas
-            .clone()
-            .unwrap_or_else(|| vec![default_quota()])
-        {
-            if settings.quotas.is_none() {
-                source.account = format!("unmapped account on {host}");
-            }
-            match fs::read_to_string(expand(&source.path)) {
-                Ok(text) => match parse_quota(&text, &source, host) {
-                    Ok(quotas) => snap.quotas.extend(quotas),
-                    Err(e) => snap
-                        .warnings
-                        .push(format!("{host}: quota {}: {e}", source.account)),
-                },
-                Err(e) => snap
-                    .warnings
-                    .push(format!("{host}: quota {}: {e}", source.account)),
-            }
-        }
+        add_quota_files(settings, host, &mut snap);
         for mut source in settings.sessions.clone().unwrap_or_else(defaults) {
             if settings.sessions.is_none() {
                 source.account = format!("{} on {host}", source.account);
             }
-            if !matches!(source.harness.as_str(), "claude" | "pi" | "codex") {
-                snap.warnings
-                    .push(format!("{host}: unsupported harness {}", source.harness));
-                continue;
-            }
-            let mut paths = Vec::new();
-            // A profile that has never run on this host has no log directory yet.
-            match files(&expand(&source.path), &mut paths) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    snap.warnings.push(format!(
-                        "{host}: {} {} logs: {e}",
-                        source.account, source.harness
-                    ));
-                }
-                _ => {}
-            }
-            let mut malformed = 0;
-            for path in paths {
-                let Ok(meta) = fs::metadata(&path) else {
-                    continue;
-                };
-                let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                if modified
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-                    < now.saturating_sub(PERIOD)
-                {
-                    continue;
-                }
-                seen.push(path.clone());
-                let fresh = self
-                    .files
-                    .get(&path)
-                    .is_some_and(|(len, at, _, _, _)| *len == meta.len() && *at == modified);
-                if !fresh {
-                    match parse_log(&path, &source, host) {
-                        Ok((samples, quotas, bad)) => {
-                            self.files
-                                .insert(path.clone(), (meta.len(), modified, samples, quotas, bad));
-                        }
-                        Err(e) => {
-                            snap.warnings
-                                .push(format!("{host}: {} log: {e}", source.harness));
-                            continue;
-                        }
-                    }
-                }
-                if let Some((_, _, samples, quotas, bad)) = self.files.get(&path) {
-                    malformed += bad;
-                    snap.quotas.extend(quotas.iter().cloned().map(|mut q| {
-                        q.account = source.account.clone();
-                        q.profile = source.profile.clone();
-                        q
-                    }));
-                    // Remap cached samples if the declarative account labels changed.
-                    snap.samples.extend(
-                        samples
-                            .iter()
-                            .filter(|s| s.at >= now.saturating_sub(PERIOD) && s.at <= now)
-                            .cloned()
-                            .map(|mut s| {
-                                s.account = source.account.clone();
-                                s.profile = source.profile.clone();
-                                s
-                            }),
-                    );
-                }
-            }
-            if malformed > 0 {
-                snap.warnings.push(format!(
-                    "{host}: {}: {malformed} malformed/incomplete log lines skipped",
-                    source.account
-                ));
-            }
+            self.add_session_logs(&source, host, now, &mut snap, &mut seen);
         }
         self.files.retain(|p, _| seen.contains(p));
         for sample in &mut snap.samples {
@@ -358,6 +275,102 @@ impl Collector {
         }
         snap.dedup();
         snap
+    }
+
+    /// Add the samples and quotas of `source`'s recent logs to `snap`,
+    /// parsing only files that changed since the last refresh, and note each
+    /// log path in `seen` so the cache keeps it.
+    fn add_session_logs(
+        &mut self,
+        source: &SessionSource,
+        host: &str,
+        now: u64,
+        snap: &mut Snapshot,
+        seen: &mut Vec<PathBuf>,
+    ) {
+        if !matches!(source.harness.as_str(), "claude" | "pi" | "codex") {
+            snap.warnings
+                .push(format!("{host}: unsupported harness {}", source.harness));
+            return;
+        }
+        let mut paths = Vec::new();
+        // A profile that has never run on this host has no log directory yet.
+        match files(&expand(&source.path), &mut paths) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                snap.warnings.push(format!(
+                    "{host}: {} {} logs: {e}",
+                    source.account, source.harness
+                ));
+            }
+            _ => {}
+        }
+        let mut malformed = 0;
+        for path in paths {
+            let Ok(meta) = fs::metadata(&path) else {
+                continue;
+            };
+            let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            if modified
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                < now.saturating_sub(PERIOD)
+            {
+                continue;
+            }
+            seen.push(path.clone());
+            let fresh = self
+                .files
+                .get(&path)
+                .is_some_and(|log| log.len == meta.len() && log.modified == modified);
+            if !fresh {
+                match parse_log(&path, source, host) {
+                    Ok((samples, quotas, bad)) => {
+                        self.files.insert(
+                            path.clone(),
+                            ParsedLog {
+                                len: meta.len(),
+                                modified,
+                                samples,
+                                quotas,
+                                bad,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        snap.warnings
+                            .push(format!("{host}: {} log: {e}", source.harness));
+                        continue;
+                    }
+                }
+            }
+            if let Some(log) = self.files.get(&path) {
+                malformed += log.bad;
+                snap.quotas.extend(log.quotas.iter().cloned().map(|mut q| {
+                    q.account.clone_from(&source.account);
+                    q.profile.clone_from(&source.profile);
+                    q
+                }));
+                // Remap cached samples if the declarative account labels changed.
+                snap.samples.extend(
+                    log.samples
+                        .iter()
+                        .filter(|s| s.at >= now.saturating_sub(PERIOD) && s.at <= now)
+                        .cloned()
+                        .map(|mut s| {
+                            s.account.clone_from(&source.account);
+                            s.profile.clone_from(&source.profile);
+                            s
+                        }),
+                );
+            }
+        }
+        if malformed > 0 {
+            snap.warnings.push(format!(
+                "{host}: {}: {malformed} malformed/incomplete log lines skipped",
+                source.account
+            ));
+        }
     }
 
     /// Hosts are runtime settings, never a compiled-in pool. Missing binaries,
@@ -419,6 +432,31 @@ impl Collector {
     }
 }
 
+/// Add the quotas of each llm-usage file `settings` names to `snap`, or a
+/// warning for each that can't be read.
+fn add_quota_files(settings: &Settings, host: &str, snap: &mut Snapshot) {
+    for mut source in settings
+        .quotas
+        .clone()
+        .unwrap_or_else(|| vec![default_quota()])
+    {
+        if settings.quotas.is_none() {
+            source.account = format!("unmapped account on {host}");
+        }
+        match fs::read_to_string(expand(&source.path)) {
+            Ok(text) => match parse_quota(&text, &source, host) {
+                Ok(quotas) => snap.quotas.extend(quotas),
+                Err(e) => snap
+                    .warnings
+                    .push(format!("{host}: quota {}: {e}", source.account)),
+            },
+            Err(e) => snap
+                .warnings
+                .push(format!("{host}: quota {}: {e}", source.account)),
+        }
+    }
+}
+
 fn files(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     // Do not follow symlinks: profile boundaries must stay explicit.
     for entry in fs::read_dir(root)? {
@@ -433,6 +471,12 @@ fn files(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The quotas in llm-usage's JSON `text` from `source` on `host`.
+///
+/// # Errors
+///
+/// Fails when `text` isn't JSON, isn't schema version 2, or has no
+/// providers.
 pub fn parse_quota(text: &str, source: &QuotaSource, host: &str) -> Result<Vec<Quota>, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     if v["schema_version"] != 2 {
@@ -471,11 +515,10 @@ pub fn parse_quota(text: &str, source: &QuotaSource, host: &str) -> Result<Vec<Q
                     },
                 })
                 .collect(),
-            credits: p.get("credits").filter(|c| !c.is_null()).map(|c| {
-                c.as_str()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| c.to_string())
-            }),
+            credits: p
+                .get("credits")
+                .filter(|c| !c.is_null())
+                .map(|c| c.as_str().map_or_else(|| c.to_string(), str::to_string)),
             hosts: vec![host.into()],
         })
         .collect())
@@ -531,98 +574,14 @@ impl<'a> LogParser<'a> {
 
     fn push(&mut self, v: &Value) {
         let harness = self.source.harness.as_str();
-        if harness == "pi" && v["type"] == "session" {
-            if let Some(id) = v["id"].as_str() {
-                self.session = id.into()
-            }
+        if harness == "pi"
+            && v["type"] == "session"
+            && let Some(id) = v["id"].as_str()
+        {
+            self.session = id.into();
         }
         if harness == "codex" {
-            let p = &v["payload"];
-            if v["type"] == "session_meta" {
-                if let Some(id) = p["id"].as_str() {
-                    self.session = id.into()
-                }
-            }
-            if v["type"] == "turn_context" {
-                self.model = p["model"].as_str().unwrap_or("unknown").into();
-            }
-            if v["type"] != "event_msg" || p["type"] != "token_count" {
-                return;
-            }
-            let limits = &p["rate_limits"];
-            if limits.is_object() {
-                let windows = [("primary", "primary"), ("secondary", "secondary")]
-                    .into_iter()
-                    .filter_map(|(key, label)| {
-                        let w = &limits[key];
-                        w.is_object().then(|| Window {
-                            label: w["window_minutes"]
-                                .as_u64()
-                                .map(|m| format!("{}m", m))
-                                .unwrap_or_else(|| label.into()),
-                            used: finite(&w["used_percent"]),
-                            reset: w["resets_at"].as_u64(),
-                            status: "ok".into(),
-                        })
-                    })
-                    .collect();
-                let credits = &limits["credits"];
-                let balance = credits["balance"]
-                    .as_str()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .filter(|n| n.is_finite() && *n >= 0.0)
-                    .or_else(|| finite(&credits["balance"]));
-                self.quota = Some(Quota {
-                    account: self.source.account.clone(),
-                    profile: self.source.profile.clone(),
-                    provider: limits["limit_id"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("codex")
-                        .into(),
-                    plan: string(limits, "plan_type"),
-                    status: "ok".into(),
-                    fetched: timestamp(&v["timestamp"]),
-                    windows,
-                    credits: if credits["unlimited"] == true {
-                        Some("unlimited".into())
-                    } else {
-                        balance.map(|n| format!("{n:.4}"))
-                    },
-                    hosts: vec![self.host.into()],
-                });
-            }
-            let u = &p["info"]["total_token_usage"];
-            if !u.is_object() {
-                return;
-            }
-            let cumulative = Tokens {
-                input: number(u, "input_tokens").saturating_sub(number(u, "cached_input_tokens")),
-                output: number(u, "output_tokens"),
-                cache_read: number(u, "cached_input_tokens"),
-                cache_write: number(u, "cache_write_input_tokens"),
-            };
-            let tokens = cumulative.delta(&self.previous);
-            let id = format!(
-                "{}:{}:{}/{}/{}/{}",
-                self.session,
-                v["timestamp"],
-                cumulative.input,
-                cumulative.output,
-                cumulative.cache_read,
-                cumulative.cache_write
-            );
-            self.previous = cumulative;
-            if tokens.total() > 0 {
-                self.sample(
-                    id,
-                    self.model.clone(),
-                    "openai".into(),
-                    timestamp(&v["timestamp"]),
-                    tokens,
-                    None,
-                );
-            }
+            self.push_codex(v);
             return;
         }
         let m = &v["message"];
@@ -671,6 +630,101 @@ impl<'a> LogParser<'a> {
         );
     }
 
+    /// A Codex log line: its session, model, rate limits and token counts.
+    fn push_codex(&mut self, v: &Value) {
+        let p = &v["payload"];
+        if v["type"] == "session_meta"
+            && let Some(id) = p["id"].as_str()
+        {
+            self.session = id.into();
+        }
+        if v["type"] == "turn_context" {
+            self.model = p["model"].as_str().unwrap_or("unknown").into();
+        }
+        if v["type"] != "event_msg" || p["type"] != "token_count" {
+            return;
+        }
+        let limits = &p["rate_limits"];
+        if limits.is_object() {
+            self.quota = Some(self.codex_quota(limits, &v["timestamp"]));
+        }
+        let u = &p["info"]["total_token_usage"];
+        if !u.is_object() {
+            return;
+        }
+        let cumulative = Tokens {
+            input: number(u, "input_tokens").saturating_sub(number(u, "cached_input_tokens")),
+            output: number(u, "output_tokens"),
+            cache_read: number(u, "cached_input_tokens"),
+            cache_write: number(u, "cache_write_input_tokens"),
+        };
+        let tokens = cumulative.delta(&self.previous);
+        let id = format!(
+            "{}:{}:{}/{}/{}/{}",
+            self.session,
+            v["timestamp"],
+            cumulative.input,
+            cumulative.output,
+            cumulative.cache_read,
+            cumulative.cache_write
+        );
+        self.previous = cumulative;
+        if tokens.total() > 0 {
+            self.sample(
+                id,
+                self.model.clone(),
+                "openai".into(),
+                timestamp(&v["timestamp"]),
+                tokens,
+                None,
+            );
+        }
+    }
+
+    /// The quota a Codex `token_count` event's `rate_limits` give, as of
+    /// `at`.
+    fn codex_quota(&self, limits: &Value, at: &Value) -> Quota {
+        let windows = [("primary", "primary"), ("secondary", "secondary")]
+            .into_iter()
+            .filter_map(|(key, label)| {
+                let w = &limits[key];
+                w.is_object().then(|| Window {
+                    label: w["window_minutes"]
+                        .as_u64()
+                        .map_or_else(|| label.into(), |m| format!("{m}m")),
+                    used: finite(&w["used_percent"]),
+                    reset: w["resets_at"].as_u64(),
+                    status: "ok".into(),
+                })
+            })
+            .collect();
+        let credits = &limits["credits"];
+        let balance = credits["balance"]
+            .as_str()
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .or_else(|| finite(&credits["balance"]));
+        Quota {
+            account: self.source.account.clone(),
+            profile: self.source.profile.clone(),
+            provider: limits["limit_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("codex")
+                .into(),
+            plan: string(limits, "plan_type"),
+            status: "ok".into(),
+            fetched: timestamp(at),
+            windows,
+            credits: if credits["unlimited"] == true {
+                Some("unlimited".into())
+            } else {
+                balance.map(|n| format!("{n:.4}"))
+            },
+            hosts: vec![self.host.into()],
+        }
+    }
+
     fn sample(
         &mut self,
         id: String,
@@ -705,12 +759,20 @@ fn estimate(tokens: &Tokens, model: &str, provider: &str, rates: &[Rate]) -> Opt
         return None;
     }
     Some(
-        (tokens.input as f64 * prices[0]
-            + tokens.output as f64 * prices[1]
-            + tokens.cache_read as f64 * prices[2]
-            + tokens.cache_write as f64 * prices[3])
+        (approx(tokens.input) * prices[0]
+            + approx(tokens.output) * prices[1]
+            + approx(tokens.cache_read) * prices[2]
+            + approx(tokens.cache_write) * prices[3])
             / 1_000_000.0,
     )
+}
+
+/// A token count as f64 for a cost estimate.
+// Counts past 2^53 would round, but no log holds that many tokens, and an
+// estimate in dollars has no use for that precision anyway.
+#[allow(clippy::cast_precision_loss)]
+fn approx(tokens: u64) -> f64 {
+    tokens as f64
 }
 
 fn union(a: &mut Vec<String>, b: &[String]) {
@@ -734,7 +796,7 @@ impl Snapshot {
                         && old.cost.is_none()
                         && s.cost.is_some())
                 {
-                    *old = s
+                    *old = s;
                 }
                 old.hosts = hosts;
             } else {
@@ -749,7 +811,7 @@ impl Snapshot {
                 let mut hosts = old.hosts.clone();
                 union(&mut hosts, &q.hosts);
                 if q.fetched > old.fetched {
-                    *old = q
+                    *old = q;
                 }
                 old.hosts = hosts;
             } else {
@@ -761,6 +823,7 @@ impl Snapshot {
         self.warnings.dedup();
     }
 
+    #[must_use]
     pub fn totals(&self) -> Vec<Total> {
         let mut totals: BTreeMap<(String, String, String, String, String), Total> = BTreeMap::new();
         for s in &self.samples {
@@ -784,15 +847,16 @@ impl Snapshot {
             t.requests += 1;
             union(&mut t.hosts, &s.hosts);
             if let Some(cost) = s.cost {
-                t.cost += cost
+                t.cost += cost;
             } else {
-                t.unpriced += 1
+                t.unpriced += 1;
             }
         }
         totals.into_values().collect()
     }
 
     /// Aggregate after deduplication; samples from every host must be present.
+    #[must_use]
     pub fn summary(mut self) -> Summary {
         self.dedup();
         Summary {
@@ -854,7 +918,7 @@ fn remote(host: &str) -> Result<Snapshot, String> {
                     .map_err(|_| "incompatible usage collector response".into());
             }
             Ok(None) if started.elapsed() < Duration::from_secs(30) => {
-                thread::sleep(Duration::from_millis(50))
+                thread::sleep(Duration::from_millis(50));
             }
             _ => {
                 let _ = child.kill();
@@ -881,8 +945,8 @@ mod tests {
 
     #[test]
     fn timestamps_accept_cli_and_pi_formats() {
-        assert_eq!(timestamp(&json!("2026-11-10T19:14:46.503Z")), 1794338086);
-        assert_eq!(timestamp(&json!(1794338086503_u64)), 1794338086);
+        assert_eq!(timestamp(&json!("2026-11-10T19:14:46.503Z")), 1_794_338_086);
+        assert_eq!(timestamp(&json!(1_794_338_086_503_u64)), 1_794_338_086);
         assert_eq!(timestamp(&json!("not a date")), 0);
     }
 
@@ -975,7 +1039,7 @@ mod tests {
             parser.push(&json!({"type":"event_msg", "timestamp":"2026-11-10T19:00:00Z", "payload":{
                 "type":"token_count", "info":{"total_token_usage":{"input_tokens":input,"cached_input_tokens":cached,
                 "output_tokens":output,"reasoning_output_tokens":5}}, "rate_limits":{"limit_id":"codex", "plan_type":"team",
-                "primary":{"used_percent":50,"window_minutes":300,"resets_at":1794350000},
+                "primary":{"used_percent":50,"window_minutes":300,"resets_at":1_794_350_000},
                 "credits":{"unlimited":false,"balance":"1324.062595"}}}}));
         }
         assert_eq!(parser.samples.len(), 2);
@@ -1040,10 +1104,18 @@ mod tests {
             ..Rate::default()
         };
         assert_eq!(
-            estimate(&tokens, "model", "provider", &[rate.clone()]),
+            estimate(&tokens, "model", "provider", std::slice::from_ref(&rate)),
             Some(2.3)
         );
-        assert!(estimate(&tokens, "new-model", "provider", &[rate.clone()]).is_none());
+        assert!(
+            estimate(
+                &tokens,
+                "new-model",
+                "provider",
+                std::slice::from_ref(&rate)
+            )
+            .is_none()
+        );
         assert!(
             estimate(
                 &tokens,
@@ -1074,7 +1146,7 @@ mod tests {
     #[test]
     fn settings_accept_explicit_empty_sources_and_do_not_select_other_profiles() {
         let c: config::Config = toml::from_str("[usage]\nsessions=[]\nquotas=[]").unwrap();
-        let snap = Collector::default().local(&c.usage, "test-host", 1794338086);
+        let snap = Collector::default().local(&c.usage, "test-host", 1_794_338_086);
         assert!(snap.samples.is_empty() && snap.quotas.is_empty() && snap.warnings.is_empty());
     }
 
@@ -1091,7 +1163,7 @@ mod tests {
             quotas: Some(vec![]),
             rates: vec![],
         };
-        let snap = Collector::default().local(&settings, "test-host", 1794338086);
+        let snap = Collector::default().local(&settings, "test-host", 1_794_338_086);
         assert!(snap.samples.is_empty() && snap.warnings.is_empty());
     }
 }

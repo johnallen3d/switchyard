@@ -74,12 +74,16 @@ pub struct ProjectEntry {
 pub fn path() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
+        .map_or_else(|| home().join(".config"), PathBuf::from)
         .join("switchyard/config.toml")
 }
 
 /// The config, or why it couldn't be read.
+///
+/// # Errors
+///
+/// Fails, as `read` does, when the config file is missing or invalid; the
+/// first outcome is kept for the process's lifetime.
 pub fn load() -> Result<&'static Config, String> {
     static CONFIG: OnceLock<Result<Config, String>> = OnceLock::new();
     CONFIG.get_or_init(read).as_ref().map_err(Clone::clone)
@@ -87,6 +91,11 @@ pub fn load() -> Result<&'static Config, String> {
 
 /// The config as the file says now, for a long-running process (the
 /// server) that should notice an activation; `load` reads it once.
+///
+/// # Errors
+///
+/// Fails when the config file can't be read or isn't valid TOML for
+/// `Config`.
 pub fn read() -> Result<Config, String> {
     let path = path();
     let text = std::fs::read_to_string(&path).map_err(|e| {

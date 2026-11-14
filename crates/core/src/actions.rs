@@ -1,7 +1,7 @@
 //! Actions on a spawned task: `switchyard task act ACTION HOST SESSION WINDOW`.
 //!
 //! Runs on the config host, which holds the task registry and reaches every
-//! Rex host; the config's tab_picker mode calls it.
+//! Rex host; the config's `tab_picker` mode calls it.
 //!
 //! - archive: refuse a worktree with uncommitted changes; otherwise record
 //!   the newest agent session, close the tab, remove the worktree with
@@ -139,7 +139,9 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, S
 /// A session spawn created for the project goes when its last tab does.
 fn kill_if_empty(host: &str, session: &str) {
     if let Ok(list) = rex_json(host, &["window", "ls", "-s", session, "--json"])
-        && list["windows"].as_array().is_some_and(|w| w.is_empty())
+        && list["windows"]
+            .as_array()
+            .is_some_and(std::vec::Vec::is_empty)
     {
         let _ = rex(host, &["kill", session]);
     }
@@ -169,8 +171,7 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         .find(|p| {
             crate::folders::home_relative(&p.path) == crate::folders::home_relative(&field("repo"))
         })
-        .map(|p| p.path)
-        .unwrap_or_else(|| field("repo"));
+        .map_or_else(|| field("repo"), |p| p.path);
     let harness = match field("harness").as_str() {
         "" => "claude".to_string(),
         h => h.to_string(),
@@ -202,7 +203,7 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
 }
 
 /// The archive's check of a worktree: exit 3 when it is gone, else its
-/// `git status --porcelain` lines and a last `@STATE` line from MERGED_SH.
+/// `git status --porcelain` lines and a last `@STATE` line from `MERGED_SH`.
 fn archive_check(worktree: &str, branch: &str) -> String {
     format!(
         "cd {} 2>/dev/null || exit 3\n\
@@ -231,6 +232,10 @@ fn pin(window: &str) -> Result<String, String> {
 
 /// Snooze the open task in `window` until `until` (Unix seconds), or wake
 /// it for 0.
+///
+/// # Errors
+///
+/// Fails when `window` has no open task or the registry can't be updated.
 pub fn snooze(window: &str, until: u64) -> Result<String, String> {
     let label = update_tasks(|tasks| {
         let task = open_task(tasks, window)?;
@@ -256,6 +261,12 @@ const PASTE_SETTLE: Duration = Duration::from_millis(150);
 /// since the keys would answer the prompt instead.
 ///
 /// Files pasted into the text (see `images`) are taken from this machine.
+///
+/// # Errors
+///
+/// Fails when the text is empty, the tab or its agent pane can't be found,
+/// the agent is waiting on a prompt, a pasted file can't be carried over,
+/// or Rex refuses the paste or the Enter.
 pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
     message_from(&local_label(), host, session, window, text)
 }
@@ -306,6 +317,11 @@ fn message_from(
 
 /// `message` with the text of a prompt file (`LABEL:ID`, see `prompts`),
 /// which is removed once sent.
+///
+/// # Errors
+///
+/// Fails when the prompt reference is malformed or its file can't be
+/// fetched, or as `message` does.
 pub fn message_ref(
     host: &str,
     session: &str,
@@ -349,6 +365,13 @@ fn set_or_remove(task: &mut serde_json::Value, key: &str, value: Option<serde_js
     }
 }
 
+/// Run tab-picker `action` (`pin`, `archive`, `link`, ...) on the task in
+/// `window`, then have switchyard-server refresh unless it only opened a
+/// work item.
+///
+/// # Errors
+///
+/// Fails with the action's message when it is unknown or doesn't succeed.
 pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
     let result = match action {
         "pin" => pin(window),
@@ -368,45 +391,17 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
         return resume(host, window);
     }
     let mut tasks = load_tasks()?;
-    let here = |t: &serde_json::Value| in_window(t, window);
     let archiving = matches!(action, "archive" | "force-archive");
-    // An open task. For an archive of a tab that is still open, the latest
-    // ended task reopened (it ended by mistake), or else one adopted for
-    // the agent in it, so any agent tab can be archived. Otherwise the
-    // latest ended task (closing its tab left the worktree).
-    let i = match tasks
-        .iter()
-        .position(|t| t["ended_at"].is_null() && here(t))
-    {
-        Some(i) => i,
-        None if archiving && agent_block(host, session, window).is_ok() => {
-            match tasks.iter().rposition(here) {
-                Some(i) => {
-                    let task = tasks[i].as_object_mut().ok_or("bad task record")?;
-                    task.insert("ended_at".into(), serde_json::Value::Null);
-                    task.insert("ended_reason".into(), serde_json::Value::Null);
-                    i
-                }
-                None => {
-                    tasks.push(adopt(host, session, window)?);
-                    tasks.len() - 1
-                }
-            }
-            // Saved now, so a refusal (uncommitted changes) still leaves
-            // the picker a task to show them on.
-        }
-        None => tasks.iter().rposition(here).ok_or("no task for that tab")?,
-    };
+    let i = action_task(&mut tasks, archiving, host, session, window)?;
     if archiving && tasks[i]["ended_at"].is_null() {
         save_record(&tasks[i])?;
     }
     let ended = !tasks[i]["ended_at"].is_null();
     let field = |k: &str| tasks[i][k].as_str().unwrap_or("").to_string();
-    let (label, worktree, repo, branch) = (
+    let (label, worktree, repo) = (
         format!("{}/{}", field("project"), field("name")),
         field("worktree"),
         field("repo"),
-        field("branch"),
     );
 
     match action {
@@ -432,121 +427,193 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 "archived {label}; kept the primary checkout {worktree}"
             ))
         }
-        "archive" | "force-archive" => {
-            let force = action == "force-archive";
-            // Exit 3: the worktree is already gone. Any status line:
-            // uncommitted changes. The last line, `@STATE`, says whether the
-            // branch is merged (see MERGED_SH).
-            let out = host_bash(host, &archive_check(&worktree, &branch))
-                .ok_or_else(|| format!("{host} can't be reached"))?;
-            let exists = out.status.code() != Some(3);
-            if exists && !force && !out.status.success() {
-                return Err(format!(
-                    "{label}: can't read the worktree's status on {host}"
-                ));
-            }
-            let text = String::from_utf8_lossy(&out.stdout).into_owned();
-            let status: Vec<&str> = text
-                .lines()
-                .filter(|l| !l.is_empty() && !l.starts_with('@'))
-                .collect();
-            let branch_merged = text.lines().any(|l| l == "@merged");
-            // Safe to archive: the work is merged (its PR, or the branch
-            // itself) or all its cards closed, and nothing is left uncommitted.
-            let merged = exists
-                && out.status.success()
-                && status.is_empty()
-                && (branch_merged
-                    || crate::links::pr_merged(&tasks[i])
-                    || crate::cards::cards_closed(&tasks[i]));
-            if exists && !force && !status.is_empty() {
-                let files: Vec<&str> = status.iter().map(|l| l.get(3..).unwrap_or(l)).collect();
-                let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
-                let more = if files.len() > 3 {
-                    format!(" and {} more", files.len() - 3)
-                } else {
-                    String::new()
-                };
-                return Err(format!(
-                    "Archive refused: {label} has uncommitted changes in {shown}{more}. \
-                     Press ⌃X, Enter, Enter in the tab picker (⌘K) to throw them away."
-                ));
-            }
-            if ended && !exists {
-                tasks[i]["ended_reason"] = "worktree removed".into();
-                save_record(&tasks[i])?;
-                return Err(format!("{label}: its worktree is already gone"));
-            }
-            // The newest session, not spawn's choice: a /clear starts
-            // another. An ended task recorded it when it ended.
-            if !ended && let Some(id) = newest_session(&tasks[i]) {
-                tasks[i]["agent_session"] = id.into();
-            }
-            // Close the tab first so the agent isn't left in a deleted
-            // directory; a tab that is already gone is fine.
-            if !ended {
-                let _ = rex(host, &["window", "close", "-s", session, window]);
-            }
-            let mut note = String::new();
-            let mut failed = false;
-            if exists {
-                let remove = format!(
-                    // Worktrunk deletes the files in the background (its log
-                    // is under .git/wt/logs), so a big worktree doesn't hold
-                    // up the picker; it still refuses an unsafe removal here.
-                    "wt -C {} remove {}{} 2>&1",
-                    sh_quote(&repo),
-                    if force { "--force " } else { "" },
-                    sh_quote(&branch)
-                );
-                let out =
-                    host_bash(host, &remove).ok_or_else(|| format!("{host} can't be reached"))?;
-                let text = String::from_utf8_lossy(&out.stdout);
-                let last = text
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                if !out.status.success() {
-                    failed = true;
-                    note = format!("; wt remove failed: {last}");
-                } else {
-                    // Worktrunk's own lines, not the indented files it lists.
-                    let summary: Vec<&str> = text
-                        .lines()
-                        .filter(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))
-                        .map(|l| l.trim().trim_end_matches(':'))
-                        .collect();
-                    if !summary.is_empty() {
-                        note = format!("; {}", summary.join(" · "));
-                    }
-                }
-            }
-            kill_if_empty(host, session);
-            if !ended {
-                tasks[i]["ended_at"] = now().into();
-            }
-            tasks[i]["ended_reason"] = if merged {
-                "merged"
-            } else if force {
-                "force-archived"
-            } else {
-                "archived"
-            }
-            .into();
-            save_record(&tasks[i])?;
-            if failed {
-                return Err(format!("{label}: tab closed{note}"));
-            }
-            Ok(format!(
-                "archived {label}{}{note}",
-                if merged { " (merged)" } else { "" }
-            ))
-        }
+        "archive" | "force-archive" => archive_worktree(
+            &mut tasks[i],
+            action == "force-archive",
+            host,
+            session,
+            window,
+        ),
         _ => Err(format!("unknown action {action}")),
     }
+}
+
+/// Archive `task`, whose worktree is its own (not the primary checkout):
+/// refuse uncommitted changes unless `force`, close its tab, remove the
+/// worktree, and end the task.
+fn archive_worktree(
+    task: &mut serde_json::Value,
+    force: bool,
+    host: &str,
+    session: &str,
+    window: &str,
+) -> Result<String, String> {
+    let ended = !task["ended_at"].is_null();
+    let field = |k: &str| task[k].as_str().unwrap_or("").to_string();
+    let (label, worktree, repo, branch) = (
+        format!("{}/{}", field("project"), field("name")),
+        field("worktree"),
+        field("repo"),
+        field("branch"),
+    );
+    // Exit 3: the worktree is already gone. Any status line:
+    // uncommitted changes. The last line, `@STATE`, says whether the
+    // branch is merged (see MERGED_SH).
+    let out = host_bash(host, &archive_check(&worktree, &branch))
+        .ok_or_else(|| format!("{host} can't be reached"))?;
+    let exists = out.status.code() != Some(3);
+    if exists && !force && !out.status.success() {
+        return Err(format!(
+            "{label}: can't read the worktree's status on {host}"
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let status: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('@'))
+        .collect();
+    let branch_merged = text.lines().any(|l| l == "@merged");
+    // Safe to archive: the work is merged (its PR, or the branch
+    // itself) or all its cards closed, and nothing is left uncommitted.
+    let merged = exists
+        && out.status.success()
+        && status.is_empty()
+        && (branch_merged || crate::links::pr_merged(task) || crate::cards::cards_closed(task));
+    if exists && !force && !status.is_empty() {
+        return Err(uncommitted_refusal(&label, &status));
+    }
+    if ended && !exists {
+        task["ended_reason"] = "worktree removed".into();
+        save_record(task)?;
+        return Err(format!("{label}: its worktree is already gone"));
+    }
+    // The newest session, not spawn's choice: a /clear starts
+    // another. An ended task recorded it when it ended.
+    if !ended && let Some(id) = newest_session(task) {
+        task["agent_session"] = id.into();
+    }
+    // Close the tab first so the agent isn't left in a deleted
+    // directory; a tab that is already gone is fine.
+    if !ended {
+        let _ = rex(host, &["window", "close", "-s", session, window]);
+    }
+    let (note, failed) = if exists {
+        remove_worktree(host, &repo, &branch, force)?
+    } else {
+        (String::new(), false)
+    };
+    kill_if_empty(host, session);
+    if !ended {
+        task["ended_at"] = now().into();
+    }
+    task["ended_reason"] = if merged {
+        "merged"
+    } else if force {
+        "force-archived"
+    } else {
+        "archived"
+    }
+    .into();
+    save_record(task)?;
+    if failed {
+        return Err(format!("{label}: tab closed{note}"));
+    }
+    Ok(format!(
+        "archived {label}{}{note}",
+        if merged { " (merged)" } else { "" }
+    ))
+}
+
+/// The index in `tasks` of the task an action on `window` acts on: an open
+/// task. For an archive of a tab that is still open, the latest ended task
+/// reopened (it ended by mistake), or else one adopted for the agent in it,
+/// so any agent tab can be archived. Otherwise the latest ended task
+/// (closing its tab left the worktree).
+fn action_task(
+    tasks: &mut Vec<serde_json::Value>,
+    archiving: bool,
+    host: &str,
+    session: &str,
+    window: &str,
+) -> Result<usize, String> {
+    let here = |t: &serde_json::Value| in_window(t, window);
+    if let Some(i) = tasks
+        .iter()
+        .position(|t| t["ended_at"].is_null() && here(t))
+    {
+        return Ok(i);
+    }
+    if archiving && agent_block(host, session, window).is_ok() {
+        // The caller saves it now, so a refusal (uncommitted changes) still
+        // leaves the picker a task to show them on.
+        if let Some(i) = tasks.iter().rposition(here) {
+            let task = tasks[i].as_object_mut().ok_or("bad task record")?;
+            task.insert("ended_at".into(), serde_json::Value::Null);
+            task.insert("ended_reason".into(), serde_json::Value::Null);
+            return Ok(i);
+        }
+        tasks.push(adopt(host, session, window)?);
+        return Ok(tasks.len() - 1);
+    }
+    Ok(tasks.iter().rposition(here).ok_or("no task for that tab")?)
+}
+
+/// Why an archive of `label` is refused, naming the first few files of its
+/// uncommitted `status` lines (`git status --porcelain`).
+fn uncommitted_refusal(label: &str, status: &[&str]) -> String {
+    let files: Vec<&str> = status.iter().map(|l| l.get(3..).unwrap_or(l)).collect();
+    let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    let more = if files.len() > 3 {
+        format!(" and {} more", files.len() - 3)
+    } else {
+        String::new()
+    };
+    format!(
+        "Archive refused: {label} has uncommitted changes in {shown}{more}. \
+         Press ⌃X, Enter, Enter in the tab picker (⌘K) to throw them away."
+    )
+}
+
+/// Remove `branch`'s worktree of `repo` on `host` with Worktrunk, returning
+/// a note for the outcome (`; ...`) and whether the removal failed.
+fn remove_worktree(
+    host: &str,
+    repo: &str,
+    branch: &str,
+    force: bool,
+) -> Result<(String, bool), String> {
+    let remove = format!(
+        // Worktrunk deletes the files in the background (its log is under
+        // .git/wt/logs), so a big worktree doesn't hold up the picker; it
+        // still refuses an unsafe removal here.
+        "wt -C {} remove {}{} 2>&1",
+        sh_quote(repo),
+        if force { "--force " } else { "" },
+        sh_quote(branch)
+    );
+    let out = host_bash(host, &remove).ok_or_else(|| format!("{host} can't be reached"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        let last = text
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        return Ok((format!("; wt remove failed: {last}"), true));
+    }
+    // Worktrunk's own lines, not the indented files it lists.
+    let summary: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.starts_with(char::is_whitespace))
+        .map(|l| l.trim().trim_end_matches(':'))
+        .collect();
+    let note = if summary.is_empty() {
+        String::new()
+    } else {
+        format!("; {}", summary.join(" · "))
+    };
+    Ok((note, false))
 }
 
 #[cfg(test)]

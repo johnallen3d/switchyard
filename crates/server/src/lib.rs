@@ -1,12 +1,12 @@
 //! switchyard-server: the pickers' data, kept current on the config host.
 //!
 //! Without a server, every picker open fans out a fresh rex process to each
-//! Rex server and SSHes into each task host, and opening a connection costs
+//! Rex server and `SSHes` into each task host, and opening a connection costs
 //! more than the calls made over it. The server instead holds one
 //! connection per Rex server and keeps what the pickers show in memory:
 //!
 //! - Rows: a watcher per Rex server (this machine's as `local`, then each
-//!   of `rex.servers()`) runs host_rows.lua whenever its events say the
+//!   of `rex.servers()`) runs `host_rows.lua` whenever its events say the
 //!   rows changed, and on a slow timer (see `watch`).
 //! - Tasks: the registry, with live agent status from the rows, checked
 //!   against the hosts in the background (see `tasks`).
@@ -59,13 +59,13 @@ pub fn log(line: &str) {
     eprintln!("switchyard-server: {line}");
 }
 
-pub fn main(args: Vec<String>) {
+pub fn main(args: &[String]) {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match a.as_slice() {
         [] | ["serve"] => serve(),
         ["snapshot"] => server::snapshot().map(|snap| println!("{snap}")),
         ["subscribe"] => subscribe(),
-        ["-h"] | ["--help"] => {
+        ["-h" | "--help"] => {
             println!("{USAGE}");
             Ok(())
         }
@@ -142,18 +142,18 @@ fn serve() -> Result<(), String> {
     }
     {
         let shared = shared.clone();
-        thread::spawn(move || tasks::run(shared, triggers));
+        thread::spawn(move || tasks::run(&shared, &triggers));
     }
-    thread::spawn(move || tasks::watch_registry(closed));
+    thread::spawn(move || tasks::watch_registry(&closed));
     {
         let shared = shared.clone();
-        thread::spawn(move || manage_hosts(shared, events, hosts_changed));
+        thread::spawn(move || manage_hosts(&shared, &events, &hosts_changed));
     }
     {
         let shared = shared.clone();
-        thread::spawn(move || hostinfo::run(shared, wakes));
+        thread::spawn(move || hostinfo::run(&shared, &wakes));
     }
-    socket::serve(listener, shared, asks);
+    socket::serve(&listener, &shared, &asks);
     Ok(())
 }
 
@@ -175,7 +175,7 @@ fn list_servers() -> Result<Vec<String>, String> {
 
 /// Run a watcher per Rex server, starting and stopping them as the host
 /// list changes: when a watcher hears it change, and every few minutes.
-fn manage_hosts(shared: Arc<Shared>, events: Events, changed: Receiver<()>) {
+fn manage_hosts(shared: &Arc<Shared>, events: &Events, changed: &Receiver<()>) {
     let mut watchers: HashMap<String, Arc<AtomicBool>> = HashMap::new();
     loop {
         let listed = list_servers();
@@ -208,7 +208,7 @@ fn manage_hosts(shared: Arc<Shared>, events: Events, changed: Receiver<()>) {
                 let stop = Arc::new(AtomicBool::new(false));
                 watchers.insert(name.clone(), stop.clone());
                 let (shared, name, events) = (shared.clone(), name.clone(), events.clone());
-                thread::spawn(move || watch::supervise(shared, name, events, stop));
+                thread::spawn(move || watch::supervise(&shared, &name, &events, &stop));
             }
         }
         let wait = if listed.is_ok() {

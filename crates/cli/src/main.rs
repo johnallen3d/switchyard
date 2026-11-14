@@ -135,12 +135,17 @@ fn main() -> ExitCode {
         [] | ["--view" | "--current" | "--quick", ..] => picker(&a),
         ["new"] | ["new", "--agent"] => interactive(|| switchyard_spawn::standalone(Kind::Agent)),
         ["new", "--session"] => interactive(|| switchyard_spawn::standalone(Kind::Session)),
-        ["link" | "unlink", ..] => link::main(args),
+        ["link" | "unlink", ..] => link::main(&args),
         ["usage"] => interactive(|| switchyard_tabs::standalone(View::Usage, None)),
         ["usage", "--json"] => done(switchyard_tabs::usage_json(false)),
         ["usage", "--local"] => done(switchyard_tabs::usage_json(true)),
         ["server", rest @ ..] => {
-            switchyard_server::main(rest.iter().map(|s| s.to_string()).collect());
+            switchyard_server::main(
+                &rest
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>(),
+            );
             ExitCode::SUCCESS
         }
         // Plumbing: the new-session float, and the task work behind it.

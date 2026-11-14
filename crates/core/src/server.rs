@@ -43,6 +43,7 @@ use serde_json::Value;
 use crate::rex::runtime_dir;
 
 /// The server's socket, in this user's runtime directory.
+#[must_use]
 pub fn socket_path() -> Option<PathBuf> {
     runtime_dir().map(|d| d.join("server.sock"))
 }
@@ -52,10 +53,10 @@ pub fn socket_path() -> Option<PathBuf> {
 const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn send(cmd: &str) -> Result<BufReader<UnixStream>, String> {
-    request(serde_json::json!({ "cmd": cmd }))
+    request(&serde_json::json!({ "cmd": cmd }))
 }
 
-fn request(req: Value) -> Result<BufReader<UnixStream>, String> {
+fn request(req: &Value) -> Result<BufReader<UnixStream>, String> {
     let path = socket_path().ok_or("no runtime directory for the server's socket")?;
     let mut stream = UnixStream::connect(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     stream
@@ -83,15 +84,23 @@ fn read_reply(reader: &mut BufReader<UnixStream>) -> Result<Value, String> {
 
 /// The server's current snapshot, or why it couldn't be had (most often:
 /// no server running).
+///
+/// # Errors
+///
+/// Fails when no server answers or its reply is an error or unreadable.
 pub fn snapshot() -> Result<Value, String> {
     read_reply(&mut send("snapshot")?)
 }
 
 /// `host`'s zoxide folders from the server's cache, one per line, or why
 /// not (no server, or it has no good listing for `host`).
+///
+/// # Errors
+///
+/// Fails when no server answers or it has no listing for `host`.
 pub fn folders(host: &str) -> Result<String, String> {
     let reply = read_reply(&mut request(
-        serde_json::json!({ "cmd": "folders", "host": host }),
+        &serde_json::json!({ "cmd": "folders", "host": host }),
     )?)?;
     reply["folders"]
         .as_str()
@@ -101,9 +110,13 @@ pub fn folders(host: &str) -> Result<String, String> {
 
 /// The server's cached host probes for `project` (see the module docs), or
 /// why not.
+///
+/// # Errors
+///
+/// Fails when no server answers or it has no probes for `project`.
 pub fn probes(project: &str) -> Result<Vec<Value>, String> {
     let reply = read_reply(&mut request(
-        serde_json::json!({ "cmd": "probes", "project": project }),
+        &serde_json::json!({ "cmd": "probes", "project": project }),
     )?)?;
     reply["probes"]
         .as_array()
@@ -122,6 +135,10 @@ pub fn refresh() {
 
 /// Snapshots as they change, starting with the current one. Iteration ends
 /// at the first error, such as the server stopping.
+///
+/// # Errors
+///
+/// Fails when no server answers or its first snapshot can't be read.
 pub fn subscribe() -> Result<Subscription, String> {
     let mut reader = send("subscribe")?;
     // The first reply comes at once, so it gets the usual timeout ...
@@ -299,8 +316,11 @@ mod tests {
         // A server that has only just started knows nothing yet.
         snap["hosts"][0]["error"] = Value::Null;
         snap["tasks_error"] = Value::Null;
-        assert!(pastes(&snap).is_empty());
-        assert!(pastes(&json!({ "hosts": [], "tasks": null })).is_empty());
+        assert_eq!(pastes(&snap), [] as [(&str, String); 0]);
+        assert_eq!(
+            pastes(&json!({ "hosts": [], "tasks": null })),
+            [] as [(&str, String); 0]
+        );
     }
 
     #[test]

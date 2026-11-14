@@ -7,7 +7,7 @@
 //!
 //! - `seq`: counts changes since the server started.
 //! - `hosts`: one object per Rex server, the config host first as `local`
-//!   then `rex.servers()` order: `host`, `rows` (host_rows.lua's output, as
+//!   then `rex.servers()` order: `host`, `rows` (`host_rows.lua`'s output, as
 //!   the picker's `rows` paste carries it), `age_ms` (since the rows were
 //!   last read; null before the first), `error` (the last failure, cleared
 //!   by the next rows; old rows stay) and `watching` (a watcher is running).
@@ -31,7 +31,12 @@ use serde_json::{Value, json};
 use switchyard_core::hosts::Metrics;
 use switchyard_core::tasks::{TabStatus, apply_live, parse_window_status};
 
-/// The rows and live status host_rows.lua (run with `status=yes`) gave for
+/// A duration in whole milliseconds for a client, saturating (never reached).
+fn millis(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// The rows and live status `host_rows.lua` (run with `status=yes`) gave for
 /// one Rex server: its W rows and B row split out of the rows the pickers
 /// read.
 #[derive(Debug, Default, PartialEq)]
@@ -263,8 +268,7 @@ impl State {
 
     /// The snapshot as clients get it.
     pub fn snapshot(&self, now: Instant) -> Value {
-        let age =
-            |at: Option<Instant>| at.map(|at| now.saturating_duration_since(at).as_millis() as u64);
+        let age = |at: Option<Instant>| at.map(|at| millis(now.saturating_duration_since(at)));
         let hosts: Vec<Value> = self
             .hosts
             .iter()
@@ -316,7 +320,7 @@ impl State {
         let reply = match (&l.value, &l.error, age) {
             (_, Some(e), _) => json!({ "error": format!("{host}: {e}") }),
             (Some(text), None, Some(age)) => {
-                json!({ "host": host, "folders": text, "age_ms": age.as_millis() as u64 })
+                json!({ "host": host, "folders": text, "age_ms": millis(age) })
             }
             _ => json!({ "error": format!("{host}: not listed yet") }),
         };
@@ -347,7 +351,7 @@ impl State {
                     "host": name,
                     "load": l.value.map(|m| m.load),
                     "mem_gib": l.value.map(|m| m.mem_gib),
-                    "age_ms": l.at.map(|at| now.saturating_duration_since(at).as_millis() as u64),
+                    "age_ms": l.at.map(|at| millis(now.saturating_duration_since(at))),
                     "error": l.error,
                     "agents": rows.map(|r| r.busy),
                     "warm": rows.map(|r| has_session(&r.text, project)),
@@ -384,7 +388,9 @@ impl Shared {
 
     pub fn lock(&self) -> MutexGuard<'_, State> {
         // A panicked holder leaves plain data behind; keep serving it.
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Run `f` on the state and publish when it reports a change.
@@ -418,7 +424,7 @@ mod tests {
         let a = &rows.live["window:a"];
         assert_eq!(
             (a.state.as_str(), a.at, a.msg.as_str()),
-            ("working", 1794084018, "thinking")
+            ("working", 1_794_084_018, "thinking")
         );
         assert_eq!(
             rows.live["window:b"],

@@ -30,6 +30,7 @@ pub struct SlashCommand {
 
 /// What a harness's commands take in a message: Claude runs a `/command` or
 /// names a skill anywhere, Pi only at the start.
+#[must_use]
 pub fn anywhere(harness: &str) -> bool {
     harness != "pi"
 }
@@ -38,6 +39,11 @@ pub fn anywhere(harness: &str) -> bool {
 const REQUEST: &str = "switchyard-commands";
 
 /// The commands `harness` offers in `dir` on `host` under `profile`.
+///
+/// # Errors
+///
+/// Fails when `host` can't be reached or the harness's output lists no
+/// commands.
 pub fn fetch(
     host: &str,
     profile: &str,
@@ -129,6 +135,7 @@ fn parse(harness: &str, v: &Value) -> Result<Vec<SlashCommand>, String> {
 }
 
 /// A command's name without Pi's `skill:` prefix.
+#[must_use]
 pub fn bare(name: &str) -> &str {
     name.strip_prefix("skill:").unwrap_or(name)
 }

@@ -48,7 +48,7 @@ pub fn listen(path: &Path) -> Result<UnixListener, String> {
     Ok(listener)
 }
 
-pub fn serve(listener: UnixListener, shared: Arc<Shared>, asks: Asks) {
+pub fn serve(listener: &UnixListener, shared: &Arc<Shared>, asks: &Asks) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -77,9 +77,9 @@ fn client(stream: UnixStream, shared: &Shared, asks: &Asks) -> io::Result<()> {
             Some("folders") => {
                 let host = arg("host");
                 let (reply, stale) = {
-                    let mut state = shared.lock();
-                    let (reply, stale) = state.folders_reply(&host, Instant::now(), FOLDERS_STALE);
-                    if stale && let Some(l) = state.info.folders.get_mut(&host) {
+                    let mut guard = shared.lock();
+                    let (reply, stale) = guard.folders_reply(&host, Instant::now(), FOLDERS_STALE);
+                    if stale && let Some(l) = guard.info.folders.get_mut(&host) {
                         l.wanted = true;
                     }
                     (reply, stale)

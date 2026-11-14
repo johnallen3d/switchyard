@@ -51,6 +51,7 @@ const AUTH_TTL_SECS: u64 = 600;
 const GH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `owner/repo` for a GitHub remote URL (https, ssh or scp form), or None.
+#[must_use]
 pub fn github_repo(url: &str) -> Option<String> {
     let url = url.trim();
     let rest = [
@@ -115,6 +116,10 @@ fn checks_summary(rollup: &Value) -> String {
 }
 
 /// The newest PR in gh's `pr list --json` output, or None for no PR.
+///
+/// # Errors
+///
+/// Fails when `json` isn't valid JSON or the newest PR lacks a field.
 pub fn parse_pr_list(json: &str) -> Result<Option<Pr>, String> {
     let list: Value = serde_json::from_str(json).map_err(|e| format!("gh pr list: {e}"))?;
     let Some(pr) = list.as_array().and_then(|a| a.first()) else {
@@ -137,8 +142,7 @@ pub fn parse_pr_list(json: &str) -> Result<Option<Pr>, String> {
 
 fn cache_path() -> PathBuf {
     std::env::var("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| home().join(".local/state"))
+        .map_or_else(|_| home().join(".local/state"), PathBuf::from)
         .join("rex/switchyard-links.json")
 }
 
@@ -168,7 +172,7 @@ fn fresh(entry: &Value, ttl: u64, stamp: u64) -> bool {
 }
 
 /// Run gh under `profile` (work gets amfaro's mise env, personal the login
-/// env, as the agents do), giving up after GH_TIMEOUT. None when gh can't
+/// env, as the agents do), giving up after `GH_TIMEOUT`. None when gh can't
 /// run, fails, or takes too long.
 pub(crate) fn gh(profile: &str, args: &[&str]) -> Option<String> {
     let mut cmd = Command::new("gh");
@@ -245,11 +249,12 @@ pub struct Lookup {
     pub branch: String,
 }
 
+#[must_use]
 pub fn pr_key(repo: &str, branch: &str) -> String {
     format!("{repo}\t{branch}")
 }
 
-fn pr_to_json(pr: &Option<Pr>) -> Value {
+fn pr_to_json(pr: Option<&Pr>) -> Value {
     match pr {
         Some(p) => {
             json!({"number": p.number, "url": p.url, "state": p.state, "checks": p.checks, "fixes": p.fixes})
@@ -279,6 +284,7 @@ fn pr_from_json(v: &Value) -> Option<Pr> {
 /// the branch has none, absent when it couldn't be asked (no auth for the
 /// profile, gh missing or failing). Fresh cache entries are used as they
 /// are; the rest are asked of GitHub at once.
+#[must_use]
 pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
     let stamp = now();
     let mut cache = load_cache();
@@ -362,7 +368,7 @@ pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
         if !cache["prs"].is_object() {
             cache["prs"] = json!({});
         }
-        cache["prs"][&key] = json!({"at": stamp, "pr": pr_to_json(&pr)});
+        cache["prs"][&key] = json!({"at": stamp, "pr": pr_to_json(pr.as_ref())});
         found.insert(key, pr);
         changed = true;
     }
@@ -435,6 +441,7 @@ pub struct Tracker {
 }
 
 impl Tracker {
+    #[must_use]
     pub fn new(tracker: &str, remote: &str) -> Self {
         let mut t = Tracker::default();
         let mut first = true;
@@ -463,7 +470,7 @@ impl Tracker {
         json!({"kind": "card", "system": "fizzy", "ref": number, "url": url.unwrap_or_default()})
     }
 
-    fn github(&self, kind: &str, repo: &str, number: &str) -> Value {
+    fn github_ref(kind: &str, repo: &str, number: &str) -> Value {
         let path = if kind == "pr" { "pull" } else { "issues" };
         json!({"kind": kind, "system": "github", "ref": format!("{repo}#{number}"),
             "url": format!("https://github.com/{repo}/{path}/{number}")})
@@ -474,7 +481,7 @@ impl Tracker {
         if self.cards {
             Some(self.card(number))
         } else {
-            Some(self.github("issue", self.github.as_deref()?, number))
+            Some(Self::github_ref("issue", self.github.as_deref()?, number))
         }
     }
 }
@@ -503,6 +510,7 @@ pub const FIZZY_BOARD_SH: &str = r#"fizzy_board() {
 /// The catalog's tracker, or when it sets none, the Fizzy board a
 /// checkout's `.fizzy.yaml` names (`ACCOUNT/BOARD`, from `fizzy_board`),
 /// so a bare `#42` in a project tracked on Fizzy is a card.
+#[must_use]
 pub fn tracker_or_fizzy(catalog: &str, fizzy_board: &str) -> String {
     let fizzy_board = fizzy_board.trim();
     if !catalog.trim().is_empty() || fizzy_board.is_empty() {
@@ -518,6 +526,7 @@ fn digits(s: &str) -> Option<&str> {
 /// A ref as a link (without its source), or None when it isn't one or
 /// can't be placed: `#42` or `42` (per the tracker), `OWNER/REPO#42`,
 /// `fizzy:123`, `pr:57`, or a GitHub issue or PR URL or Fizzy card URL.
+#[must_use]
 pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
     let text = text.trim().trim_end_matches(['.', ',', ')', ';', ':']);
     for scheme in ["https://", "http://"] {
@@ -529,7 +538,11 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
         return match parts.as_slice() {
             ["github.com", owner, repo, kind @ ("issues" | "pull"), n, ..] => {
                 let kind = if *kind == "pull" { "pr" } else { "issue" };
-                Some(t.github(kind, &format!("{owner}/{repo}"), digits(n)?))
+                Some(Tracker::github_ref(
+                    kind,
+                    &format!("{owner}/{repo}"),
+                    digits(n)?,
+                ))
             }
             ["app.fizzy.do", account, "cards", n, ..] => {
                 let mut link = Tracker {
@@ -547,7 +560,7 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
         return Some(t.card(digits(n)?));
     }
     if let Some(n) = text.strip_prefix("pr:") {
-        return Some(t.github("pr", t.github.as_deref()?, digits(n)?));
+        return Some(Tracker::github_ref("pr", t.github.as_deref()?, digits(n)?));
     }
     if let Some((repo, n)) = text.split_once('#') {
         if repo.is_empty() {
@@ -560,7 +573,7 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
                     .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
         };
         return (ok(owner) && ok(name))
-            .then(|| t.github("issue", repo, n))
+            .then(|| Tracker::github_ref("issue", repo, n))
             .filter(|_| digits(n).is_some());
     }
     t.bare(digits(text)?)
@@ -568,6 +581,7 @@ pub fn parse_ref(text: &str, t: &Tracker) -> Option<Value> {
 
 /// Whether a ref is one `parse_ref` could place under some tracker, for
 /// checking what `switchyard link` records before the tracker is known.
+#[must_use]
 pub fn ref_shape_ok(text: &str) -> bool {
     let any = [
         Tracker {
@@ -584,6 +598,7 @@ pub fn ref_shape_ok(text: &str) -> bool {
 
 /// The refs in free text such as a prompt: issue, PR and card URLs,
 /// `fizzy:123`, `OWNER/REPO#42` and `#42`, as links under the tracker.
+#[must_use]
 pub fn refs_in_text(text: &str, t: &Tracker) -> Vec<Value> {
     let mut links: Vec<Value> = Vec::new();
     for word in text.split(|c: char| c.is_whitespace() || "()[]<>\"'`".contains(c)) {
@@ -603,6 +618,7 @@ pub fn refs_in_text(text: &str, t: &Tracker) -> Vec<Value> {
 
 /// Issue refs a text says it fixes: `Fixes #42`, `closes owner/repo#7`,
 /// `Resolved: #3` (any case), as `#42` or `owner/repo#7`.
+#[must_use]
 pub fn fixed_refs(text: &str) -> Vec<String> {
     const VERBS: [&str; 9] = [
         "fix", "fixes", "fixed", "close", "closes", "closed", "resolve", "resolves", "resolved",
@@ -628,6 +644,7 @@ pub fn fixed_refs(text: &str) -> Vec<String> {
 }
 
 /// The issue number leading a branch's last part: `feature/42-foo` → 42.
+#[must_use]
 pub fn branch_number(branch: &str) -> Option<&str> {
     let last = branch.rsplit('/').next()?;
     let end = last
@@ -720,6 +737,7 @@ pub fn forget_pr(url: &str) {
 
 /// Whether GitHub last reported one of the task's PRs as merged (from the
 /// lookup cache, however old: a merged PR stays merged).
+#[must_use]
 pub fn pr_merged(task: &Value) -> bool {
     let branch = task["branch"].as_str().unwrap_or("");
     let cache = load_cache();
@@ -740,6 +758,7 @@ pub fn pr_merged(task: &Value) -> bool {
 
 /// The link John most likely wants to open: a PR, then an issue, a card,
 /// a commit; the first of a kind.
+#[must_use]
 pub fn primary(task: &Value) -> Option<&Value> {
     let links = task["links"].as_array()?;
     ["pr", "issue", "card", "commit"].iter().find_map(|kind| {

@@ -8,6 +8,7 @@ pub const HARNESSES: [&str; 2] = ["claude", "pi"];
 
 /// Normalise typed input: lowercase, spaces become dashes, and only
 /// characters that are safe in a branch, a path and a tab label survive.
+#[must_use]
 pub fn name_char(c: char) -> Option<char> {
     match c {
         ' ' | '_' => Some('-'),
@@ -18,6 +19,7 @@ pub fn name_char(c: char) -> Option<char> {
 }
 
 /// Why a name can't be used yet, or None when it can.
+#[must_use]
 pub fn name_problem(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("name the work");
@@ -33,6 +35,7 @@ pub fn name_problem(name: &str) -> Option<&'static str> {
 }
 
 /// (branch, slug) for a work name.
+#[must_use]
 pub fn branch_and_slug(name: &str) -> (String, String) {
     if name.contains('/') {
         (name.to_string(), name.replace('/', "-"))
