@@ -11,8 +11,9 @@
 //!   (`wt remove --force`).
 //!
 //!   A clean worktree whose work is merged (its PR, as last seen on
-//!   GitHub, or its branch into the default branch) is safe to archive;
-//!   the task ends as "merged" rather than "archived".
+//!   GitHub, or its branch into the default branch) or whose linked cards
+//!   Fizzy last reported all closed is safe to archive; the task ends as "merged"
+//!   rather than "archived".
 //!
 //!   Both also work on an ended task whose tab was closed without an
 //!   archive, which leaves its worktree behind: they remove the worktree
@@ -373,11 +374,11 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             let status: Vec<&str> = text.lines().filter(|l| !l.is_empty() && !l.starts_with('@')).collect();
             let branch_merged = text.lines().any(|l| l == "@merged");
             // Safe to archive: the work is merged (its PR, or the branch
-            // itself) and nothing is left uncommitted.
+            // itself) or all its cards closed, and nothing is left uncommitted.
             let merged = exists
                 && out.status.success()
                 && status.is_empty()
-                && (branch_merged || crate::links::pr_merged(&tasks[i]));
+                && (branch_merged || crate::links::pr_merged(&tasks[i]) || crate::cards::cards_closed(&tasks[i]));
             if exists && !force && !status.is_empty() {
                 let files: Vec<&str> = status.iter().map(|l| l.get(3..).unwrap_or(l)).collect();
                 let shown = files.iter().take(3).copied().collect::<Vec<_>>().join(", ");

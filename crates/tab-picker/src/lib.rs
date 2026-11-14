@@ -2184,7 +2184,7 @@ impl App {
             .iter()
             .map(|l| {
                 let title = if l.title.is_empty() { 0 } else { str_width(&l.title).min(CHOOSER_TITLE_MAX) + 2 };
-                str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(s) + 1) + title + str_width(&l.url) + 6
+                str_width(&l.short()) + l.badge_state().map_or(0, |(s, _)| str_width(&s) + 1) + title + str_width(&l.url) + 6
             })
             .max()
             .unwrap_or(0);
@@ -4078,7 +4078,12 @@ mod tests {
                 {"session_id":"s", "window_id":"c", "name":"dirty", "dirty_count":2,
                  "links":[{"kind":"pr","system":"github","ref":"o/r#1","url":"p","state":"merged"}]},
                 {"session_id":"s", "window_id":"d", "name":"open",
-                 "links":[{"kind":"pr","system":"github","ref":"o/r#2","url":"p","state":"merged"}]}
+                 "links":[{"kind":"pr","system":"github","ref":"o/r#2","url":"p","state":"merged"}]},
+                {"session_id":"s", "window_id":"e", "name":"closed card",
+                 "links":[{"kind":"card","system":"fizzy","ref":"2000","url":"c","state":"closed","column":"Done"}]},
+                {"session_id":"s", "window_id":"f", "name":"one card open",
+                 "links":[{"kind":"card","system":"fizzy","ref":"2001","url":"c","state":"closed"},
+                          {"kind":"card","system":"fizzy","ref":"2002","url":"c","state":"open"}]}
             ]).to_string()).unwrap();
             app.tasks_load = Tasks::Ready;
         });
@@ -4088,6 +4093,8 @@ mod tests {
         assert_eq!(app.pick(), format!("resume:{}/s/a", hex("")));
         assert!(app.tasks[0].archived());
         assert!(!app.tasks[0].safe() && app.tasks[1].safe() && !app.tasks[2].safe() && app.tasks[3].safe());
+        assert!(app.tasks[4].safe(), "all its cards closed counts as merged work");
+        assert!(!app.tasks[5].safe(), "one open card means work remains");
     }
 
     #[test]

@@ -135,6 +135,9 @@ pub struct Link {
     /// The work item's title, when its tracker has said (see core's
     /// `titles`); empty otherwise.
     pub title: String,
+    /// A card's live column and assignees (see core's `cards`).
+    pub column: String,
+    pub assignee: String,
 }
 
 impl Link {
@@ -163,17 +166,48 @@ impl Link {
         }
     }
 
-    /// A PR's state or checks, as a badge shows them after its ref.
-    pub fn badge_state(&self) -> Option<(&'static str, Tone)> {
-        match (self.state.as_str(), self.checks.as_str()) {
-            ("merged", _) => Some(("✓ merged", Tone::Merged)),
-            ("closed", _) => Some(("closed", Tone::Muted)),
-            ("draft", _) => Some(("draft", Tone::Muted)),
-            (_, "pass") => Some(("✓", Tone::Pass)),
-            (_, "fail") => Some(("✗", Tone::Fail)),
-            (_, "pending") => Some(("●", Tone::Pending)),
+    /// A PR's state or checks, or a card's column and assignee (`✓ Done`
+    /// when closed), as a badge shows them after its ref.
+    pub fn badge_state(&self) -> Option<(String, Tone)> {
+        if self.kind == "card" {
+            return self.card_state();
+        }
+        let (text, tone) = match (self.state.as_str(), self.checks.as_str()) {
+            ("merged", _) => ("✓ merged", Tone::Merged),
+            ("closed", _) => ("closed", Tone::Muted),
+            ("draft", _) => ("draft", Tone::Muted),
+            (_, "pass") => ("✓", Tone::Pass),
+            (_, "fail") => ("✗", Tone::Fail),
+            (_, "pending") => ("●", Tone::Pending),
+            _ => return None,
+        };
+        Some((text.to_string(), tone))
+    }
+
+    fn card_state(&self) -> Option<(String, Tone)> {
+        match self.state.as_str() {
+            "closed" => {
+                let column = if self.column.is_empty() { "closed" } else { &self.column };
+                Some((format!("✓ {column}"), Tone::Merged))
+            }
+            "open" => {
+                let mut text = self.column.clone();
+                if !self.assignee.is_empty() {
+                    if !text.is_empty() {
+                        text.push(' ');
+                    }
+                    text.push('@');
+                    text.push_str(&self.assignee);
+                }
+                (!text.is_empty()).then_some((text, Tone::Muted))
+            }
             _ => None,
         }
+    }
+
+    /// A card Fizzy reports closed.
+    pub fn card_closed(&self) -> bool {
+        self.kind == "card" && self.state == "closed"
     }
 }
 
@@ -316,12 +350,14 @@ impl Task {
 
     /// Safe to archive: open (or ended with its worktree left), nothing
     /// uncommitted, and its work merged (a PR GitHub reports merged, or
-    /// the branch in the default branch). Known only after the worktree
-    /// check.
+    /// the branch in the default branch) or every linked card closed.
+    /// Known only after the worktree check.
     pub fn safe(&self) -> bool {
+        let mut cards = self.links.iter().filter(|l| l.kind == "card").peekable();
+        let cards_closed = cards.peek().is_some() && cards.all(Link::card_closed);
         (self.ended.is_none() || self.left)
             && self.dirty == 0
-            && (self.merged == "merged" || self.links.iter().any(|l| l.kind == "pr" && l.state == "merged"))
+            && (self.merged == "merged" || cards_closed || self.links.iter().any(|l| l.kind == "pr" && l.state == "merged"))
     }
 
     /// Open and pinned.
@@ -395,6 +431,8 @@ fn parse_links(v: &serde_json::Value) -> Vec<Link> {
                     state: s(l, "state"),
                     checks: s(l, "checks"),
                     title: s(l, "title"),
+                    column: s(l, "column"),
+                    assignee: s(l, "assignee"),
                 })
                 .collect()
         })
@@ -504,6 +542,19 @@ mod tests {
             state: state.into(),
             ..Link::default()
         }
+    }
+
+    #[test]
+    fn card_badges_show_column_and_assignee_or_done() {
+        let open = Link { column: "In Progress".into(), assignee: "John".into(), ..link("card", "1156", "open") };
+        let closed = Link { column: "Done".into(), assignee: "John".into(), ..link("card", "1155", "closed") };
+        let triage = Link { column: "Maybe?".into(), ..link("card", "1157", "open") };
+        assert_eq!(text(&badges(std::slice::from_ref(&open), usize::MAX)), "card 1156 In Progress @John");
+        assert_eq!(text(&badges(&[closed.clone(), triage], usize::MAX)), "cards 1155 ✓ Done 1157 Maybe?");
+        assert_eq!(closed.badge_state().unwrap().1, Tone::Merged);
+        // Without a lookup a card shows just its number.
+        assert_eq!(link("card", "9", "").badge_state(), None);
+        assert!(closed.card_closed() && !open.card_closed());
     }
 
     fn text(pieces: &[(String, Tone)]) -> String {

@@ -606,6 +606,8 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// links (saved): the branch's git config links, and derived ones such as
 /// their PR, with its live `state` and `checks` (not saved); see `links`.
 /// Their links get their work items' `title` too (not saved; see `titles`).
+/// Their Fizzy cards get live `state`, `column` and `assignee` (not
+/// saved); see `cards`.
 /// A host that can't be reached leaves its tasks as they were, without
 /// status, and a tab ends its task only when the host lists the task's
 /// session without it. A new task's missing worktree ends it only after
@@ -791,6 +793,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         links.into_iter().map(move |link| crate::titles::Ask { profile: profile.clone(), link, tracker: tracker.clone() })
     });
     crate::titles::refresh(asks.collect());
+    let cards = crate::cards::find_cards(tasks.iter().filter(|t| checked(t)));
     let live_prs: Vec<(String, String, Pr)> = live_prs
         .into_iter()
         .map(|(i, repo, pr)| (format!("{}/{}", field(&tasks[i], "host"), field(&tasks[i], "window_id")), repo, pr))
@@ -817,6 +820,7 @@ pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
         for (_, repo, pr) in live_prs.iter().filter(|(k, _, _)| *k == key) {
             add_live(task, repo, pr);
         }
+        crate::cards::add_live(task, &cards);
     }
     Ok(tasks)
 }
