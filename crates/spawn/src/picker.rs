@@ -580,6 +580,46 @@ impl App {
         matches!(self.loads.get(self.listed()), Some(Load::Waiting) | None)
     }
 
+    /// ctrl-o: the next host chip. Leaving `auto` skips the host it already
+    /// shows, so the first press changes where the work would run.
+    fn next_host(&mut self) {
+        let n = self.hosts.len().max(1);
+        let from_auto = self.hosts.get(self.host).is_some_and(|h| h == AUTO);
+        let shown = self.auto_host();
+        self.host = (self.host + 1) % n;
+        if from_auto && shown.as_deref() == self.hosts.get(self.host).map(String::as_str) {
+            self.host = (self.host + 1) % n;
+        }
+        self.host_changed();
+    }
+
+    /// A pool entry as its host label: the config host by its own name.
+    fn host_label(&self, host: &str) -> String {
+        match host {
+            CONFIG if !self.home.is_empty() => self.home.clone(),
+            CONFIG => "Mac".to_string(),
+            h => h.to_string(),
+        }
+    }
+
+    /// The one host `auto` would use for the highlighted pick, if it is
+    /// settled rather than the least busy of a pool.
+    fn auto_host(&self) -> Option<String> {
+        if self.kind == Kind::Session {
+            return Some(self.here.clone());
+        }
+        if self.folder().is_some() {
+            return Some(self.listed().to_string());
+        }
+        match self.project() {
+            Some(project) => match pool(project).as_slice() {
+                [h] => Some(self.host_label(h)),
+                _ => None,
+            },
+            None => Some(self.listed().to_string()),
+        }
+    }
+
     /// The host chip moved: list its folders and refilter.
     fn host_changed(&mut self) {
         self.load_listed();
@@ -904,10 +944,7 @@ impl App {
             KeyCode::Tab => self.next_focus(true),
             KeyCode::BackTab => self.next_focus(false),
             // Overrides for the defaults: host starts at auto, harness at claude.
-            KeyCode::Char('o') if ctrl => {
-                self.host = (self.host + 1) % self.hosts.len().max(1);
-                self.host_changed();
-            }
+            KeyCode::Char('o') if ctrl => self.next_host(),
             KeyCode::Char('s') if ctrl => self.toggle_kind(),
             KeyCode::Char('t') if ctrl && self.kind == Kind::Agent => {
                 self.harness = (self.harness + 1) % HARNESSES.len();
@@ -1640,16 +1677,7 @@ impl App {
         let host_text = match (host, self.project()) {
             (AUTO, _) if self.kind == Kind::Session => self.here.clone(),
             (AUTO, Some(project)) => {
-                let hosts: Vec<String> = pool(project)
-                    .iter()
-                    .map(|h| {
-                        if h == CONFIG {
-                            "Mac".to_string()
-                        } else {
-                            h.clone()
-                        }
-                    })
-                    .collect();
+                let hosts: Vec<String> = pool(project).iter().map(|h| self.host_label(h)).collect();
                 if hosts.len() == 1 {
                     hosts[0].clone()
                 } else {
