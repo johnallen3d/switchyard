@@ -104,11 +104,14 @@ pub fn launch(
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
-    launch_with(host, path, name, harness, Prompt::Ref(prompt_ref), work_item, resume)
+    launch_with(host, path, name, harness, Prompt::Ref(prompt_ref), work_item, resume, None)
 }
 
 /// `launch` with the prompt's text itself rather than a prompt file, for
-/// callers that have it in hand (switchyard-server's MCP tools).
+/// callers that have it in hand (switchyard-server's MCP tools). `parent`
+/// is the Rex window of the agent that spawned it, if known: the registry
+/// keeps it as `parent_window`, and the tab picker nests the task under
+/// that tab.
 pub fn launch_text(
     host: &str,
     path: &str,
@@ -116,8 +119,9 @@ pub fn launch_text(
     harness: &str,
     prompt: &str,
     work_item: Option<&str>,
+    parent: Option<&str>,
 ) -> Result<(String, String, String), String> {
-    launch_with(host, path, name, harness, Prompt::Text(prompt), work_item, None)
+    launch_with(host, path, name, harness, Prompt::Text(prompt), work_item, None, parent)
 }
 
 /// Where a launch's prompt comes from.
@@ -128,6 +132,7 @@ enum Prompt<'a> {
     Text(&'a str),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn launch_with(
     host: &str,
     path: &str,
@@ -136,6 +141,7 @@ fn launch_with(
     prompt: Prompt,
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
+    parent: Option<&str>,
 ) -> Result<(String, String, String), String> {
     let projects = catalog()?;
     let mut project = match projects.iter().find(|p| p.path == path) {
@@ -268,7 +274,7 @@ fn launch_with(
             l
         })
         .collect();
-    let task = serde_json::json!({
+    let mut task = serde_json::json!({
         "host": host,
         "session_id": session,
         "window_id": window_id,
@@ -288,6 +294,9 @@ fn launch_with(
         "ended_at": null,
         "ended_reason": null,
     });
+    if let Some(parent) = parent.filter(|p| !p.is_empty()) {
+        task["parent_window"] = parent.into();
+    }
     // The tab is already open: a registry failure only costs the inbox entry.
     if let Err(e) = record_task(task) {
         log(&format!("could not record {}/{name}: {e}", project.name));

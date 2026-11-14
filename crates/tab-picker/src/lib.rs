@@ -34,7 +34,9 @@
 //!   order (Waiting, Failed, Done, Working, Idle, No status). Plain tabs
 //!   with no agent are left out, as is the picker's own `switchyard` tab;
 //!   the quick float (cmd+k) lists them under Tabs.
-//!   Pinned tasks lead the list and Snoozed ones trail it.
+//!   Pinned tasks lead the list and Snoozed ones trail it. A task an
+//!   agent spawned (through the MCP endpoint's spawn_task) hangs off its
+//!   spawner's row as a small tree when both are listed (see `nest`).
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
 //!   work items and host over its whole status message, the agent's
@@ -92,7 +94,7 @@ mod snooze;
 mod standalone;
 mod usage;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
@@ -269,6 +271,27 @@ struct Flat<'a> {
 
 type Key = (String, String);
 
+/// A nested row's tree guides: the columns its ancestors' lines take
+/// (`│ ` while an ancestor has siblings still to come, else blanks), and
+/// whether it is the last of its siblings.
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+struct Guide {
+    lead: String,
+    last: bool,
+}
+
+impl Guide {
+    /// The guide on the row's own line: `├ ` or `└ ` after its ancestors'.
+    fn branch(&self) -> String {
+        format!("{}{}", self.lead, if self.last { "└ " } else { "├ " })
+    }
+
+    /// The guide on the lines under it: its siblings' line carries on.
+    fn stem(&self) -> String {
+        format!("{}{}", self.lead, if self.last { "  " } else { "│ " })
+    }
+}
+
 /// The ctrl-b chooser over a task's links (see model's `chooser_links`),
 /// open while the task has several.
 struct Chooser {
@@ -354,6 +377,9 @@ struct App {
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
+    /// Inbox rows nested under the agent that spawned them (see `nest`),
+    /// with the tree guides they are drawn with.
+    tree: HashMap<Item, Guide>,
     selected: Option<usize>,
     offset: usize,
     /// What ctrl-x has armed for the selected task; Enter confirms it.
@@ -450,6 +476,7 @@ impl App {
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
+            tree: HashMap::new(),
             selected: None,
             offset: 0,
             armed: Armed::No,
@@ -939,6 +966,7 @@ impl App {
     fn refilter_to(&mut self, want: Option<Key>) {
         self.rows.clear();
         self.hits.clear();
+        self.tree.clear();
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let filtering = !self.query.trim().is_empty();
         let best = match self.view {
@@ -1011,7 +1039,113 @@ impl App {
             self.rows.push(Item::Status(heading));
             self.rows.extend(rows);
         }
+        self.nest();
         best.map(|(_, i)| i)
+    }
+
+    /// The row for the agent that spawned `item`'s task: the tab in its
+    /// `parent_window`, or the open task there when its tab isn't listed.
+    fn parent_of(&self, item: Item) -> Option<Item> {
+        let window = self.task_of(item).map(|t| t.parent_window.as_str()).filter(|w| !w.is_empty())?;
+        if let Some(t) = self.tabs.iter().position(|t| t.window_id == window) {
+            return Some(Item::Tab(t));
+        }
+        (0..self.tasks.len())
+            .find(|&k| self.tasks[k].ended.is_none() && self.tasks[k].window_id == window)
+            .map(Item::Task)
+    }
+
+    /// Whether a nested row is in its spawner's project, which the row
+    /// over it already names.
+    fn same_project_as_parent(&self, item: Item) -> bool {
+        self.tree.contains_key(&item)
+            && self.parent_of(item).is_some_and(|up| self.project_of(up).0 == self.project_of(item).0)
+    }
+
+    /// Move each Inbox row whose spawner is listed too under it, as a tree
+    /// (see `Guide`), most urgent child first. A pinned or snoozed child
+    /// stays in its group unless its spawner is in that group too, so a pin
+    /// or snooze still says where the row goes. Headings left with no rows
+    /// go.
+    fn nest(&mut self) {
+        let listed: HashSet<Item> = self.rows.iter().copied().filter(selectable).collect();
+        let mut parent: HashMap<Item, Item> = HashMap::new();
+        for &item in &listed {
+            let Some(up) = self.parent_of(item).filter(|p| *p != item && listed.contains(p)) else { continue };
+            let group = self.agent_group(item);
+            if matches!(group, "pinned" | "snoozed") && self.agent_group(up) != group {
+                continue;
+            }
+            parent.insert(item, up);
+        }
+        // A loop of spawners (a resumed tab's window reused, say) has no
+        // root: cut it at each row found on its own way up.
+        let looped: Vec<Item> = parent
+            .keys()
+            .copied()
+            .filter(|&start| {
+                let mut seen = HashSet::new();
+                let mut at = start;
+                while let Some(&up) = parent.get(&at) {
+                    if up == start || !seen.insert(up) {
+                        return up == start;
+                    }
+                    at = up;
+                }
+                false
+            })
+            .collect();
+        for item in looped {
+            parent.remove(&item);
+        }
+        if parent.is_empty() {
+            return;
+        }
+        let mut children: HashMap<Item, Vec<Item>> = HashMap::new();
+        for (&child, &up) in &parent {
+            children.entry(up).or_default().push(child);
+        }
+        for kids in children.values_mut() {
+            kids.sort_by_cached_key(|&i| self.agent_key(i));
+        }
+        fn descend(
+            item: Item,
+            lead: &str,
+            children: &HashMap<Item, Vec<Item>>,
+            rows: &mut Vec<Item>,
+            tree: &mut HashMap<Item, Guide>,
+        ) {
+            let Some(kids) = children.get(&item) else { return };
+            for (n, &kid) in kids.iter().enumerate() {
+                let guide = Guide { lead: lead.to_string(), last: n + 1 == kids.len() };
+                let next = guide.stem();
+                rows.push(kid);
+                tree.insert(kid, guide);
+                descend(kid, &next, children, rows, tree);
+            }
+        }
+        let old = std::mem::take(&mut self.rows);
+        let mut rows = Vec::with_capacity(old.len());
+        for item in old {
+            match item {
+                Item::Status(_) => {
+                    // A heading whose rows all moved under others goes.
+                    if rows.last().is_some_and(|r| !selectable(r)) {
+                        rows.pop();
+                    }
+                    rows.push(item);
+                }
+                _ if parent.contains_key(&item) => {}
+                _ => {
+                    rows.push(item);
+                    descend(item, "", &children, &mut rows, &mut self.tree);
+                }
+            }
+        }
+        if rows.last().is_some_and(|r| !selectable(r)) {
+            rows.pop();
+        }
+        self.rows = rows;
     }
 
     /// Archive: one flat list of ended tasks, each row naming its project,
@@ -2182,7 +2316,8 @@ impl App {
         let name_w = flat()
             .map(|i| {
                 let w = str_width(self.flat(i).name);
-                if self.is_plain_tab(i) { w.min(name_cap) } else { w }
+                let guide = self.tree.get(&i).map_or(0, |g| str_width(&g.branch()));
+                guide + if self.is_plain_tab(i) { w.min(name_cap) } else { w }
             })
             .max()
             .unwrap_or(0)
@@ -2430,9 +2565,18 @@ impl App {
         (folder_project(&tab.dir), false)
     }
 
-    /// Lines a sidebar row takes: two for a tab or task, one for a heading.
-    fn side_height(item: &Item) -> usize {
-        if selectable(item) { SIDE_ROW_LINES } else { 1 }
+    /// Lines a sidebar row takes: two for a tab or task, one for a heading
+    /// or for a nested row with nothing to say under its name (see
+    /// `side_detail`).
+    fn side_height(&self, item: &Item) -> usize {
+        if selectable(item) && self.side_detail(*item) { SIDE_ROW_LINES } else { 1 }
+    }
+
+    /// Whether a sidebar row has a second line: a project the row over it
+    /// doesn't already name, a status message, or uncommitted files.
+    fn side_detail(&self, item: Item) -> bool {
+        let t = self.flat(item);
+        !t.msg.is_empty() || t.dirty > 0 || !(self.project_of(item).0.is_empty() || self.same_project_as_parent(item))
     }
 
     /// Inbox's list as the sidebar: each tab or task on two lines (see
@@ -2441,7 +2585,7 @@ impl App {
     /// fits, the Snoozed group sits at the bottom, the free space above it.
     fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
         let h = area.height as usize;
-        let heights: Vec<usize> = self.rows.iter().map(Self::side_height).collect();
+        let heights: Vec<usize> = self.rows.iter().map(|r| self.side_height(r)).collect();
         if let Some(sel) = self.selected {
             let header_above = sel > 0 && !selectable(&self.rows[sel - 1]);
             let first = if header_above { sel - 1 } else { sel };
@@ -2502,10 +2646,18 @@ impl App {
             (_, since) if since > 0 => format!("{} ", age(self.now.saturating_sub(since))),
             _ => String::new(),
         };
-        let room = width.saturating_sub(3 + str_width(&when) + 1);
+        // A row an agent spawned hangs off its spawner's (see `nest`).
+        let guide = self.tree.get(&item);
+        let (branch, stem) = guide.map(|g| (g.branch(), g.stem())).unwrap_or_default();
+        let guide_style = Style::new().fg(p.muted).bg(bg);
+        let room = width.saturating_sub(3 + str_width(&branch) + str_width(&when) + 1);
         let name_style = Style::new().fg(p.text).bg(bg);
         let name_style = if selected { name_style.add_modifier(Modifier::BOLD) } else { name_style };
-        let mut left = vec![edge.clone(), Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg))];
+        let mut left = vec![
+            edge.clone(),
+            Span::styled(branch, guide_style),
+            Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)),
+        ];
         left.extend(highlight(t.name, &hits.name, room, false, name_style, hl));
         let line = Rect { height: 1, ..r };
         f.render_widget(Line::from(left), line);
@@ -2518,14 +2670,14 @@ impl App {
         // tab's folder.
         let line = Rect { y: r.y + 1, height: 1, ..r };
         let dirty = if t.dirty > 0 { format!("✎{} ", t.dirty) } else { String::new() };
-        let mut room = width.saturating_sub(3 + str_width(&dirty) + 1);
-        let mut left = vec![edge, Span::styled("  ", Style::new().bg(bg))];
+        let mut room = width.saturating_sub(3 + str_width(&stem) + str_width(&dirty) + 1);
+        let mut left = vec![edge, Span::styled(stem, guide_style), Span::styled("  ", Style::new().bg(bg))];
         let push = |left: &mut Vec<Span<'static>>, spans: Vec<Span<'static>>, room: &mut usize| {
             *room = room.saturating_sub(spans.iter().map(|s| str_width(&s.content)).sum());
             left.extend(spans);
         };
         let (project, own) = self.project_of(item);
-        if !project.is_empty() {
+        if !project.is_empty() && !self.same_project_as_parent(item) {
             let style = Style::new().fg(p.iris).bg(bg);
             let hits = if own { hits.second.as_slice() } else { &[] };
             push(&mut left, highlight(&project, hits, room, false, style, hl), &mut room);
@@ -2573,18 +2725,24 @@ impl App {
         };
         let hl = Style::new().fg(p.rose).bg(bg).add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         let hits = self.hits.get(&item).cloned().unwrap_or_default();
-        let mut column = |text: &str, hits: &[usize], w: usize, style: Style| {
+        let column = |left: &mut Vec<Span<'static>>, text: &str, hits: &[usize], w: usize, style: Style| {
             let spans = highlight(text, hits, w, false, style, hl);
             let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
             left.extend(spans);
             left.push(Span::styled(" ".repeat(w.saturating_sub(used) + 2), Style::new().bg(bg)));
         };
-        column(t.project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
-        column(t.name, &hits.name, name_w, name_style);
+        let project = if self.same_project_as_parent(item) { "" } else { t.project };
+        column(&mut left, project, &hits.second, proj_w, Style::new().fg(p.subtle).bg(bg));
+        // A row an agent spawned hangs off its spawner's (see `nest`), its
+        // guide in the name column.
+        let branch = self.tree.get(&item).map(Guide::branch).unwrap_or_default();
+        let branch_w = str_width(&branch);
+        left.push(Span::styled(branch, Style::new().fg(p.muted).bg(bg)));
+        column(&mut left, t.name, &hits.name, name_w.saturating_sub(branch_w), name_style);
         if let Item::Tab(tab) = item
             && plain
         {
-            let used = 3 + proj_w + 2 + str_width(t.name).min(name_w) + 2;
+            let used = 3 + proj_w + 2 + branch_w + str_width(t.name).min(name_w.saturating_sub(branch_w)) + 2;
             let right = self.tab_right(tab, &hits.dir, bg, selected, (r.width as usize).saturating_sub(used));
             f.render_widget(Line::from(left), r);
             f.render_widget(Line::from(right).right_aligned(), r);
@@ -3233,6 +3391,77 @@ mod tests {
             Item::Status(""), Item::Task(3), Item::Task(4),
         ]);
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
+    }
+
+    fn spawned() -> App {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.now = 1000;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\tlead\tidle\tlead\n",
+                "T\tkid\tblocked\tkid\n",
+                "T\tgrand\tworking\tgrand\n",
+                "T\tsib\tdone\tsib\n",
+                "T\tnap\tworking\tnap\n",
+                "T\tlost\terror\tlost\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"kid", "name":"kid", "parent_window":"lead"},
+                {"session_id":"s", "window_id":"grand", "name":"grand", "parent_window":"kid"},
+                {"session_id":"s", "window_id":"sib", "name":"sib", "parent_window":"lead"},
+                {"session_id":"s", "window_id":"nap", "name":"nap", "parent_window":"lead", "snoozed_until":5000},
+                {"session_id":"s", "window_id":"lost", "name":"lost", "parent_window":"gone"}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        app
+    }
+
+    #[test]
+    fn spawned_agents_nest_under_their_spawner_most_urgent_first() {
+        let app = spawned();
+        // The kid (blocked) and sib (done) leave their groups for the
+        // lead's; a spawner that's gone leaves `lost` where it was, and the
+        // snoozed `nap` stays snoozed.
+        assert_eq!(app.rows, vec![
+            Item::Status("error"), Item::Tab(5),
+            Item::Status("idle"), Item::Tab(0), Item::Tab(1), Item::Tab(2), Item::Tab(3),
+            Item::Status("snoozed"), Item::Tab(4),
+        ]);
+        let branch = |t| app.tree.get(&Item::Tab(t)).map(Guide::branch);
+        assert_eq!(branch(0), None);
+        assert_eq!(branch(1).as_deref(), Some("├ "));
+        assert_eq!(branch(2).as_deref(), Some("│ └ "));
+        assert_eq!(branch(3).as_deref(), Some("└ "));
+        assert_eq!(branch(4), None);
+        // The children are in the lead's project, which its row names.
+        assert!(app.same_project_as_parent(Item::Tab(1)) && app.same_project_as_parent(Item::Tab(2)));
+        assert!(!app.same_project_as_parent(Item::Tab(0)) && !app.same_project_as_parent(Item::Tab(4)));
+    }
+
+    #[test]
+    fn spawned_agents_stay_in_their_groups_when_the_spawner_is_filtered_out() {
+        let mut app = spawned();
+        app.query = "kid".into();
+        app.refilter();
+        assert_eq!(app.rows, vec![Item::Status("blocked"), Item::Tab(1)]);
+        assert!(app.tree.is_empty());
+    }
+
+    #[test]
+    fn a_loop_of_spawners_nests_nothing() {
+        let mut app = spawned();
+        app.deliver(|app| {
+            app.tasks.push(parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"lead", "name":"lead", "parent_window":"grand"}
+            ]).to_string()).unwrap().remove(0));
+        });
+        assert!(app.rows.iter().filter(|r| selectable(r)).count() == 6);
+        let mut seen = HashSet::new();
+        assert!(app.rows.iter().all(|r| !selectable(r) || seen.insert(*r)));
     }
 
     #[test]

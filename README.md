@@ -139,7 +139,10 @@ are refused.
 | `message_task` | Type text into the agent's tab (not while it's blocked) |
 | `stop_task`    | Archive (refused with uncommitted changes)              |
 
-Tasks are named `PROJECT/NAME`. To add it to Claude Code on another host:
+Tasks are named `PROJECT/NAME`. An agent that passes its own `REX_SESSION`
+and `REX_BLOCK` to `spawn_task` (`parent_session`, `parent_block`) gets the
+new task recorded as its child (`parent_window` in the registry), and the
+tab picker's Inbox shows it nested under the agent's row. To add it to Claude Code on another host:
 
 ```bash
 claude mcp add --transport http switchyard \

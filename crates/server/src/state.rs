@@ -217,6 +217,17 @@ impl State {
         }
     }
 
+    /// The watched Rex servers, the one whose rows list session `session`
+    /// first: where to look for a block in it.
+    pub fn hosts_for_session(&self, session: &str) -> Vec<String> {
+        let has = |h: &Host| {
+            h.rows.text.lines().any(|l| l.starts_with("S\t") && l.split('\t').nth(3) == Some(session))
+        };
+        let (mut first, rest): (Vec<&Host>, Vec<&Host>) = self.hosts.iter().partition(|h| has(h));
+        first.extend(rest);
+        first.into_iter().map(|h| h.name.clone()).collect()
+    }
+
     /// The snapshot as clients get it.
     pub fn snapshot(&self, now: Instant) -> Value {
         let age = |at: Option<Instant>| at.map(|at| now.saturating_duration_since(at).as_millis() as u64);
@@ -449,6 +460,16 @@ mod tests {
         assert_eq!(snap["hosts"][1]["error"], "miller: connection lost");
         assert!(snap["hosts"][1]["rows"].as_str().unwrap().starts_with("S\t"));
         assert!(snap["hosts"][0]["age_ms"].is_null());
+    }
+
+    #[test]
+    fn hosts_for_session_puts_the_one_listing_it_first() {
+        let mut s = State::default();
+        let now = Instant::now();
+        s.set_hosts(&["local".into(), "miller".into()]);
+        s.set_rows("miller", split_rows("S\tmiller\tmiller\tsession:x\tproj\nT\twindow:a\tidle\tname\t~\n"), now);
+        assert_eq!(s.hosts_for_session("session:x"), ["miller", "local"]);
+        assert_eq!(s.hosts_for_session("session:y"), ["local", "miller"]);
     }
 
     #[test]

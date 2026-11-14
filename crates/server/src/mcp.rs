@@ -392,6 +392,8 @@ fn tools() -> Value {
                     "prompt": { "type": "string", "description": "The agent's first message." },
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
+                    "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
+                    "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set." },
                 },
                 "required": ["project", "name", "prompt"],
             },
@@ -571,6 +573,26 @@ fn find_task(wanted: &str, open: &[Value]) -> Result<Value, String> {
     }
 }
 
+/// The window holding `block`, from the first of `hosts` (Rex server
+/// names, `local` for this one) that has it.
+fn block_window(hosts: &[String], block: &str) -> Option<String> {
+    hosts.iter().find_map(|host| {
+        let mut cmd = std::process::Command::new("rex");
+        if host != "local" {
+            cmd.args(["-S", host]);
+        }
+        let out = cmd
+            .args(["--timeout", "3s", "block", "inspect", block, "--json"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())?;
+        let info: Value = serde_json::from_slice(&out.stdout).ok()?;
+        info["block"]["window_id"].as_str().filter(|w| !w.is_empty()).map(String::from)
+    })
+}
+
 fn normalise(name: &str) -> String {
     name.chars().filter_map(name_char).collect()
 }
@@ -590,6 +612,16 @@ fn spawn(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
         .iter()
         .find(|p| p.name == project || p.path == project)
         .ok_or_else(|| format!("{project} is not a catalog project"))?;
+    // The spawner's tab, so the picker can nest the task under it. Not
+    // finding it only costs the nesting.
+    let parent = opt_arg(args, "parent_block").and_then(|block| {
+        let hosts = endpoint.shared.lock().hosts_for_session(opt_arg(args, "parent_session").unwrap_or(""));
+        let window = block_window(&hosts, block);
+        if window.is_none() {
+            crate::log(&format!("mcp: spawn_task: no Rex server has block {block}"));
+        }
+        window
+    });
     let (host, session, window) = launch_text(
         host,
         &found.path,
@@ -597,6 +629,7 @@ fn spawn(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
         harness,
         prompt,
         opt_arg(args, "work_item"),
+        parent.as_deref(),
     )?;
     let _ = endpoint.refresh.send("mcp");
     // The registry has it now: name it as list_tasks will.

@@ -291,6 +291,9 @@ pub struct Task {
     pub snoozed_until: u64,
     /// The listed tab it runs in, if open and listed.
     pub tab: Option<usize>,
+    /// The Rex window of the agent that spawned it (`parent_window`), or
+    /// empty: Inbox nests it under that tab.
+    pub parent_window: String,
 }
 
 impl Task {
@@ -369,6 +372,7 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             pinned: t["pinned"].as_bool().unwrap_or(false),
             snoozed_until: t["snoozed_until"].as_u64().unwrap_or(0),
             tab: None,
+            parent_window: s(t, "parent_window"),
         })
         .collect())
 }
