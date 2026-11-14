@@ -10,9 +10,14 @@
   }: let
     systems = ["aarch64-darwin" "aarch64-linux" "x86_64-linux"];
     forAllSystems = nixpkgs.lib.genAttrs systems;
+    # The build's version: the source commit's date (UTC) and short hash,
+    # "-dirty" for uncommitted changes. `switchyard --version` prints it.
+    d = self.lastModifiedDate or "19700101000000";
+    at = from: len: builtins.substring from len d;
+    buildVersion = "${at 0 4}-${at 4 2}-${at 6 2} ${at 8 2}:${at 10 2} UTC (${self.shortRev or self.dirtyShortRev or "unknown"})";
   in {
     packages = forAllSystems (system: let
-      switchyard = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix {};
+      switchyard = nixpkgs.legacyPackages.${system}.callPackage ./nix/package.nix {inherit buildVersion;};
     in {
       default = switchyard;
       inherit switchyard;

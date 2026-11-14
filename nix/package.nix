@@ -22,6 +22,8 @@
   makeWrapper,
   rustPlatform,
   zoxide,
+  # The flake passes the source commit's date and hash; see flake.nix.
+  buildVersion ? null,
 }:
 rustPlatform.buildRustPackage {
   pname = "switchyard";
@@ -38,6 +40,8 @@ rustPlatform.buildRustPackage {
       && (!lib.hasPrefix "lua" rel || builtins.elem rel ["lua" "lua/switchyard" "lua/switchyard/host_rows.lua"]);
   };
   cargoLock.lockFile = ../Cargo.lock;
+  # Compiled in for `switchyard --version`.
+  env = lib.optionalAttrs (buildVersion != null) {SWITCHYARD_BUILD_VERSION = buildVersion;};
   nativeBuildInputs = [makeWrapper];
   # core's launch tests make throwaway repos with git.
   nativeCheckInputs = [git];

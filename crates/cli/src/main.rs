@@ -18,6 +18,13 @@ use std::process::ExitCode;
 use switchyard_spawn::Kind;
 use switchyard_tabs::View;
 
+/// The build's version: the source commit's date and hash for Nix builds
+/// (see flake.nix), else "dev" for a local Cargo build.
+const VERSION: &str = match option_env!("SWITCHYARD_BUILD_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
+
 const USAGE: &str =
     "usage: switchyard [--view inbox|usage|archive] [--current SESSION/WINDOW] [--quick]
        switchyard new [--session]
@@ -25,6 +32,7 @@ const USAGE: &str =
        switchyard unlink REF...
        switchyard usage [--json|--local]
        switchyard server [serve|snapshot|subscribe]
+       switchyard --version
 
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
@@ -41,7 +49,8 @@ for (see switchyard link --help). usage opens the picker's Usage view;
 --json prints sanitized accounting across configured hosts, --local this
 host only. Configure usage.sessions, usage.quotas and usage.rates in the
 Home Manager settings for account labels and prices. server runs the data
-server (see switchyard server --help).";
+server (see switchyard server --help). --version prints the build's
+source commit date and hash.";
 
 const FLOAT_USAGE: &str = "usage: switchyard float new [--kind agent|session] --home LABEL FOLDERS
 
@@ -130,6 +139,10 @@ fn main() -> ExitCode {
     match a.as_slice() {
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
+        ["-V" | "--version" | "version"] => {
+            println!("switchyard {VERSION}");
             ExitCode::SUCCESS
         }
         [] | ["--view" | "--current" | "--quick", ..] => picker(&a),
