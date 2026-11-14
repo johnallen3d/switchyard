@@ -165,7 +165,9 @@ fn attention(q: &Quota, now: u64) -> bool {
 
 /// Each card is a small quota table. RESET IN applies to every window, so the
 /// values need no repeated prose. Unknown and expired resets are never zero.
-fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize) -> Vec<Line<'static>> {
+/// Blank body rows stretch the card to at least `height` lines, so cards
+/// sharing a grid row end on the same line.
+fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize, height: usize) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(4).max(1);
     let state = if stale(q, now) {
         "STALE".into()
@@ -298,6 +300,13 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize) -> Vec<Line<'stati
         spans.push(Span::styled(" ".repeat(padding + 1), fill));
         spans.push(span("│", border));
         rows.push(Line::from(spans));
+    }
+    while rows.len() + 1 < height {
+        rows.push(Line::from(vec![
+            span("│", border),
+            Span::styled(" ".repeat(inner + 2), fill),
+            span("│", border),
+        ]));
     }
     rows.push(Line::from(span(
         format!("╰{}╯", "─".repeat(width.saturating_sub(2))),
@@ -738,11 +747,18 @@ impl Usage {
             lines.push(profile_rule(&name, "", p, width));
             lines.push(Line::default());
             for chunk in group.chunks(columns) {
+                // Every row needs content in every column: the final wrap
+                // pass strips leading padding, which would slide a taller
+                // neighbour's border under a shorter card.
+                let height = chunk
+                    .iter()
+                    .map(|q| quota_card(q, p, now, card_width, 0).len())
+                    .max()
+                    .unwrap_or(0);
                 let cards: Vec<_> = chunk
                     .iter()
-                    .map(|q| quota_card(q, p, now, card_width))
+                    .map(|q| quota_card(q, p, now, card_width, height))
                     .collect();
-                let height = cards.iter().map(Vec::len).max().unwrap_or(0);
                 for row in 0..height {
                     let mut spans = Vec::new();
                     for (column, card) in cards.iter().enumerate() {
@@ -962,6 +978,28 @@ mod tests {
                 assert!(lines.iter().any(|l| l.to_string().contains("100%")));
             }
         }
+    }
+
+    #[test]
+    fn cards_in_a_row_share_their_bottom_border() {
+        let mut short = quota("claude-code", None);
+        short.windows.clear();
+        let mut tall = quota("codex", Some(2.0));
+        tall.windows.push(tall.windows[0].clone());
+        let usage = Usage {
+            snapshot: Some(Summary {
+                fetched: 1000,
+                quotas: vec![short, tall],
+                ..Summary::default()
+            }),
+            ..Usage::default()
+        };
+        let lines = usage.lines(&Palette::load(), 1000, "", None, 100);
+        let text: Vec<_> = lines.iter().map(ToString::to_string).collect();
+        let bottoms: Vec<_> = text.iter().filter(|l| l.contains('╰')).collect();
+        assert_eq!(bottoms.len(), 1, "{text:#?}");
+        assert_eq!(bottoms[0].matches('╰').count(), 2, "{text:#?}");
+        assert!(text.iter().any(|l| l.contains("No quota windows reported")));
     }
 
     #[test]
