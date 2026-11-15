@@ -1621,6 +1621,13 @@ impl App {
         self.selected = Some(draw::step(&self.rows, at, delta, selectable));
     }
 
+    /// As `step`, but past either end of the list it wraps to the other.
+    fn wrap_step(&mut self, delta: isize) {
+        let Some(at) = self.selected else { return };
+        self.moved();
+        self.selected = Some(draw::step_wrapping(&self.rows, at, delta, selectable));
+    }
+
     /// Move to the first pick of the next group, or back to the first pick
     /// of this group (then the one before).
     fn jump_group(&mut self, forward: bool) {
@@ -2202,8 +2209,11 @@ impl App {
                 self.expanded = !self.expanded;
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
-            KeyCode::Char('p' | 'k') if ctrl => self.step(-1),
-            KeyCode::Char('n' | 'j') if ctrl => self.step(1),
+            KeyCode::Char('p') if ctrl => self.step(-1),
+            KeyCode::Char('n') if ctrl => self.step(1),
+            // ctrl-j and ctrl-k wrap past either end of the list.
+            KeyCode::Char('k') if ctrl => self.wrap_step(-1),
+            KeyCode::Char('j') if ctrl => self.wrap_step(1),
             // The archive is long and has no transcript, so ctrl-u and
             // ctrl-d page through it by half a page, as in scrollback.
             KeyCode::Char('u') if ctrl && self.view == View::Archive => {

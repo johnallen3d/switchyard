@@ -217,6 +217,27 @@ pub fn step<T>(rows: &[T], at: usize, delta: isize, selectable: impl Fn(&T) -> b
     at
 }
 
+/// Move one selectable row from `at` in a list with header rows, wrapping
+/// past either end to the first (or last) selectable row.
+#[must_use]
+pub fn step_wrapping<T>(
+    rows: &[T],
+    at: usize,
+    delta: isize,
+    selectable: impl Fn(&T) -> bool,
+) -> usize {
+    let moved = step(rows, at, delta, &selectable);
+    if moved != at {
+        return moved;
+    }
+    let end = if delta > 0 {
+        rows.iter().position(&selectable)
+    } else {
+        rows.iter().rposition(&selectable)
+    };
+    end.unwrap_or(at)
+}
+
 /// A rounded chip around `spans`, filled `bg`, sitting on `on`.
 #[must_use]
 pub fn pill(spans: Vec<Span<'static>>, bg: Color, on: Color) -> Vec<Span<'static>> {
@@ -318,4 +339,32 @@ pub fn highlight(
         spans.push(Span::styled(buf, if cur { hl } else { base }));
     }
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{step, step_wrapping};
+
+    #[test]
+    fn wrapping_step_goes_past_either_end_and_skips_headers() {
+        // Rows 0 and 3 are headers; the selectable rows are 1, 2 and 4.
+        let rows = [true, false, false, true, false];
+        let sel = |h: &bool| !*h;
+        // Plain step stops at the ends.
+        assert_eq!(step(&rows, 4, 1, sel), 4);
+        assert_eq!(step(&rows, 1, -1, sel), 1);
+        // Wrapping goes to the other end.
+        assert_eq!(step_wrapping(&rows, 4, 1, sel), 1);
+        assert_eq!(step_wrapping(&rows, 1, -1, sel), 4);
+        // Inside the list it moves as a plain step does.
+        assert_eq!(step_wrapping(&rows, 1, 1, sel), 2);
+        assert_eq!(step_wrapping(&rows, 2, -1, sel), 1);
+    }
+
+    #[test]
+    fn wrapping_step_with_one_selectable_row_stays_put() {
+        let rows = [true, false, true];
+        assert_eq!(step_wrapping(&rows, 1, 1, |h: &bool| !*h), 1);
+        assert_eq!(step_wrapping(&rows, 1, -1, |h: &bool| !*h), 1);
+    }
 }

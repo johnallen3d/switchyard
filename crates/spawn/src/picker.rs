@@ -724,6 +724,12 @@ impl App {
         self.selected = Some(draw::step(&self.rows, at, delta, selectable));
     }
 
+    /// As `step`, but past either end of the list it wraps to the other.
+    fn wrap_step(&mut self, delta: isize) {
+        let Some(at) = self.selected else { return };
+        self.selected = Some(draw::step_wrapping(&self.rows, at, delta, selectable));
+    }
+
     fn next_focus(&mut self, forward: bool) {
         // A session has no name or prompt.
         if self.kind == Kind::Session {
@@ -949,8 +955,11 @@ impl App {
             KeyCode::Char('t') if ctrl && self.kind == Kind::Agent => {
                 self.harness = (self.harness + 1) % HARNESSES.len();
             }
-            KeyCode::Char('p' | 'k') if ctrl && list_key => self.step(-1),
-            KeyCode::Char('n' | 'j') if ctrl && list_key => self.step(1),
+            KeyCode::Char('p') if ctrl && list_key => self.step(-1),
+            KeyCode::Char('n') if ctrl && list_key => self.step(1),
+            // ctrl-j and ctrl-k wrap past either end of the list.
+            KeyCode::Char('k') if ctrl && list_key => self.wrap_step(-1),
+            KeyCode::Char('j') if ctrl && list_key => self.wrap_step(1),
             _ => self.field_key(k),
         }
         true
