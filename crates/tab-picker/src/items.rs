@@ -348,8 +348,14 @@ impl Items {
         match &self.mode {
             Mode::List => {
                 let mut h = vec![("⏎", "open"), ("v", "read")];
-                h.extend(self.entry().actions().into_iter().map(action_key));
-                h.extend([("esc", "close"), ("?", "keys")]);
+                let card = matches!(self.entry().item, Some(Item::Card { .. }));
+                h.extend(self.entry().actions().into_iter().map(|a| match a {
+                    // Not to be confused with esc dismissing the float.
+                    Action::Close if card => ("x", "close card"),
+                    Action::Close => ("x", "close issue"),
+                    _ => action_key(a),
+                }));
+                h.extend([("esc", "dismiss"), ("?", "keys")]);
                 h
             }
             Mode::Comment(_) => vec![("⏎", "review"), ("esc", "back"), ("F1", "keys")],
@@ -413,13 +419,18 @@ impl Items {
             })
             .chain([
                 str_width(&title) + 4,
-                self.question().map_or(0, |q| str_width(&q) + 16),
+                self.question()
+                    .map_or(0, |q| (str_width(&q) + 4).min(MAX_WIDTH)),
                 56,
             ])
             .max()
             .unwrap_or(0);
         let width = crate::cells(want).saturating_add(2).min(area.width);
-        let height = crate::cells(self.entries.len())
+        // A confirmation's question, wrapped whole, above its keys.
+        let asked = self.question().map_or_else(Vec::new, |q| {
+            crate::preview::wrap(&q, usize::from(width.saturating_sub(4)).max(1))
+        });
+        let height = crate::cells(self.entries.len() + asked.len())
             .saturating_add(4)
             .min(area.height);
         let r = crate::centered(area, width, height);
@@ -431,7 +442,7 @@ impl Items {
             .title(Span::styled(title, Style::new().fg(p.text)));
         let inner = block.inner(r);
         f.render_widget(block, r);
-        let rows = inner.height.saturating_sub(2) as usize;
+        let rows = usize::from(inner.height).saturating_sub(2 + asked.len());
         for (i, e) in self.entries.iter().enumerate().take(rows) {
             let (short, state, acts, (about, titled)) = row_text(e);
             let selected = i == self.selected;
@@ -476,6 +487,12 @@ impl Items {
             ));
             f.render_widget(Line::from(spans), row);
         }
+        self.draw_foot(f, inner, asked, p);
+    }
+
+    /// The box's last lines: a confirmation's question, wrapped, then the
+    /// mode line.
+    fn draw_foot(&self, f: &mut Frame, inner: Rect, asked: Vec<String>, p: &Palette) {
         if inner.height < 2 {
             return;
         }
@@ -484,11 +501,28 @@ impl Items {
             height: 1,
             ..inner
         };
+        // Red only for what can't be undone.
+        let fg = match self.mode {
+            Mode::Confirm {
+                action: Action::Close,
+                ..
+            } => p.love,
+            _ => p.text,
+        };
+        let above = bottom.y.saturating_sub(crate::cells(asked.len()));
+        for (i, q) in asked.into_iter().enumerate() {
+            let y = above + crate::cells(i);
+            if y >= inner.y {
+                let row = Rect { y, ..bottom };
+                let style = Style::new().fg(fg).add_modifier(Modifier::BOLD);
+                f.render_widget(Span::styled(format!(" {q}"), style), row);
+            }
+        }
         f.render_widget(self.mode_line(p), bottom);
     }
 
     /// The box's bottom line for its mode: the list's keys, the comment
-    /// being typed, or the question Enter answers.
+    /// being typed, or a confirmation's keys.
     fn mode_line(&self, p: &Palette) -> Line<'static> {
         let key = |k: &str| {
             Span::styled(
@@ -522,12 +556,10 @@ impl Items {
                 Span::styled("▏", Style::new().fg(p.iris)),
             ]),
             Mode::Read { .. } => Line::default(),
+            // The question is drawn above, wrapped (see `draw_foot`).
             Mode::Confirm { .. } => Line::from(vec![
-                Span::styled(
-                    format!(" {} ", self.question().unwrap_or_default()),
-                    Style::new().fg(p.love).add_modifier(Modifier::BOLD),
-                ),
-                key("⏎"),
+                Span::raw(" "),
+                key("⏎ y"),
                 muted(" yes · "),
                 key("esc"),
                 muted(" no"),
@@ -541,7 +573,9 @@ impl Items {
         let width = area.width.saturating_sub(4).min(100);
         let height = area.height.saturating_sub(2);
         let r = crate::centered(area, width, height);
-        f.render_widget(Clear, r);
+        // Blank the whole pane, so nothing under it shows round the box.
+        f.render_widget(Clear, area);
+        f.render_widget(Block::new().style(Style::new().bg(p.base)), area);
         let title = format!(" {} · {} ", self.entry().name(), self.label);
         let block = Block::new()
             .borders(Borders::ALL)
@@ -837,7 +871,7 @@ mod tests {
     fn close_card_confirms_naming_the_card() {
         let mut i = items();
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close")]);
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close card")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close card 1041?");
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
@@ -863,7 +897,7 @@ mod tests {
         assert_eq!(i.hints()[2..4], [("c", "comment"), ("r", "mark ready")]);
         press(&mut i, KeyCode::Down);
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close")]);
+        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close issue")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close issue o/r#3?");
         press(&mut i, KeyCode::Esc);

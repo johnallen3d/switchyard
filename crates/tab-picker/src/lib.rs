@@ -502,7 +502,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("r", "mark a draft PR ready (asks first)"),
                 ("⏎ y", "confirm; other keys go back"),
                 ("↑↓ j k", "move"),
-                ("esc ⌃R", "close"),
+                ("esc ⌃R", "dismiss"),
             ],
         ),
         Section::new(
