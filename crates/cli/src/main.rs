@@ -5,7 +5,7 @@
 //! new-session picker, switchyard-spawn), `link` and `unlink` (link.rs),
 //! `usage` and `server` (switchyard-server).
 //!
-//! `float new`, `task` (task.rs) and `transcript --local` are plumbing for
+//! `float new`, `float feed`, `task` (task.rs) and `transcript --local` are plumbing for
 //! the Rex config's Lua, core, and other hosts, so they stay out of the
 //! top-level help.
 
@@ -43,7 +43,9 @@ is closed. ctrl-h and ctrl-l cycle the views: Inbox, Work (one
 project's open cards or issues, to start a session from), Usage, Archive.
 --current highlights that tab (cmd+i and cmd+k pass the tab they were
 pressed on). --quick is cmd+k's float: Inbox's list alone, where
-Enter jumps to the highlighted tab and quits, and Escape quits. new opens the
+Enter jumps to the highlighted tab and quits, and Escape quits. With
+--fed-by LABEL on a host other than LABEL, the quick float fetches nothing
+and LABEL feeds it and acts on its picks (see switchyard float --help). new opens the
 new-session picker: agent work by default, or a plain session with
 --session. link and unlink record the work items the current branch is
 for (see switchyard link --help). usage opens the picker's Usage view;
@@ -54,10 +56,16 @@ server (see switchyard server --help). --version prints the build's
 source commit date and hash.";
 
 const FLOAT_USAGE: &str = "usage: switchyard float new [--kind agent|session] --home LABEL FOLDERS
+       switchyard float feed SESSION BLOCK
 
-The new-session picker in the Rex config's float. It gets the config
+new is the new-session picker in the Rex config's float. It gets the config
 host's label and zoxide folders, one per line, and reports the highlighted
-row in the terminal title for the config's mode to act on.";
+row in the terminal title for the config's mode to act on.
+
+feed runs on the config host for a cmd+k quick jump float on another host
+(`switchyard --quick --fed-by LABEL` there, where LABEL is the config
+host's): it pastes the config host's tabs and tasks into the float and acts
+on the pick it reports, until the float closes.";
 
 fn usage_error(usage: &str) -> ExitCode {
     eprintln!("{usage}");
@@ -75,10 +83,10 @@ fn done(result: io::Result<()>) -> ExitCode {
 }
 
 /// The interactive pickers need a terminal.
-/// Bare: `[--view VIEW] [--current SESSION/WINDOW] [--quick]`, in any
-/// order.
+/// Bare: `[--view VIEW] [--current SESSION/WINDOW] [--quick [--fed-by
+/// LABEL]]`, in any order.
 fn picker(mut args: &[&str]) -> ExitCode {
-    let (mut view, mut current, mut quick) = (View::Inbox, None, false);
+    let (mut view, mut current, mut quick, mut fed_by) = (View::Inbox, None, false, None);
     loop {
         args = match args {
             [] => break,
@@ -97,11 +105,15 @@ fn picker(mut args: &[&str]) -> ExitCode {
                 quick = true;
                 rest
             }
+            ["--fed-by", host, rest @ ..] => {
+                fed_by = Some(*host);
+                rest
+            }
             _ => return usage_error(USAGE),
         };
     }
     if quick {
-        return interactive(|| switchyard_tabs::quick(current));
+        return interactive(|| switchyard_tabs::quick(current, fed_by));
     }
     interactive(|| switchyard_tabs::standalone(view, current))
 }
@@ -146,7 +158,7 @@ fn main() -> ExitCode {
             println!("switchyard {VERSION}");
             ExitCode::SUCCESS
         }
-        [] | ["--view" | "--current" | "--quick", ..] => picker(&a),
+        [] | ["--view" | "--current" | "--quick" | "--fed-by", ..] => picker(&a),
         ["new"] | ["new", "--agent"] => interactive(|| switchyard_spawn::standalone(Kind::Agent)),
         ["new", "--session"] => interactive(|| switchyard_spawn::standalone(Kind::Session)),
         ["link" | "unlink", ..] => link::main(&args),
@@ -168,6 +180,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         ["float", "new", rest @ ..] => float_new(rest),
+        ["float", "feed", session, block] => done(switchyard_tabs::feed_float(session, block)),
         ["float", ..] => usage_error(FLOAT_USAGE),
         ["task", rest @ ..] => task::main(rest),
         // The highlighted agent's transcript for the picker's preview, read

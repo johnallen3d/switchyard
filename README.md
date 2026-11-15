@@ -17,7 +17,8 @@ picker; close its tab like any other (cmd+w).
 
 cmd+k opens a quick jump float over the current tab: Inbox's list alone,
 searchable, with that tab highlighted. Enter jumps to the highlighted tab
-and Escape closes the float; cmd+k again closes it too.
+and Escape closes the float; cmd+k again closes it too. Over a session on
+another host, the Mac feeds the float its tabs and tasks and makes the jump.
 
 From a terminal on the Mac:
 

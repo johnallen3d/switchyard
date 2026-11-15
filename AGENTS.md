@@ -89,6 +89,8 @@ completion.
 The new-session float dispatches actions through Lua; standalone binaries,
 including the tab picker cmd+i shows in its own tab and cmd+k's quick jump
 float, act directly. Consider
-both paths when changing the new-session picker or its protocol.
+both paths when changing the new-session picker or its protocol. Away
+from the Mac, the quick float is fed by the Mac (`switchyard float feed`,
+`crates/tab-picker/src/fed.rs`), which acts on the pick it reports.
 `lua/switchyard/host_rows.lua` is embedded into Rust for the tab picker and
-switchyard-server.
+switchyard-server, and `lua/switchyard/feed_float.lua` for `float feed`.

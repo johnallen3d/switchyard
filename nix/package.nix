@@ -31,13 +31,13 @@ rustPlatform.buildRustPackage {
   src = lib.cleanSourceWith {
     src = ../.;
     # The Rex Lua ships separately (the Home Manager module), except
-    # host_rows.lua, which switchyard builds in.
+    # host_rows.lua and feed_float.lua, which switchyard builds in.
     filter = path: type: let
       rel = lib.removePrefix "${toString ../.}/" (toString path);
     in
       (lib.cleanSourceFilter path type)
       && !(builtins.elem (baseNameOf path) ["target" "nix" "flake.nix" "flake.lock" "README.md"])
-      && (!lib.hasPrefix "lua" rel || builtins.elem rel ["lua" "lua/switchyard" "lua/switchyard/host_rows.lua"]);
+      && (!lib.hasPrefix "lua" rel || builtins.elem rel ["lua" "lua/switchyard" "lua/switchyard/host_rows.lua" "lua/switchyard/feed_float.lua"]);
   };
   cargoLock.lockFile = ../Cargo.lock;
   # Compiled in for `switchyard --version`.

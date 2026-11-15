@@ -1,9 +1,13 @@
 -- cmd+k: the quick jump float, `switchyard --quick` over the focused tab:
 -- Inbox's list alone, with the tab cmd+k was pressed on highlighted. Enter
 -- shows the highlighted tab and Escape closes it; either way the picker
--- quits, which closes the float. It acts on its own, so it needs no key
--- mode, and it runs on the focused session's host (tabs only away from the
--- Mac, where the task registry is). cmd+k over it closes it.
+-- quits, which closes the float. It needs no key mode, and it runs on the
+-- focused session's host. On the Mac it fetches and acts on its own. Only
+-- the Mac knows every Rex server and has the task registry, so elsewhere it
+-- runs with --fed-by naming the Mac and fetches nothing: a detached
+-- `switchyard float feed` here pastes the Mac's tabs and tasks into it and
+-- acts on the pick it reports (see ../../crates/tab-picker/src/fed.rs),
+-- logging to quick-jump.log. cmd+k over it closes it.
 --
 -- cmd+i: show the tab picker's own tab, Inbox, the bare `switchyard` picker
 -- (see ../../crates/tab-picker/src/standalone.rs) in the Mac's "agents"
@@ -163,12 +167,13 @@ rex.action{
       local view = rex.session.view{ session_id = ctx.session_id }
       window = view and view.active_window_id
     end
-    local command = util.float_command("switchyard", "--quick")
+    local host = (rex.exec({ "hostname", "-s" }).stdout or ""):gsub("%s+$", "")
+    local command = util.float_command("switchyard", "--quick", "--fed-by", host)
     if window ~= nil and window ~= "" then
       command[#command + 1] = "--current"
       command[#command + 1] = ctx.session_id .. "/" .. window
     end
-    local _, err = rex.session.new_layer{
+    local layer, err = rex.session.new_layer{
       session_id = ctx.session_id,
       bounds     = { 0.15, 0.1, 0.7, 0.75 },
       focus      = true,
@@ -178,7 +183,15 @@ rex.action{
         options = { command = command },
       },
     }
-    if err ~= nil then error(err, 0) end
+    if layer == nil then error(err, 0) end
+    -- The feed finds the float's host, and ends at once when it is this one.
+    local block_id = (layer.block_ids or {})[1]
+    if block_id == nil then error("new float has no block", 0) end
+    local job, job_err = rex.exec.start({
+      "sh", "-c", 'umask 077; log="${XDG_STATE_HOME:-$HOME/.local/state}/rex/quick-jump.log"; mkdir -p "${log%/*}" || exit; exec "$@" >> "$log" 2>&1',
+      "sh", "switchyard", "float", "feed", ctx.session_id, block_id,
+    }, { detach = true, env = util.cli_env() })
+    if job == nil then error(job_err, 0) end
   end,
 }
 

@@ -94,6 +94,7 @@
 //! showing its outcome. No key quits it: it's a tab, closed like any
 //! other (cmd+w).
 
+mod fed;
 mod help;
 mod items;
 mod model;
@@ -199,6 +200,10 @@ const SECTIONS: [&str; 10] = [
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
 const PENDING_TTL: Duration = Duration::from_secs(15);
+
+/// How long a fed quick float waits for the config host to act on its pick
+/// (see fed.rs) before saying it didn't.
+const FED_ANSWER: Duration = Duration::from_secs(5);
 
 /// The label cmd+i gives the picker's own tab (lua/switchyard/tab-picker.lua).
 const PICKER_TAB: &str = "switchyard";
@@ -684,6 +689,13 @@ struct App {
     /// The cmd+k quick jump float (`--quick`): Inbox's list alone, which
     /// Enter jumps from and Escape closes, quitting either way.
     quick: bool,
+    /// A quick float on a host other than the config host, which feeds it
+    /// and acts on its picks (see fed.rs): it fetches nothing itself.
+    fed: bool,
+    /// When a fed float reported its pick, until the config host answers.
+    fed_pick: Option<Instant>,
+    /// The config host answered a fed float's pick: quit.
+    quit: bool,
     /// Folders the Inbox leaves out (`[inbox] exclude`), resolved.
     excluded: Vec<std::path::PathBuf>,
     /// The same folders as written, for tabs on other hosts.
@@ -748,6 +760,9 @@ impl App {
             expanded: false,
             sidebar: false,
             quick: false,
+            fed: false,
+            fed_pick: None,
+            quit: false,
         }
     }
 
@@ -799,6 +814,13 @@ impl App {
             "usage-error" => self.usage.error = Some(body.trim().to_string()),
             "preview" => self.preview = preview::parse(body).or(self.preview.take()),
             "current" => self.set_current(body),
+            // A fed float's pick: done, or why not (see fed.rs).
+            "quit" if self.fed => self.quit = true,
+            "note" if self.fed => {
+                self.fed_pick = None;
+                protocol::clear_title();
+                self.note = Some((body.trim().to_string(), true));
+            }
             _ => {}
         }
     }
@@ -4800,6 +4822,7 @@ impl App {
         match k.code {
             KeyCode::Esc => return true,
             KeyCode::Char('c' | 'g') if ctrl => return true,
+            KeyCode::Enter if self.fed => self.report_pick(),
             KeyCode::Enter => {
                 let Some(pick) = standalone::parse_pick(&self.pick()) else {
                     return false;
@@ -4841,6 +4864,29 @@ impl App {
         false
     }
 
+    /// A fed float's Enter: report the pick in the title for the config
+    /// host to act on (see fed.rs), which answers with `quit` or `note`.
+    fn report_pick(&mut self) {
+        use std::io::Write;
+        let pick = self.pick();
+        if pick.is_empty() || self.fed_pick.is_some() {
+            return;
+        }
+        let mut out = io::stdout();
+        let _ = write!(out, "\x1b]2;{}:{pick}\x07", fed::PICK_TITLE).and_then(|()| out.flush());
+        self.fed_pick = Some(Instant::now());
+        self.note = Some((format!("Jumping to {}…", self.selected_label()), false));
+    }
+
+    /// A fed float's pick the config host hasn't answered in time.
+    fn check_fed_pick(&mut self) {
+        if self.fed_pick.is_some_and(|t| t.elapsed() > FED_ANSWER) {
+            self.fed_pick = None;
+            protocol::clear_title();
+            self.note = Some(("The Mac didn't answer the jump".into(), true));
+        }
+    }
+
     /// The highlighted row's name for an outcome: the task, or the tab.
     fn selected_label(&self) -> String {
         match self.selected_item() {
@@ -4876,6 +4922,10 @@ fn folder_project(dir: &str) -> String {
 
 fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
     loop {
+        if app.quit {
+            return Ok(());
+        }
+        app.check_fed_pick();
         app.take_fetched();
         app.take_archived();
         app.take_work();
@@ -4933,7 +4983,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             // cmd+k's `current`, and John's own pastes, for the reply box
             // or a work item comment.
             Event::Paste(text)
-                if app.reply.is_some()
+                if app.fed && protocol::data(&text).is_some()
+                    || app.reply.is_some()
                     || app
                         .items
                         .as_ref()
@@ -4954,24 +5005,38 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
 ///
 /// Returns an error if the terminal cannot be drawn to or read from.
 pub fn standalone(view: View, current: Option<&str>) -> io::Result<()> {
-    start(view, current, false)
+    start(view, current, false, false)
 }
 
 /// The cmd+k quick jump float (see lua/switchyard/tab-picker.lua): Inbox's
 /// list alone over the current tab, `current` highlighted. Enter shows the
 /// highlighted tab and quits, closing the float; Escape just quits.
+/// `fed_by` names the config host: on any other host, it feeds the float
+/// and acts on its picks (see fed.rs).
 ///
 /// # Errors
 ///
 /// Returns an error if the terminal cannot be drawn to or read from.
-pub fn quick(current: Option<&str>) -> io::Result<()> {
-    start(View::Inbox, current, true)
+pub fn quick(current: Option<&str>, fed_by: Option<&str>) -> io::Result<()> {
+    let fed = fed_by.is_some_and(|h| h != switchyard_core::rex::local_label());
+    start(View::Inbox, current, true, fed)
 }
 
-fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
+/// Feed a cmd+k quick jump float on another host from this, the config
+/// host, and act on its picks, until it closes (see fed.rs).
+///
+/// # Errors
+///
+/// Fails when rex can't run or the float can't be found.
+pub fn feed_float(session: &str, block: &str) -> io::Result<()> {
+    fed::feed(session, block)
+}
+
+fn start(view: View, current: Option<&str>, quick: bool, fed: bool) -> io::Result<()> {
     standalone::detach_env();
     let mut app = App::new((String::new(), String::new()), view);
     app.quick = quick;
+    app.fed = fed;
     app.excluded_raw = switchyard_core::config::read()
         .map(|c| c.inbox.exclude)
         .unwrap_or_default();
@@ -4982,7 +5047,9 @@ fn start(view: View, current: Option<&str>, quick: bool) -> io::Result<()> {
     if view == View::Work {
         app.work.open(None);
     }
-    app.start_feed();
+    if !fed {
+        app.start_feed();
+    }
     picker(app)
 }
 
