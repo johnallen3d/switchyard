@@ -5,9 +5,10 @@
 //! from macOS 27; its license must have been accepted once with
 //! `sudo fm license`). It runs where `launch` does, the config host (the
 //! Mac). No other model is tried: when `fm` is missing, fails, is slow or
-//! answers with something unusable, a work item's title becomes the name as
-//! it is (slugged); without a title there is no name and the work must be
-//! named by hand.
+//! answers with something unusable, a work item's title, or else the
+//! prompt's first words, becomes the name as it is (slugged). The picker
+//! has already closed by then, so a launch never fails for want of a name
+//! unless the text has no usable characters at all.
 
 use std::process::Command;
 use std::time::Duration;
@@ -17,8 +18,9 @@ use serde_json::Value;
 use crate::links::{Tracker, bounded_output, gh_title, parse_ref};
 use crate::naming::{name_char, name_problem};
 
-/// How long one `fm` call may take; a warm call takes under a second.
-const FM_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long one `fm` call may take; a warm call can take 4 seconds, and a
+/// cold one longer.
+const FM_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long a work item's title lookup may take.
 const TITLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Prompt characters the model sees; its context is a few thousand tokens.
@@ -53,7 +55,7 @@ const SCHEMA: &str = r#"{
 
 /// A name for work that has none: from `item`'s title when it can be
 /// looked up (the model's name, or the title itself slugged), otherwise
-/// from `prompt`. None when neither gives one.
+/// from `prompt` (likewise). None when neither has usable characters.
 #[must_use]
 pub fn name_work(
     profile: &str,
@@ -66,7 +68,7 @@ pub fn name_work(
         .or_else(|| {
             Some(prompt.trim())
                 .filter(|p| !p.is_empty())
-                .and_then(suggest)
+                .and_then(|p| suggest(p).or_else(|| prompt_name(p)))
         })
 }
 
@@ -142,6 +144,12 @@ fn suggest(text: &str) -> Option<String> {
 /// A work item's title as a feature name, for when the model can't name it.
 fn title_name(title: &str) -> Option<String> {
     Some(slug(title)).filter(|s| !s.is_empty() && name_problem(s).is_none())
+}
+
+/// A prompt's first words as a feature name, for when the model can't
+/// name it. Line breaks separate words, rather than joining them.
+fn prompt_name(prompt: &str) -> Option<String> {
+    title_name(&prompt.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// The work name in `fm`'s JSON answer, cleaned up: a known prefix
@@ -243,6 +251,17 @@ mod tests {
             Some("archive-crashes-while-a-check-runs")
         );
         assert_eq!(title_name("!!!"), None);
+    }
+
+    #[test]
+    fn prompts_name_work_the_model_cannot() {
+        assert_eq!(
+            prompt_name("when i archive a session the item stays in the list\nwhile it works")
+                .as_deref(),
+            Some("when-i-archive-a-session-the-item-stays")
+        );
+        assert_eq!(prompt_name("fix\nthis").as_deref(), Some("fix-this"));
+        assert_eq!(prompt_name("日本語"), None);
     }
 
     #[test]

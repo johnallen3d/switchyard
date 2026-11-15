@@ -6,7 +6,7 @@ use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::images::carry;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{HARNESSES, branch_and_slug, name_problem};
-use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
+use crate::prompts::{PROMPT_DIR, discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, host_home, local_label, log, now, rex_json, sh_quote};
 use crate::sessions::new_session_id;
 use crate::tasks::record_task;
@@ -121,7 +121,8 @@ fn work_item_problem(item: &str) -> Option<&'static str> {
 /// resumes that agent session with its recorded profile instead of starting
 /// a new one, and `host` is used as is (never `auto`: the session lives there).
 /// An empty `name` is named here (see `autoname`), from the work item or the
-/// prompt; with neither, or when naming fails, the launch fails.
+/// prompt; with neither, the launch fails. A failure after the prompt was
+/// read says where its file is kept.
 ///
 /// # Errors
 ///
@@ -136,15 +137,33 @@ pub fn launch(
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
+    // Fetch the prompt first: without it the agent would start on nothing.
+    let typed = prompt_ref.map(fetch_prompt).transpose()?;
     launch_with(
         host,
         path,
         name,
         harness,
-        Prompt::Ref(prompt_ref),
+        Prompt::Ref(typed.as_deref().unwrap_or_default(), prompt_ref),
         work_item,
         resume,
         None,
+    )
+    .map_err(|e| match prompt_ref {
+        Some(r) if typed.as_deref().is_some_and(|t| !t.trim().is_empty()) => {
+            format!("{e}\n{}", kept_prompt(r))
+        }
+        _ => e,
+    })
+}
+
+/// Where a failed launch left the prompt file `prompt_ref` names, so the
+/// text typed into a picker that has since closed isn't lost.
+fn kept_prompt(prompt_ref: &str) -> String {
+    let (label, id) = parse_prompt_ref(prompt_ref).unwrap_or((prompt_ref, ""));
+    format!(
+        "Your prompt is kept for a day on {label} at \
+         ~/.local/state/{PROMPT_DIR}/{id}"
     )
 }
 
@@ -181,9 +200,9 @@ pub fn launch_text(
 /// Where a launch's prompt comes from.
 #[derive(Clone, Copy)]
 enum Prompt<'a> {
-    /// A prompt file (see `prompts`), or none; the file is removed once the
-    /// tab holds it.
-    Ref(Option<&'a str>),
+    /// A prompt file's text (see `prompts`) and its reference, or none; the
+    /// file is removed once the tab holds it.
+    Ref(&'a str, Option<&'a str>),
     Text(&'a str),
 }
 
@@ -200,9 +219,8 @@ fn launch_with(
 ) -> Result<(String, String, String), String> {
     let project = launch_project(host, path, resume)?;
     let work_item = check_request(name, harness, work_item, resume.is_some())?;
-    // Fetch the prompt first: without it the agent would start on nothing.
     let (typed, prompt_ref) = match prompt {
-        Prompt::Ref(r) => (r.map(fetch_prompt).transpose()?.unwrap_or_default(), r),
+        Prompt::Ref(text, r) => (text.to_string(), r),
         Prompt::Text(text) => (text.to_string(), None),
     };
     if name.is_empty() && typed.trim().is_empty() && work_item.is_none() {
@@ -350,8 +368,8 @@ fn task_name(
         return Ok(name.to_string());
     }
     let named = name_work(&project.profile, work_item, tracker, typed).ok_or(
-        "couldn't name the work: no work item title could be looked up, and macOS's fm model \
-         is unavailable or gave no usable name for the prompt; name it yourself",
+        "couldn't name the work: neither its work item's title nor its prompt has letters or \
+         digits to name it from; name it yourself",
     )?;
     log(&format!(
         "named {}/{named} from its {}",
