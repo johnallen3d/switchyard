@@ -111,8 +111,9 @@ use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
 use std::time::{Duration, Instant};
 
 use model::{
-    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, in_folders,
-    in_raw_folders, link, now, parse_rows, parse_tasks, resolve_folders, urgency, work_dir,
+    Link, Session, State, Tab, Task, Tone, age, badges, chooser_links, failed_hosts, home_repo,
+    in_folders, in_raw_folders, link, now, parse_rows, parse_tasks, resolve_folders, urgency,
+    work_dir,
 };
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
@@ -2372,7 +2373,7 @@ impl App {
         ])
         .areas(area);
         let lines: Vec<Line> = titled(t.links)
-            .map(|l| self.title_line(l, titles_area.width as usize))
+            .map(|l| self.title_line(l, home_repo(t.links), titles_area.width as usize))
             .collect();
         f.render_widget(Paragraph::new(lines), titles_area);
         let plain = self.is_plain_tab(item);
@@ -2424,9 +2425,9 @@ impl App {
     }
 
     /// A work item's ref and title, clipped to `width`, for the headers.
-    fn title_line(&self, l: &Link, width: usize) -> Line<'static> {
+    fn title_line(&self, l: &Link, home: Option<&str>, width: usize) -> Line<'static> {
         let p = &self.p;
-        let short = l.short();
+        let short = l.name(home);
         let room = width.saturating_sub(str_width(&short) + 4);
         Line::from(vec![
             Span::styled(format!("  {short}  "), Style::new().fg(p.muted)),
@@ -2559,7 +2560,7 @@ impl App {
                 // Its first work item's title, where there is room.
                 let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
                 if let Some(l) = titled(t.links).next() {
-                    let short = l.short();
+                    let short = l.name(home_repo(t.links));
                     let room = (head.width as usize).saturating_sub(used + str_width(&short) + 6);
                     if room >= 12 {
                         spans.push(Span::styled(
@@ -2818,7 +2819,7 @@ impl App {
         let r = popup::list_rect(area, height);
         let inner = popup::open(f, r, popup::block(p, "Open link"));
         for (i, l) in c.links.iter().enumerate().take(inner.height as usize) {
-            let (short, state, url) = (l.short(), l.badge_state(), &l.url);
+            let (short, state, url) = (l.name(home_repo(&c.links)), l.badge_state(), &l.url);
             let selected = i == c.selected;
             let row = Rect {
                 y: inner.y + cells(i),
@@ -4411,14 +4412,16 @@ impl App {
                 });
             }
             Some(items::Outcome::Read) => {
-                let Some((link, profile)) = self
-                    .items
-                    .as_ref()
-                    .map(|i| (i.entries[i.selected].link.clone(), i.profile.clone()))
-                else {
+                let Some((link, profile, name)) = self.items.as_ref().map(|i| {
+                    (
+                        i.entries[i.selected].link.clone(),
+                        i.profile.clone(),
+                        i.selected_name(),
+                    )
+                }) else {
                     return;
                 };
-                self.busy(term, format!("Reading {}…", link.short()));
+                self.busy(term, format!("Reading {name}…"));
                 match standalone::item_thread(&link, &profile) {
                     Ok(thread) => {
                         self.note = None;
@@ -4440,11 +4443,16 @@ impl App {
                     .as_ref()
                     .map(|i| i.entries[i.selected].link.url.clone())
                     .unwrap_or_default();
-                self.busy(term, format!("{} {}…", action.verb(), item.name()));
+                let name = self
+                    .items
+                    .as_ref()
+                    .map_or_else(|| item.name(), items::Items::selected_name);
+                self.busy(term, format!("{} {name}…", action.verb()));
+                // Core names the item with its repo; say it as the float does.
                 match standalone::item_action(action, &item, &body, &profile, &url) {
                     Ok(msg) => {
                         self.items = None;
-                        self.note = Some((msg, false));
+                        self.note = Some((msg.replace(&item.name(), &name), false));
                         self.refetch();
                     }
                     Err(e) => {

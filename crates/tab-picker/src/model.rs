@@ -144,31 +144,45 @@ pub struct Link {
 }
 
 impl Link {
-    /// The short form a badge shows: `#42`, `PR #57`, `card 123`, `a1b2c3d`.
-    pub fn short(&self) -> String {
-        let number = self
-            .reference
-            .rsplit_once('#')
-            .map_or(self.reference.as_str(), |(_, n)| n);
+    /// The `owner/repo` of a GitHub issue or PR.
+    pub fn repo(&self) -> Option<&str> {
+        if self.system != "github" || !matches!(self.kind.as_str(), "issue" | "pr") {
+            return None;
+        }
+        let (repo, _) = self.reference.rsplit_once('#')?;
+        (!repo.is_empty()).then_some(repo)
+    }
+
+    /// How the picker names it everywhere: its kind and number, as `PR #57`,
+    /// `issue #42`, `card 1041` or a commit's `a1b2c3d`, with the repo
+    /// (`issue o/r#42`) only when it isn't `home`, the task's own (see
+    /// `home_repo`).
+    pub fn name(&self, home: Option<&str>) -> String {
         match self.kind.as_str() {
-            "pr" => format!("PR #{number}"),
-            "issue" if self.system == "github" => format!("#{number}"),
-            "card" => format!("card {number}"),
-            "commit" => self.reference.chars().take(7).collect(),
-            _ => self.reference.clone(),
+            "pr" | "issue" | "card" => {
+                format!("{} {}", kind_label(&self.kind, false), self.badge_ref(home))
+            }
+            _ => self.badge_ref(home),
         }
     }
 
+    /// Its name without the repo, for a busy note or search text.
+    pub fn short(&self) -> String {
+        self.name(self.repo())
+    }
+
     /// The ref a grouped badge shows after its kind's label: `#57` for
-    /// `PR #57`, `1041` for `card 1041`.
-    fn badge_ref(&self) -> String {
+    /// `PR #57`, `1041` for `card 1041`, `o/r#57` for a PR outside `home`.
+    fn badge_ref(&self, home: Option<&str>) -> String {
         let number = self
             .reference
             .rsplit_once('#')
             .map_or(self.reference.as_str(), |(_, n)| n);
         match self.kind.as_str() {
-            "pr" => format!("#{number}"),
-            "issue" if self.system == "github" => format!("#{number}"),
+            "pr" | "issue" if self.system == "github" => match self.repo() {
+                Some(repo) if home.is_some_and(|h| h != repo) => format!("{repo}#{number}"),
+                _ => format!("#{number}"),
+            },
             "card" => number.to_string(),
             "commit" => self.reference.chars().take(7).collect(),
             _ => self.reference.clone(),
@@ -247,6 +261,16 @@ fn kind_label(kind: &str, plural: bool) -> String {
     }
 }
 
+/// The repo a task's links are in, which their names leave out: its PR's
+/// (a task's PR is in its own repo), else its first GitHub item's.
+pub fn home_repo(links: &[Link]) -> Option<&str> {
+    links
+        .iter()
+        .find(|l| l.kind == "pr")
+        .and_then(Link::repo)
+        .or_else(|| links.iter().find_map(Link::repo))
+}
+
 /// A row's links as compact badges, grouped by kind with the label once:
 /// `PR #57 ✓ merged · cards 1041 1042 1043`. Wider than `budget`, groups
 /// show their first few refs and a count (`cards 1041 1042 +3`), the
@@ -260,6 +284,7 @@ pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
             None => groups.push((&l.kind, vec![l])),
         }
     }
+    let home = home_repo(links);
     let render = |shown: &[usize]| {
         let mut out: Vec<(String, Tone)> = Vec::new();
         let mut hidden = 0;
@@ -273,7 +298,7 @@ pub fn badges(links: &[Link], budget: usize) -> Vec<(String, Tone)> {
             }
             out.push((kind_label(kind, group.len() > 1), Tone::Ref));
             for l in &group[..n] {
-                out.push((format!(" {}", l.badge_ref()), Tone::Ref));
+                out.push((format!(" {}", l.badge_ref(home)), Tone::Ref));
                 if let Some((text, tone)) = l.badge_state() {
                     out.push((format!(" {text}"), tone));
                 }
@@ -691,6 +716,26 @@ mod tests {
     }
 
     #[test]
+    fn names_carry_the_kind_and_the_repo_only_outside_home() {
+        let issue = link("issue", "o/r#42", "");
+        assert_eq!(issue.name(Some("o/r")), "issue #42");
+        assert_eq!(issue.name(Some("x/y")), "issue o/r#42");
+        assert_eq!(issue.short(), "issue #42");
+        let links = [
+            link("card", "7", ""),
+            issue.clone(),
+            link("pr", "x/y#5", ""),
+        ];
+        assert_eq!(home_repo(&links), Some("x/y"), "the PR's repo");
+        assert_eq!(home_repo(&links[..2]), Some("o/r"));
+        assert_eq!(home_repo(&links[..1]), None);
+        assert_eq!(
+            text(&badges(&links, usize::MAX)),
+            "card 7 · issue o/r#42 · PR #5"
+        );
+    }
+
+    #[test]
     fn chooser_lists_prs_then_cards_then_issues_with_urls() {
         let mut links = vec![
             link("issue", "o/r#42", ""),
@@ -703,6 +748,9 @@ mod tests {
             ..link("card", "9", "")
         });
         let refs: Vec<String> = chooser_links(&links).iter().map(Link::short).collect();
-        assert_eq!(refs, ["PR #57", "card 1041", "card 1042", "#42", "abcdef0"]);
+        assert_eq!(
+            refs,
+            ["PR #57", "card 1041", "card 1042", "issue #42", "abcdef0"]
+        );
     }
 }

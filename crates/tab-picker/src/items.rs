@@ -1,5 +1,6 @@
 //! The ctrl-r work items float: the highlighted task's linked items, each
-//! with its title and what can be done to it (see core's `item_actions`).
+//! with its state, checks and title; what can be done to the highlighted
+//! one is in the footer (see core's `item_actions`).
 //! It is separate from ctrl-b's chooser, which only opens links, and opens
 //! even for a task with one link.
 //!
@@ -19,7 +20,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
 
@@ -27,15 +28,17 @@ use ratatui::widgets::{Block, Clear};
 use switchyard_core::item_actions::{Action, Item};
 use switchyard_core::item_view::{Comment, Thread};
 use switchyard_ui::Palette;
-use switchyard_ui::draw::delete_word;
+use switchyard_ui::draw::{delete_word, str_width};
 use switchyard_ui::popup;
 
-use crate::model::{Link, Tone};
+use crate::model::Link;
 
 /// A linked item, and what actions it takes (None: it can only be opened).
 pub struct Entry {
     pub link: Link,
     pub item: Option<Item>,
+    /// The task's repo, which its name leaves out (see model's `home_repo`).
+    home: Option<String>,
 }
 
 impl Entry {
@@ -43,11 +46,10 @@ impl Entry {
         self.item.as_ref().map(Item::actions).unwrap_or_default()
     }
 
-    /// How a note or confirmation names it.
+    /// How the list, a note, a confirmation and the reader name it: as
+    /// the header does (see model's `Link::name`).
     fn name(&self) -> String {
-        self.item
-            .as_ref()
-            .map_or_else(|| self.link.short(), Item::name)
+        self.link.name(self.home.as_deref())
     }
 }
 
@@ -104,6 +106,63 @@ pub enum Outcome {
     Refuse(String),
 }
 
+/// What the header doesn't say of an item, as coloured pieces: a PR's
+/// state (`open`, `draft`, `merged`, `closed`) and checks, a card's column
+/// and assignee (`✓ Done` when closed). Only what its link already holds.
+fn status(l: &Link, p: &Palette) -> Vec<(String, Color)> {
+    let mut out = Vec::new();
+    match l.kind.as_str() {
+        "pr" => {
+            let state = match l.state.as_str() {
+                "open" => Some(p.pine),
+                "draft" => Some(p.muted),
+                "merged" => Some(p.iris),
+                "closed" => Some(p.love),
+                _ => None,
+            };
+            if let Some(fg) = state {
+                out.push((l.state.clone(), fg));
+            }
+            let checks = match l.checks.as_str() {
+                "pass" => Some(("✓ checks", p.pine)),
+                "fail" => Some(("✗ checks", p.love)),
+                "pending" => Some(("● checks", p.gold)),
+                _ => None,
+            };
+            // A merged or closed PR's checks no longer matter.
+            if let Some((text, fg)) =
+                checks.filter(|_| !matches!(l.state.as_str(), "merged" | "closed"))
+            {
+                out.push((text.to_string(), fg));
+            }
+        }
+        "card" if l.state == "closed" => {
+            let column = if l.column.is_empty() {
+                "closed"
+            } else {
+                &l.column
+            };
+            out.push((format!("✓ {column}"), p.iris));
+        }
+        "card" if l.state == "open" => {
+            let column = if l.column.is_empty() {
+                "open"
+            } else {
+                &l.column
+            };
+            out.push((column.to_string(), p.foam));
+            if !l.assignee.is_empty() {
+                out.push((format!("@{}", l.assignee), p.subtle));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The widest a row's status column gets before it is clipped.
+const STATUS_MAX: usize = 22;
+
 /// The key that asks for an action, as the float names it.
 fn action_key(a: Action) -> (&'static str, &'static str) {
     match a {
@@ -122,6 +181,7 @@ impl Items {
         profile: String,
         links: Vec<Link>,
     ) -> Option<Items> {
+        let home = crate::model::home_repo(&links).map(str::to_string);
         let entries: Vec<Entry> = links
             .into_iter()
             .map(|link| {
@@ -132,7 +192,11 @@ impl Items {
                     &link.url,
                     &link.state,
                 );
-                Entry { link, item }
+                Entry {
+                    link,
+                    item,
+                    home: home.clone(),
+                }
             })
             .collect();
         (!entries.is_empty()).then_some(Items {
@@ -149,6 +213,11 @@ impl Items {
 
     fn entry(&self) -> &Entry {
         &self.entries[self.selected]
+    }
+
+    /// The highlighted item's name, for the picker's busy and result notes.
+    pub fn selected_name(&self) -> String {
+        self.entry().name()
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
@@ -383,8 +452,9 @@ impl Items {
         })
     }
 
-    /// A box over the list: one item a line with its state, the actions it
-    /// takes and its title (its URL until the tracker names it), then,
+    /// A box over the list: one item a line with its name, its state and
+    /// checks (see `status`) and its title (its URL until the tracker names
+    /// it), in columns, then,
     /// while typing a comment or confirming, the comment or the question.
     /// Its keys are in the footer (see `hints`).
     pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
@@ -393,16 +463,27 @@ impl Items {
             return;
         }
         crate::backdrop(f, p);
-        let row_text = |e: &Entry| {
-            let acts: Vec<&str> = e.actions().into_iter().map(|a| action_key(a).0).collect();
-            // Its title, which Enter's URL says nothing of; the URL only
-            // while the tracker hasn't said (see core's `titles`).
-            let about = match e.link.title.trim() {
-                "" => (e.link.url.clone(), false),
-                t => (t.to_string(), true),
-            };
-            (e.link.short(), e.link.badge_state(), acts.join(" "), about)
+        let pieces = |e: &Entry| status(&e.link, p);
+        let joined = |ps: &[(String, Color)]| {
+            ps.iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>()
+                .join(" · ")
         };
+        // Columns: name, status, then the title in what is left.
+        let name_w = self
+            .entries
+            .iter()
+            .map(|e| str_width(&e.name()))
+            .max()
+            .unwrap_or(0);
+        let status_w = self
+            .entries
+            .iter()
+            .map(|e| str_width(&joined(&pieces(e))))
+            .max()
+            .unwrap_or(0)
+            .min(STATUS_MAX);
         let title = format!("Work items · {}", self.label);
         // Less the borders and padding.
         let text_w = usize::from(popup::LIST_WIDTH.min(area.width).saturating_sub(4)).max(1);
@@ -421,7 +502,6 @@ impl Items {
         let inner = popup::open(f, r, popup::block(p, &title));
         let rows = usize::from(inner.height).saturating_sub(below);
         for (i, e) in self.entries.iter().enumerate().take(rows) {
-            let (short, state, acts, (about, titled)) = row_text(e);
             let selected = i == self.selected;
             let row = Rect {
                 y: inner.y + crate::cells(i),
@@ -436,24 +516,28 @@ impl Items {
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let mut spans = vec![Span::styled(short, style)];
-            if let Some((text, tone)) = state {
-                let fg = match tone {
-                    Tone::Merged => p.iris,
-                    Tone::Pass => p.pine,
-                    Tone::Fail => p.love,
-                    Tone::Pending => p.gold,
-                    Tone::Ref | Tone::Muted => p.muted,
-                };
-                spans.push(Span::styled(format!(" {text}"), Style::new().fg(fg).bg(bg)));
+            let name = e.name();
+            let pad = " ".repeat(name_w.saturating_sub(str_width(&name)));
+            let mut spans = vec![Span::styled(format!("{name}{pad}"), style)];
+            if status_w > 0 {
+                let mut room = status_w;
+                spans.push(Span::styled("  ", Style::new().bg(bg)));
+                for (j, (text, fg)) in pieces(e).into_iter().enumerate() {
+                    let sep = if j == 0 { "" } else { " · " };
+                    for (text, fg) in [(sep.to_string(), p.muted), (text, fg)] {
+                        let text = crate::preview::clip_width(&text, room);
+                        room = room.saturating_sub(str_width(&text));
+                        spans.push(Span::styled(text, Style::new().fg(fg).bg(bg)));
+                    }
+                }
+                spans.push(Span::styled(" ".repeat(room), Style::new().bg(bg)));
             }
-            if !acts.is_empty() {
-                spans.push(Span::styled(
-                    format!("  [{acts}]"),
-                    Style::new().fg(p.gold).bg(bg),
-                ));
-            }
-            let fg = if titled { p.text } else { p.muted };
+            // Its title, which Enter's URL says nothing of; the URL only
+            // while the tracker hasn't said (see core's `titles`).
+            let (about, fg) = match e.link.title.trim() {
+                "" => (e.link.url.clone(), p.muted),
+                t => (t.to_string(), p.text),
+            };
             let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
             spans.push(Span::styled(
                 crate::preview::clip_width(&format!("  {about}"), room),
@@ -723,7 +807,7 @@ mod tests {
         );
         // r on the draft PR asks first, naming it.
         assert_eq!(press(&mut i, KeyCode::Char('r')), Outcome::Stay);
-        assert_eq!(i.question().unwrap(), "Mark PR o/r#57 ready for review?");
+        assert_eq!(i.question().unwrap(), "Mark PR #57 ready for review?");
         // Any other key goes back without running.
         assert_eq!(press(&mut i, KeyCode::Char('q')), Outcome::Stay);
         assert_eq!(i.mode, Mode::List);
@@ -748,7 +832,7 @@ mod tests {
         let mut i = items();
         assert_eq!(
             press(&mut i, KeyCode::Char('x')),
-            Outcome::Refuse("PR o/r#57: x closes cards and issues, not PRs".into())
+            Outcome::Refuse("PR #57: x closes cards and issues, not PRs".into())
         );
         press(&mut i, KeyCode::Down);
         assert!(
@@ -778,7 +862,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             press(&mut open, KeyCode::Char('r')),
-            Outcome::Refuse("PR o/r#1 isn't a draft".into())
+            Outcome::Refuse("PR #1 isn't a draft".into())
         );
     }
 
@@ -814,14 +898,14 @@ mod tests {
         press(&mut i, KeyCode::Down);
         assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close issue")]);
         press(&mut i, KeyCode::Char('x'));
-        assert_eq!(i.question().unwrap(), "Close issue o/r#3?");
+        assert_eq!(i.question().unwrap(), "Close issue #3?");
         press(&mut i, KeyCode::Esc);
         press(&mut i, KeyCode::Char('c'));
         typed(&mut i, "on it");
         press(&mut i, KeyCode::Enter);
         assert_eq!(
             i.question().unwrap(),
-            "Post a comment on issue o/r#3: “on it”?"
+            "Post a comment on issue #3: “on it”?"
         );
     }
 
@@ -899,6 +983,50 @@ mod tests {
         assert!(
             matches!(press(&mut other, KeyCode::Char('v')), Outcome::Refuse(w) if w.contains("v reads"))
         );
+    }
+
+    #[test]
+    fn items_are_named_as_the_header_names_them() {
+        let mut links = items()
+            .entries
+            .into_iter()
+            .map(|e| e.link)
+            .collect::<Vec<_>>();
+        links.push(link("issue", "github", "x/y#9", "u", ""));
+        let i = Items::new(("s".into(), "w".into()), "t".into(), "p".into(), links).unwrap();
+        let names: Vec<String> = i.entries.iter().map(Entry::name).collect();
+        // The repo only where it isn't the task's (its PR's).
+        assert_eq!(names, ["PR #57", "card 1041", "issue #3", "issue x/y#9"]);
+    }
+
+    #[test]
+    fn rows_show_state_checks_and_card_columns_in_colour() {
+        let p = Palette::load();
+        let text =
+            |l: &Link| -> Vec<String> { status(l, &p).into_iter().map(|(t, _)| t).collect() };
+        let pr = |state: &str, checks: &str| Link {
+            checks: checks.into(),
+            ..link("pr", "github", "o/r#1", "u", state)
+        };
+        assert_eq!(text(&pr("open", "pass")), ["open", "✓ checks"]);
+        assert_eq!(status(&pr("open", "pass"), &p)[1].1, p.pine);
+        assert_eq!(text(&pr("draft", "fail")), ["draft", "✗ checks"]);
+        assert_eq!(status(&pr("draft", "fail"), &p)[1].1, p.love);
+        assert_eq!(text(&pr("open", "pending")), ["open", "● checks"]);
+        // Once merged or closed, checks don't matter.
+        assert_eq!(text(&pr("merged", "fail")), ["merged"]);
+        assert_eq!(status(&pr("closed", ""), &p)[0].1, p.love);
+        let card = |state: &str, column: &str, assignee: &str| Link {
+            column: column.into(),
+            assignee: assignee.into(),
+            ..link("card", "fizzy", "1", "u", state)
+        };
+        assert_eq!(text(&card("open", "Doing", "John")), ["Doing", "@John"]);
+        assert_eq!(text(&card("closed", "", "")), ["✓ closed"]);
+        // Nothing known, nothing shown: no lookup yet, or an issue.
+        let none: [String; 0] = [];
+        assert_eq!(text(&card("", "", "")), none);
+        assert_eq!(text(&link("issue", "github", "o/r#3", "u", "")), none);
     }
 
     #[test]
