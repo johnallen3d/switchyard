@@ -97,8 +97,9 @@ impl Help {
     /// The float over `area`: the filter, then the matching bindings under
     /// their group titles.
     pub fn draw(&mut self, f: &mut Frame, p: &Palette, area: Rect, sections: &[Section]) {
-        let lines = self.lines(p, sections);
         let width = 64.min(area.width.saturating_sub(4));
+        // Less the borders and the scrollbar's column.
+        let lines = self.lines(p, sections, usize::from(width.saturating_sub(3)));
         let height = crate::cells(lines.len())
             .saturating_add(4)
             .clamp(8, area.height.saturating_sub(2).max(8))
@@ -161,8 +162,8 @@ impl Help {
     }
 
     /// The bindings the filter matches, as drawn: a title over each group
-    /// with any, keys in one column.
-    fn lines(&mut self, p: &Palette, sections: &[Section]) -> Vec<Line<'static>> {
+    /// with any, keys in one column, each action cut to fit `width`.
+    fn lines(&mut self, p: &Palette, sections: &[Section], width: usize) -> Vec<Line<'static>> {
         let pattern = Pattern::parse(&self.filter, CaseMatching::Smart, Normalization::Smart);
         let col = sections
             .iter()
@@ -196,7 +197,10 @@ impl Help {
                         Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(pad),
-                    Span::styled(d.clone(), Style::new().fg(p.text)),
+                    Span::styled(
+                        crate::preview::clip_width(d, width.saturating_sub(col + 5)),
+                        Style::new().fg(p.text),
+                    ),
                 ]));
             }
         }
@@ -227,13 +231,13 @@ mod tests {
             Section::new("Scrollback", &[("y", "copy"), ("/", "search")]),
         ];
         let mut h = Help::default();
-        assert_eq!(h.lines(&p, &sections).len(), 7);
+        assert_eq!(h.lines(&p, &sections, 61).len(), 7);
         press(&mut h, KeyCode::Char('/'));
         for c in "copy".chars() {
             press(&mut h, KeyCode::Char(c));
         }
         let text: Vec<String> = h
-            .lines(&p, &sections)
+            .lines(&p, &sections, 61)
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
@@ -242,14 +246,14 @@ mod tests {
         // It matches fuzzily, across the key and its action.
         h.filter = "⌃x arcv".into();
         let text: Vec<String> = h
-            .lines(&p, &sections)
+            .lines(&p, &sections, 61)
             .iter()
             .map(std::string::ToString::to_string)
             .collect();
         assert!(text.len() == 2 && text[1].contains("archive"), "{text:?}");
         // A group's name matches all of it.
         h.filter = "picker".into();
-        assert_eq!(h.lines(&p, &sections).len(), 3);
+        assert_eq!(h.lines(&p, &sections, 61).len(), 3);
         // `q` is text while typing; Enter stops typing.
         press(&mut h, KeyCode::Char('q'));
         assert_eq!(h.filter, "pickerq");

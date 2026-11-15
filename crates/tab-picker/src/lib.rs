@@ -2874,8 +2874,9 @@ impl App {
                     Style::new().fg(p.subtle).bg(bg),
                 ));
             }
+            let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
             spans.push(Span::styled(
-                format!("  {url}"),
+                preview::clip_width(&format!("  {url}"), room),
                 Style::new().fg(p.muted).bg(bg),
             ));
             f.render_widget(Line::from(spans), row);
@@ -2990,7 +2991,8 @@ impl App {
             let listed = (0..self.tabs.len())
                 .filter(|&t| self.listed(Item::Tab(t)))
                 .count();
-            (listed + self.orphans().count(), "tabs")
+            let total = listed + self.orphans().count();
+            (total, if total == 1 { "tab" } else { "tabs" })
         };
         if typing || shown != total {
             right.push(Span::styled(shown.to_string(), Style::new().fg(p.text)));

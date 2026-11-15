@@ -469,8 +469,9 @@ impl Items {
                 ));
             }
             let fg = if titled { p.text } else { p.muted };
+            let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
             spans.push(Span::styled(
-                format!("  {about}"),
+                crate::preview::clip_width(&format!("  {about}"), room),
                 Style::new().fg(fg).bg(bg),
             ));
             f.render_widget(Line::from(spans), row);
