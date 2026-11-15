@@ -736,11 +736,12 @@ impl App {
             self.focus = Focus::Project;
             return;
         }
+        // Top to bottom: project, prompt, name, work item.
         self.focus = match (self.focus, forward) {
-            (Focus::Project, true) | (Focus::Item, false) => Focus::Name,
-            (Focus::Name, true) | (Focus::Prompt, false) => Focus::Item,
-            (Focus::Item, true) | (Focus::Project, false) => Focus::Prompt,
-            (Focus::Prompt, true) | (Focus::Name, false) => Focus::Project,
+            (Focus::Project, true) | (Focus::Name, false) => Focus::Prompt,
+            (Focus::Prompt, true) | (Focus::Item, false) => Focus::Name,
+            (Focus::Name, true) | (Focus::Project, false) => Focus::Item,
+            (Focus::Item, true) | (Focus::Prompt, false) => Focus::Project,
         };
     }
 
@@ -1001,7 +1002,7 @@ impl App {
                 _ => {}
             },
             Focus::Name => match k.code {
-                KeyCode::Up => self.focus = Focus::Project,
+                KeyCode::Up => self.focus = Focus::Prompt,
                 KeyCode::Down => self.focus = Focus::Item,
                 KeyCode::Enter => {}
                 KeyCode::Char(c) if !ctrl && !alt => {
@@ -1013,7 +1014,6 @@ impl App {
             },
             Focus::Item => match k.code {
                 KeyCode::Up => self.focus = Focus::Name,
-                KeyCode::Down => self.focus = Focus::Prompt,
                 KeyCode::Enter => {}
                 KeyCode::Char(c) if !ctrl && !alt => {
                     if item_char(c) {
@@ -1031,7 +1031,7 @@ impl App {
             // shift-Enter (or arrives in a paste).
             Focus::Prompt => match k.code {
                 KeyCode::Up if self.prompt.field.screen_cursor().row == 0 => {
-                    self.focus = Focus::Item;
+                    self.focus = Focus::Project;
                 }
                 _ => self.prompt.key(k),
             },
@@ -1451,11 +1451,13 @@ impl App {
     }
 
     fn draw_form(&mut self, f: &mut Frame, area: Rect, prompt_rows: u16) {
-        let [name_row, item_row, _, card]: [Rect; 4] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+        // The prompt leads, so Tab from the project reaches it first; the name
+        // and work item follow it.
+        let [card, _, name_row, item_row]: [Rect; 4] = Layout::vertical([
             Constraint::Length(prompt_rows + PROMPT_CHROME_ROWS),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .areas(area);
         let p = self.p;
@@ -1528,13 +1530,8 @@ impl App {
 
         self.draw_item(f, item_row, label_w);
         if self.focus == Focus::Item && !self.item_menu.hits.is_empty() {
-            self.item_menu.card = Some((
-                Rect {
-                    height: 2,
-                    ..name_row
-                },
-                self.list_area,
-            ));
+            // The menu opens right above the work item field.
+            self.item_menu.card = Some((item_row, self.list_area));
         }
         self.draw_prompt(f, card, prompt_rows);
     }
@@ -1774,11 +1771,11 @@ impl App {
             match self.kind {
                 Kind::Agent => {
                     let next = match self.focus {
-                        Focus::Project => "name",
+                        Focus::Project => "prompt",
+                        Focus::Prompt => "name",
                         Focus::Name => "work item",
                         Focus::Item if !self.item_menu.hits.is_empty() => "fill item",
-                        Focus::Item => "prompt",
-                        Focus::Prompt => "project",
+                        Focus::Item => "project",
                     };
                     hints.push(("⇥", next, p.subtle));
                     let spawn_label = if ready {
@@ -2183,6 +2180,30 @@ mod tests {
     }
 
     #[test]
+    fn tab_runs_project_prompt_name_item() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        assert!(app.focus == Focus::Project);
+        app.next_focus(true);
+        assert!(app.focus == Focus::Prompt, "one Tab reaches the prompt");
+        app.next_focus(true);
+        assert!(app.focus == Focus::Name);
+        app.next_focus(true);
+        assert!(app.focus == Focus::Item);
+        app.next_focus(true);
+        assert!(app.focus == Focus::Project);
+        app.next_focus(false);
+        assert!(app.focus == Focus::Item);
+        app.next_focus(false);
+        assert!(app.focus == Focus::Name);
+        app.next_focus(false);
+        assert!(app.focus == Focus::Prompt);
+        app.next_focus(false);
+        assert!(app.focus == Focus::Project);
+    }
+
+    #[test]
     fn blank_name_is_named_on_launch_from_the_item_or_prompt() {
         let mut app = app();
         app.query = "local".into();
@@ -2312,9 +2333,11 @@ mod tests {
         app.focus = Focus::Item;
         key(&mut app, KeyCode::Down);
         assert!(
-            app.focus == Focus::Prompt,
-            "with nothing listed, ↓ still moves on"
+            app.focus == Focus::Item,
+            "the work item is the last field, so ↓ stays put"
         );
+        key(&mut app, KeyCode::Up);
+        assert!(app.focus == Focus::Name, "↑ still walks up the form");
     }
 
     #[test]
