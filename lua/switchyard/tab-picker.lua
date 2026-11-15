@@ -198,4 +198,41 @@ rex.action{
 rex.bind("cmd+i", "inbox")
 rex.bind("cmd+k", "quick_jump")
 
+-- cmd+1-4: on the picker's own tab, show Inbox, Work, Usage or Archive
+-- (pasted as rex-data:view); anywhere else, Rex's own Go to Tab. A
+-- function binding that declines sends the key to the terminal rather
+-- than to the default, so it runs Go to Tab itself.
+local VIEWS = { "inbox", "work", "usage", "archive" }
+
+-- Whether the focused block is the picker's tab (labelled as FIND_OR_OPEN
+-- labels it; the quick float is a floating layer, not a tiled one).
+local function on_picker(ctx)
+  if ctx.session_id == nil or ctx.block_id == nil then return false end
+  local view = rex.session.view{ session_id = ctx.session_id }
+  for _, window in ipairs((view and view.windows) or {}) do
+    for _, layer in ipairs(window.layers or {}) do
+      for _, block in ipairs(layer.blocks or {}) do
+        if block.block_id == ctx.block_id then
+          return layer.kind == "tiled" and block.label == "switchyard"
+        end
+      end
+    end
+  end
+  return false
+end
+
+for index, name in ipairs(VIEWS) do
+  rex.bind("cmd+" .. index, function(ctx, ev)
+    if on_picker(ctx) then
+      rex.block.call("com.superlogical.terminal", "write", {
+        session_id = ctx.session_id, block_id = ctx.block_id,
+        data = "\27[200~rex-data:view\n" .. name .. "\27[201~",
+      })
+    else
+      rex.client.queue("client.tab.goto", { index = index })
+    end
+    return true
+  end)
+end
+
 return M

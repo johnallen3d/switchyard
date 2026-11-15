@@ -229,7 +229,8 @@ enum Tasks {
     Failed,
 }
 
-/// The picker's views, cycled with ctrl-h and ctrl-l.
+/// The picker's views, cycled with ctrl-h and ctrl-l, or picked with
+/// cmd+1-4 on the picker's tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Inbox,
@@ -842,6 +843,12 @@ impl App {
             "usage-error" => self.usage.error = Some(body.trim().to_string()),
             "preview" => self.preview = preview::parse(body).or(self.preview.take()),
             "current" => self.set_current(body),
+            // cmd+1-4 on the picker's tab (see lua/switchyard/tab-picker.lua).
+            "view" if !self.quick => {
+                if let Some(view) = View::parse(body.trim()) {
+                    self.set_view(view);
+                }
+            }
             // A fed float's pick: done, or why not (see fed.rs).
             "quit" if self.fed => self.quit = true,
             "note" if self.fed => {
@@ -4263,6 +4270,7 @@ impl App {
     fn views_section(&self) -> help::Section {
         let profile = format!("show {}", self.profile.next().name());
         let mut views = vec![
+            ("⌘1-4", "Inbox, Work, Usage, Archive"),
             ("⌃H ⌃L", "previous, next view"),
             ("⌃A", "archive, and back"),
             ("⌃O", profile.as_str()),
@@ -5247,7 +5255,8 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                         .items
                         .as_ref()
                         .is_some_and(|i| i.mode == items::Mode::Comment)
-                    || protocol::data(&text).is_some_and(|(k, _)| k == "current") =>
+                    || protocol::data(&text)
+                        .is_some_and(|(k, _)| k == "current" || k == "view") =>
             {
                 app.paste(&text);
             }
@@ -5424,6 +5433,19 @@ mod tests {
         app.key(ctrl('h'));
         assert!(app.view == View::Work);
         app.key(ctrl('h'));
+        assert!(app.view == View::Inbox);
+    }
+
+    #[test]
+    fn cmd_digits_paste_the_view_to_show() {
+        let mut app = inbox();
+        app.paste("rex-data:view\narchive");
+        assert!(app.view == View::Archive);
+        app.paste("rex-data:view\nusage");
+        assert!(app.view == View::Usage);
+        app.paste("rex-data:view\nbogus");
+        assert!(app.view == View::Usage);
+        app.paste("rex-data:view\ninbox");
         assert!(app.view == View::Inbox);
     }
 
