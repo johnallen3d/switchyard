@@ -467,6 +467,32 @@ fn titled(links: &[Link]) -> impl Iterator<Item = &Link> {
         .take(DETAIL_LINK_ROWS)
 }
 
+/// The Archive's fixed right-side columns, so every row's work items, host
+/// and outcome line up under the headers: the work items column (badges
+/// and any dirty count, with their gap), the widest host name, and the age
+/// column (with its leading space).
+#[derive(Clone, Copy)]
+struct RightCols {
+    links: usize,
+    host: usize,
+    when: usize,
+}
+
+/// The Archive's column headers over the right side `cols` lays out, as
+/// wide as each row's.
+fn right_header(cols: RightCols) -> String {
+    let RightCols { links, host, when } = cols;
+    let links = if links == 0 {
+        String::new()
+    } else {
+        format!("{:<links$}", "work items")
+    };
+    format!(
+        "{links} {:<host$}   {:>9}{:>when$} ",
+        "host", "outcome", "age"
+    )
+}
+
 /// How wide a row's work-item badges may be in a list `width` wide.
 fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
@@ -2418,7 +2444,7 @@ impl App {
                 let w = right.iter().map(|s| str_width(&s.content)).sum();
                 (right, w)
             }
-            _ => self.right_spans(&t, p.base, verb, area.width),
+            _ => self.right_spans(&t, p.base, verb, area.width, None),
         };
         let mut left = vec![Span::styled(format!("{glyph} "), Style::new().fg(color))];
         let mut room = (area.width as usize).saturating_sub(2 + right_w + 1);
@@ -3062,7 +3088,6 @@ impl App {
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
         self.list_area = area;
-        let h = area.height as usize;
         if self.rows.is_empty() {
             self.draw_empty(f, area);
             return;
@@ -3070,6 +3095,21 @@ impl App {
         if self.sidebar {
             return self.draw_side_list(f, area);
         }
+        // The Archive's columns sit under headers, on the list's first line.
+        let archive = self.view == View::Archive && area.height > 1;
+        let (head, area) = if archive {
+            let head = Rect { height: 1, ..area };
+            let rest = Rect {
+                y: area.y + 1,
+                height: area.height - 1,
+                ..area
+            };
+            self.list_area = rest;
+            (Some(head), rest)
+        } else {
+            (None, area)
+        };
+        let h = area.height as usize;
         if let Some(sel) = self.selected {
             // Keep the group header in view when scrolling back to its
             // first pick.
@@ -3087,10 +3127,11 @@ impl App {
         // the widest values, within what the busiest agent's right side
         // leaves (a plain tab's folder takes what its row has left).
         let flat = || self.rows.iter().copied().filter(selectable);
+        let right_cols = archive.then(|| self.right_cols(list.width));
         let right_w = flat()
             .filter(|&i| !self.is_plain_tab(i))
             .map(|i| {
-                self.right_spans(&self.flat(i), self.p.base, "", list.width)
+                self.right_spans(&self.flat(i), self.p.base, "", list.width, right_cols)
                     .1
             })
             .max()
@@ -3100,6 +3141,7 @@ impl App {
             .map(|i| str_width(self.flat(i).project))
             .max()
             .unwrap_or(0)
+            .max(if archive { str_width("project") } else { 0 })
             .min(room / 4);
         // A plain tab's long name (a title a program set, say) stops at a
         // third of the row, so it can't crowd out the folder and the rows
@@ -3118,8 +3160,24 @@ impl App {
             })
             .max()
             .unwrap_or(0)
-            .min(room.saturating_sub(proj_w + 2) * 2 / 3);
-        let cols = (proj_w, name_w);
+            // A third is left for the message; the Archive shows none.
+            .min(if archive {
+                room.saturating_sub(proj_w + 4)
+            } else {
+                room.saturating_sub(proj_w + 2) * 2 / 3
+            });
+        let cols = (proj_w, name_w, right_cols);
+        if let (Some(head), Some(right)) = (head, right_cols) {
+            self.draw_archive_header(
+                f,
+                Rect {
+                    width: list.width,
+                    ..head
+                },
+                (proj_w, name_w),
+                right,
+            );
+        }
         for (i, row) in self.rows.iter().enumerate().skip(self.offset).take(h) {
             let r = Rect {
                 y: area.y + cells(i - self.offset),
@@ -3135,6 +3193,48 @@ impl App {
         if overflow {
             draw::scrollbar(f, &self.p, area, self.offset, self.rows.len());
         }
+    }
+
+    /// The Archive's right-side columns, sized for its widest row.
+    fn right_cols(&self, width: u16) -> RightCols {
+        let flat = || self.rows.iter().copied().filter(selectable);
+        RightCols {
+            links: flat()
+                .map(|i| {
+                    let lead = self.lead_spans(&self.flat(i), self.p.base, width);
+                    lead.iter().map(|s| str_width(&s.content)).sum::<usize>()
+                })
+                .max()
+                .filter(|&w| w > 0)
+                .map_or(0, |w| w.max(str_width("work items  "))),
+            host: flat()
+                .map(|i| str_width(self.flat(i).host))
+                .max()
+                .unwrap_or(0)
+                .max(str_width("host")),
+            when: flat()
+                .map(|i| str_width(&self.when(&self.flat(i))) + 1)
+                .max()
+                .unwrap_or(0)
+                .max(str_width(" age")),
+        }
+    }
+
+    /// The Archive's column headers, over the columns its rows line up in.
+    fn draw_archive_header(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        (proj_w, name_w): (usize, usize),
+        right: RightCols,
+    ) {
+        let style = Style::new().fg(self.p.muted);
+        let left = format!("   {:<w$}  {:<name_w$}", "project", "task", w = proj_w);
+        f.render_widget(Line::styled(left, style), area);
+        f.render_widget(
+            Line::styled(right_header(right), style).right_aligned(),
+            area,
+        );
     }
 
     fn draw_status_header(&self, f: &mut Frame, area: Rect, state: &str) {
@@ -3299,22 +3399,35 @@ impl App {
         spans
     }
 
+    /// A flat row's work items and dirty count, the right side's lead.
+    fn lead_spans(&self, t: &Flat, bg: Color, width: u16) -> Vec<Span<'static>> {
+        let mut lead = self.badge_spans(t, bg, badge_budget(width));
+        if t.dirty > 0 {
+            lead.push(Span::styled(
+                format!("✎{}  ", t.dirty),
+                Style::new().fg(self.p.gold).bg(bg),
+            ));
+        }
+        lead
+    }
+
     /// The right side of a flat row, [work items] [dirty] [host chip]
-    /// [state age], and its width.
+    /// [state age], and its width; padded to `cols` when given, so rows
+    /// line up whatever their links say.
     fn right_spans(
         &self,
         t: &Flat,
         bg: Color,
         verb: &str,
         width: u16,
+        cols: Option<RightCols>,
     ) -> (Vec<Span<'static>>, usize) {
         let p = &self.p;
-        let mut right: Vec<Span> = self.badge_spans(t, bg, badge_budget(width));
-        if t.dirty > 0 {
-            right.push(Span::styled(
-                format!("✎{}  ", t.dirty),
-                Style::new().fg(p.gold).bg(bg),
-            ));
+        let pad = |n: usize| Span::styled(" ".repeat(n), Style::new().bg(bg));
+        let mut right = self.lead_spans(t, bg, width);
+        if let Some(cols) = cols {
+            let used: usize = right.iter().map(|s| str_width(&s.content)).sum();
+            right.push(pad(cols.links.saturating_sub(used)));
         }
         let chip_fg = if t.work { p.gold } else { p.subtle };
         right.extend(pill(
@@ -3322,12 +3435,16 @@ impl App {
             p.surface,
             bg,
         ));
+        if let Some(cols) = cols {
+            right.push(pad(cols.host.saturating_sub(str_width(t.host))));
+        }
         let when = match self.when(t) {
             text if text.is_empty() => text,
             text => format!(" {text}"),
         };
+        let when_w = cols.map_or(4, |c| c.when);
         right.push(Span::styled(
-            format!("  {verb:>9}{when:>4} "),
+            format!("  {verb:>9}{when:>when_w$} "),
             Style::new().fg(p.muted).bg(bg),
         ));
         let w = right.iter().map(|s| str_width(&s.content)).sum();
@@ -3391,14 +3508,17 @@ impl App {
         let p = &self.p;
         let (glyph, color, verb) = match (t.ended, t.state) {
             // Closed without an archive: the worktree is still there.
-            (Some(_), _) if t.left => ("▢", p.gold, "closed"),
-            (Some("merged"), _) => ("▢", p.iris, "merged"),
+            // Each outcome its own glyph: merged work landed; a closed
+            // task left its worktree (open) or just its tab; an archived
+            // one is boxed away.
+            (Some(_), _) if t.left => ("○", p.gold, "closed"),
+            (Some("merged"), _) => ("✓", p.iris, "merged"),
             (Some("archived" | "force-archived" | "discarded" | "force-discarded"), _) => {
-                ("▢", p.iris, "archived")
+                ("▢", p.subtle, "archived")
             }
-            (Some("tab closed"), _) => ("▢", p.muted, "closed"),
-            (Some("worktree removed"), _) => ("▢", p.muted, "removed"),
-            (Some(_), _) => ("▢", p.muted, "ended"),
+            (Some("tab closed"), _) => ("×", p.muted, "closed"),
+            (Some("worktree removed"), _) => ("−", p.muted, "removed"),
+            (Some(_), _) => ("·", p.muted, "ended"),
             (None, "working") => (SPINNER[tick % SPINNER.len()], p.foam, "working"),
             (None, "scheduled") if t.alarm > self.now => ("◷", p.iris, "wakes in"),
             (None, "scheduled") if t.alarm == 0 => ("◷", p.iris, "bg job"),
@@ -3626,7 +3746,7 @@ impl App {
         item: Item,
         selected: bool,
         tick: usize,
-        cols: (usize, usize),
+        cols: (usize, usize, Option<RightCols>),
     ) {
         let p = &self.p;
         let t = self.flat(item);
@@ -3639,7 +3759,7 @@ impl App {
         let (right, right_w) = if plain {
             (Vec::new(), 0)
         } else {
-            self.right_spans(&t, bg, verb, r.width)
+            self.right_spans(&t, bg, verb, r.width, cols.2)
         };
         let mut left = vec![edge];
         left.push(Span::styled(
@@ -3647,7 +3767,7 @@ impl App {
             Style::new().fg(color).bg(bg),
         ));
         let room = (r.width as usize).saturating_sub(3 + right_w + 1);
-        let (proj_w, name_w) = cols;
+        let (proj_w, name_w, _) = cols;
         let name_style = if selected {
             Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD)
         } else {
@@ -5028,7 +5148,7 @@ mod tests {
         );
         let soon = app.flat(Item::Tab(1));
         assert_eq!(app.status_of(&soon, Item::Tab(1), 0).2, "wakes in");
-        let (right, _) = app.right_spans(&soon, Color::Reset, "wakes in", 120);
+        let (right, _) = app.right_spans(&soon, Color::Reset, "wakes in", 120, None);
         assert!(right.last().unwrap().content.contains("wakes in  2m"));
         app.now = 2000;
         assert_eq!(
@@ -6018,6 +6138,54 @@ mod tests {
         }
         app.set_view(View::Archive);
         assert_eq!(app.rows, vec![Item::Task(5)]);
+    }
+
+    #[test]
+    fn archive_columns_line_up_under_headers_and_glyphs_name_the_outcome() {
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        app.follow = false;
+        app.now = 60 * 60 * 24 * 30;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "name":"landed", "host":"m4", "ended_at":50,
+                 "ended_reason":"merged", "links":[{"kind":"card","system":"fizzy","ref":"1","url":"c"}]},
+                {"session_id":"s", "window_id":"b", "name":"kept", "host":"drummer", "ended_at":40,
+                 "ended_reason":"tab closed", "worktree_left":true,
+                 "links":[{"kind":"card","system":"fizzy","ref":"1160","url":"c","state":"closed","column":"Done"}]},
+                {"session_id":"s", "window_id":"c", "name":"boxed", "host":"m4", "ended_at":30,
+                 "ended_reason":"archived"}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        let mut terminal = Terminal::new(TestBackend::new(110, 5)).unwrap();
+        terminal.draw(|f| app.draw_list(f, f.area())).unwrap();
+        let buffer = terminal.backend().buffer();
+        let lines: Vec<Vec<&str>> = (0..4)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        // The column a word starts in (cells, not bytes: the glyphs are
+        // multibyte).
+        let at = |line: &[&str], word: &str| {
+            let text = line.concat();
+            text[..text.find(word).unwrap()].chars().count()
+        };
+        let head = &lines[0];
+        let (items_at, host_at) = (at(head, "work items"), at(head, "host"));
+        assert_eq!(at(&lines[1], "card 1"), items_at);
+        assert_eq!(at(&lines[2], "card 1160"), items_at);
+        assert_eq!(at(&lines[1], "m4"), host_at);
+        assert_eq!(at(&lines[2], "drummer"), host_at);
+        assert_eq!(at(&lines[3], "m4"), host_at);
+        let outcome_end = at(head, "outcome") + "outcome".len();
+        for (y, verb) in [(1, "merged"), (2, "closed"), (3, "archived")] {
+            assert_eq!(at(&lines[y], verb) + verb.len(), outcome_end);
+        }
+        let glyphs: Vec<&str> = lines[1..].iter().map(|l| l[1]).collect();
+        assert_eq!(glyphs, ["✓", "○", "▢"]);
     }
 
     #[test]
