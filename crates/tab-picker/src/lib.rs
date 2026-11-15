@@ -49,8 +49,10 @@
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
-//!   ones, leaving those whose tab or worktree went without one. ctrl-u
-//!   and ctrl-d page by half a page here instead of clearing the search.
+//!   ones, leaving those whose tab or worktree went without one. Tab
+//!   opens a chooser over the listed projects, as in Work, to show one
+//!   project's tasks or all of them (see projects.rs). ctrl-u and ctrl-d
+//!   page by half a page here instead of clearing the search.
 //!
 //! `?` (F1 where `?` is text) opens a float of every key, filtered with
 //! `/` (see help.rs); the footer keeps outcomes and confirmations.
@@ -100,13 +102,14 @@ mod history;
 mod items;
 mod model;
 mod preview;
+mod projects;
 mod scrollback;
 mod snooze;
 mod standalone;
 mod usage;
 mod work;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io;
 use std::sync::mpsc::{self as chan, Receiver, Sender, TryRecvError};
@@ -606,6 +609,11 @@ struct App {
     profile: Profile,
     /// In the archive, hide the tasks an archive ended (ctrl-f).
     kept: bool,
+    /// In the archive, only this project's tasks (chosen with Tab); None
+    /// lists all.
+    project: Option<String>,
+    /// The Archive's open project chooser; Enter picks, Escape closes it.
+    projects: Option<projects::Chooser>,
     query: String,
     matcher: Matcher,
     rows: Vec<Item>,
@@ -724,6 +732,8 @@ impl App {
             view,
             profile: Profile::All,
             kept: false,
+            project: None,
+            projects: None,
             query: String::new(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
@@ -850,6 +860,7 @@ impl App {
         let current = current.trim();
         if current.is_empty() {
             if self.chooser.is_none()
+                && self.projects.is_none()
                 && self.items.is_none()
                 && self.snooze.is_none()
                 && self.reply.is_none()
@@ -861,6 +872,7 @@ impl App {
         let (s, w) = current.split_once('/').unwrap_or((current, ""));
         self.current = (s.to_string(), w.to_string());
         if self.chooser.is_some()
+            || self.projects.is_some()
             || self.items.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
@@ -1228,6 +1240,46 @@ impl App {
         rows.into_iter().map(Item::Task).collect()
     }
 
+    /// The projects the Archive's project filter cycles through, sorted: the
+    /// projects of the archive's rows that the profile lets through. A row
+    /// with no project is listed only under all.
+    fn archive_projects(&self) -> Vec<String> {
+        let projects: BTreeSet<String> = self
+            .archive()
+            .into_iter()
+            .filter_map(|item| {
+                let f = self.flat(item);
+                (self.profile_passes(f.work) && !f.project.is_empty())
+                    .then(|| f.project.to_string())
+            })
+            .collect();
+        projects.into_iter().collect()
+    }
+
+    /// Tab in the Archive: open the project chooser on the shown project.
+    fn open_projects(&mut self) {
+        let projects = self.archive_projects();
+        if projects.is_empty() {
+            self.note = Some(("no ended tasks name a project".into(), true));
+            return;
+        }
+        self.projects = Some(projects::Chooser::new(projects, self.project.clone()));
+    }
+
+    /// Keys while the project chooser is open; its pick filters the Archive.
+    fn projects_key(&mut self, k: KeyEvent) {
+        let Some(c) = &mut self.projects else { return };
+        match c.key(k) {
+            projects::Outcome::Stay => {}
+            projects::Outcome::Close => self.projects = None,
+            projects::Outcome::Pick(project) => {
+                self.projects = None;
+                self.project = project;
+                self.refilter();
+            }
+        }
+    }
+
     /// A tab or task row as the flat views show it.
     fn flat(&self, item: Item) -> Flat<'_> {
         match item {
@@ -1571,6 +1623,12 @@ impl App {
     /// (`#42`, `card 1041`, `PR #57`), so an ended task can be found by its
     /// issue or card and resumed. Returns the best match.
     fn filter_archive(&mut self, pattern: &Pattern, filtering: bool) -> Option<Item> {
+        // A project whose last task has left the archive is no longer
+        // listed, so the filter goes back to all.
+        let projects = self.archive_projects();
+        if self.project.as_ref().is_some_and(|p| !projects.contains(p)) {
+            self.project = None;
+        }
         let mut best: Option<(u32, Item)> = None;
         // Newest first, as archive() sorts.
         for item in self.archive() {
@@ -1584,6 +1642,9 @@ impl App {
                 )
             };
             if !self.profile_passes(work) {
+                continue;
+            }
+            if self.project.as_deref().is_some_and(|p| p != project) {
                 continue;
             }
             if filtering {
@@ -1669,6 +1730,7 @@ impl App {
         }
         self.armed = Armed::No;
         self.chooser = None;
+        self.projects = None;
         self.items = None;
         self.snooze = None;
         self.close_reply();
@@ -2114,6 +2176,9 @@ impl App {
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
+        if self.projects.is_some() {
+            return self.projects_key(k);
+        }
         // standalone_key runs what the float asks for before it gets here.
         if self.items.is_some() {
             self.items_key(k);
@@ -2243,6 +2308,7 @@ impl App {
                 self.kept = !self.kept;
                 self.refilter();
             }
+            KeyCode::Tab | KeyCode::BackTab if self.view == View::Archive => self.open_projects(),
             KeyCode::Backspace if alt || ctrl => self.delete_word(),
             KeyCode::Backspace => {
                 self.query.pop();
@@ -2484,6 +2550,7 @@ impl App {
             self.draw_reply(f, card, card_h - prompt_box::CHROME_ROWS);
         }
         self.draw_chooser(f, main);
+        self.draw_projects(f, main);
         self.draw_items(f, main);
         self.draw_snooze(f, main);
     }
@@ -2654,6 +2721,7 @@ impl App {
         }
         // Over the reply box, so their backdrop dims it too.
         self.draw_chooser(f, body);
+        self.draw_projects(f, body);
         self.draw_items(f, body);
         self.draw_snooze(f, body);
     }
@@ -3002,6 +3070,12 @@ impl App {
 
     /// The ctrl-b chooser, when open: a small box over the list, one link a
     /// line with its state, title and URL.
+    fn draw_projects(&self, f: &mut Frame, area: Rect) {
+        if let Some(c) = &self.projects {
+            c.draw(f, area, &self.p);
+        }
+    }
+
     fn draw_chooser(&self, f: &mut Frame, area: Rect) {
         let Some(c) = &self.chooser else { return };
         let p = &self.p;
@@ -3149,6 +3223,13 @@ impl App {
             Profile::All => {}
             Profile::Work => chip("work", p.gold),
             Profile::Personal => chip("personal", p.subtle),
+        }
+        if let Some(project) = self
+            .project
+            .as_deref()
+            .filter(|_| self.view == View::Archive)
+        {
+            chip(project, p.iris);
         }
         if self.view == View::Archive && self.kept {
             chip("not archived", p.foam);
@@ -4203,14 +4284,17 @@ impl App {
                     "expand the preview"
                 },
             )),
-            View::Archive => views.push((
-                "⌃F",
-                if self.kept {
-                    "show archived tasks"
-                } else {
-                    "hide archived tasks"
-                },
-            )),
+            View::Archive => {
+                views.push(("⇥", "choose the project, or all"));
+                views.push((
+                    "⌃F",
+                    if self.kept {
+                        "show archived tasks"
+                    } else {
+                        "hide archived tasks"
+                    },
+                ));
+            }
             View::Usage | View::Work => {}
         }
         views.push(("? F1", "these keys"));
@@ -4400,6 +4484,9 @@ impl App {
         if let Some(i) = &self.items {
             return Some(i.hints());
         }
+        if self.projects.is_some() {
+            return Some(projects::Chooser::hints());
+        }
         self.chooser
             .as_ref()
             .map(|_| vec![("⏎", "open"), ("esc", "close"), ("?", "keys")])
@@ -4465,6 +4552,12 @@ impl App {
         }
         let hints: &[(&str, &str, Color)] = if self.quick {
             &[("⏎", "jump", p.subtle), ("esc", "close", p.subtle)]
+        } else if self.view == View::Archive {
+            &[
+                ("⇥", "project", p.subtle),
+                (VIEW_HINT.0, VIEW_HINT.1, p.subtle),
+                ("?", "keys", p.subtle),
+            ]
         } else {
             &[
                 (VIEW_HINT.0, VIEW_HINT.1, p.subtle),
@@ -4615,6 +4708,10 @@ impl App {
         // switch views as in the others.
         if self.view == View::Work {
             return self.run_work_key(k, term);
+        }
+        // The Archive's project chooser has every key, Enter included.
+        if self.projects.is_some() {
+            return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let open = matches!(k.code, KeyCode::Char('b') if ctrl);
@@ -6642,6 +6739,63 @@ mod tests {
             !text.contains("Left behind") && !text.contains("─"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn archive_tab_chooses_a_project_and_drops_one_that_empties() {
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"a", "project":"alpha", "name":"merged", "ended_at":50, "ended_reason":"merged"},
+                {"session_id":"s", "window_id":"b", "project":"beta", "name":"closed", "ended_at":10, "ended_reason":"tab closed"},
+                {"session_id":"s", "window_id":"c", "project":"beta", "name":"left", "ended_at":5, "ended_reason":"tab closed",
+                 "worktree_left":true},
+                {"session_id":"s", "window_id":"d", "project":"alpha", "name":"archived", "ended_at":40, "ended_reason":"archived"},
+                {"session_id":"s", "window_id":"e", "project":"alpha", "name":"newer", "ended_at":60, "ended_reason":"archived"},
+                {"session_id":"s", "window_id":"f", "project":"alpha", "name":"open"}
+            ]).to_string()).unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        let press = |app: &mut App, code: KeyCode| app.key(KeyEvent::new(code, KeyModifiers::NONE));
+        let all = vec![
+            Item::Task(4),
+            Item::Task(0),
+            Item::Task(3),
+            Item::Task(1),
+            Item::Task(2),
+        ];
+        assert_eq!(app.rows, all);
+        // Tab opens the chooser; typing filters it and Enter shows the pick.
+        press(&mut app, KeyCode::Tab);
+        assert!(app.projects.is_some());
+        for c in "bet".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        // Letters went to the chooser, not the archive's search.
+        assert_eq!(app.query, "");
+        press(&mut app, KeyCode::Enter);
+        assert!(app.projects.is_none());
+        assert_eq!(app.project.as_deref(), Some("beta"));
+        assert_eq!(app.rows, vec![Item::Task(1), Item::Task(2)]);
+        // It reopens on beta; Home picks All projects again.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Home);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!((app.project.clone(), app.rows.clone()), (None, all));
+        // Escape closes it unchanged.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.projects.is_none() && app.project.is_none());
+        // ctrl-f hides alpha's every task, so a filter on alpha goes back to all.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.project.as_deref(), Some("alpha"));
+        app.key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        assert_eq!(app.project, None);
+        assert_eq!(app.rows, vec![Item::Task(1), Item::Task(2)]);
     }
 
     #[test]
