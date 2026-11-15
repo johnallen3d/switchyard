@@ -23,7 +23,9 @@
 //! absent when the log doesn't say), and `wake: {at, reason}` when a Claude
 //! agent is waiting on a timer or background job to resume it, `at` 0 when
 //! its time isn't known (see `wake`); or `{error}`. `fetch` adds
-//! `agent: {host, profile, harness, dir}` once it knows them.
+//! `agent: {host, profile, harness, dir}` once it knows them, and
+//! `suggestion` when an idle Claude agent's screen shows the prompt it
+//! suggests next (see `suggestion`).
 
 use std::fmt::Write as _;
 use std::fs::File;
@@ -48,11 +50,14 @@ const BYTES: usize = 96 * 1024;
 /// '{"session":ID,"window":ID}'`: the tiled pane with the most urgent
 /// program status, as `host_rows.lua` picks a tab's, with its block, status,
 /// program, that program's process ID and the foreground process's
-/// directory; `{}` when no pane reports one.
+/// directory; `{}` when no pane reports one. With `"screen":true` in the
+/// args, an idle or done pane also gives the end of its screen as escape
+/// sequences (`screen`), for `suggestion`.
 const PANE_SCRIPT: &str = r#"
 local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
 local sid, wid = rex.args.session, rex.args.window
+local SCREEN_TAIL = 16384
 local _, err = rex.session.attach{ session_id = sid }
 if err ~= nil then error(tostring(err), 0) end
 local view = rex.session.view{ session_id = sid }
@@ -74,8 +79,22 @@ for _, w in ipairs((view and view.windows) or {}) do
     local proc = rex.block.call(T, "process", { session_id = sid, block_id = best.block }) or {}
     local fg = proc.foreground or proc.child or {}
     local r = best.record
+    local screen
+    if rex.args.screen and (r.state == "idle" or r.state == "done") then
+      -- The end of the screen, styles and all: the total length first,
+      -- then only its last bytes.
+      local head = rex.block.call(T, "format", { session_id = sid, block_id = best.block,
+        format = "vt", unwrap = true, max_bytes = 1 })
+      if head and head.id and head.total then
+        local tail = rex.block.call(T, "blob_read", { session_id = sid, block_id = best.block,
+          id = head.id, offset = math.max(0, head.total - SCREEN_TAIL) })
+        screen = tail and tail.data
+      elseif head then
+        screen = head.content
+      end
+    end
     return { block = best.block, state = r.state or "", app = r.effective_app or r.app or "",
-      pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "" }
+      pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "", screen = screen }
   end
 end
 error("tab not found", 0)
@@ -87,8 +106,94 @@ error("tab not found", 0)
 ///
 /// Fails when Rex can't run the lookup or the tab isn't found.
 pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, String> {
-    let args = json!({ "session": session, "window": window }).to_string();
+    pane_lookup(host, session, window, false)
+}
+
+fn pane_lookup(host: &str, session: &str, window: &str, screen: bool) -> Result<Value, String> {
+    let args = json!({ "session": session, "window": window, "screen": screen }).to_string();
     rex_json(host, &["do", "-e", PANE_SCRIPT, "--json", "--args", &args])
+}
+
+/// The prompt Claude Code suggests next, from the end of an idle agent's
+/// screen as escape sequences: the text after the input box's `❯` when all
+/// of it is dim (Claude's ghost text). Claude keeps the suggestion out of
+/// its log, so the screen is the only place to read it. Text typed in the
+/// box isn't dim, so there is no suggestion then.
+#[must_use]
+pub fn suggestion(screen: &str) -> Option<String> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let line = lines
+        .iter()
+        .rev()
+        .take(15)
+        .find_map(|l| l.split_once("\u{276f}\u{a0}").map(|(_, rest)| rest))?;
+    let mut text = String::new();
+    let mut dim = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => {
+                    let mut params = String::new();
+                    let fin = loop {
+                        match chars.next() {
+                            Some(c) if c.is_ascii_digit() || c == ';' || c == ':' || c == '?' => {
+                                params.push(c);
+                            }
+                            other => break other,
+                        }
+                    };
+                    match fin {
+                        Some('m') => dim = sgr_dim(&params, dim),
+                        Some('C') => {
+                            let n = params.parse::<usize>().unwrap_or(1).max(1);
+                            text.extend(std::iter::repeat_n(' ', n));
+                        }
+                        _ => {}
+                    }
+                }
+                // OSC (titles, links): up to BEL or ST.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' => {}
+            c if c.is_whitespace() => text.push(' '),
+            c if !dim => return None,
+            c => text.push(c),
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!text.is_empty()).then_some(text)
+}
+
+/// Whether text is dim after the SGR sequence `params` (`ESC [ params m`),
+/// from `dim` before it.
+fn sgr_dim(params: &str, mut dim: bool) -> bool {
+    let mut it = params.split(';');
+    while let Some(p) = it.next() {
+        match p {
+            "" | "0" | "22" => dim = false,
+            "2" => dim = true,
+            // A colour's own numbers (`38;5;N`, `38;2;R;G;B`) aren't styles.
+            "38" | "48" | "58" => match it.next() {
+                Some("5") => {
+                    it.next();
+                }
+                Some("2") => {
+                    it.nth(2);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    dim
 }
 
 /// The transcript of the agent in a tab, as JSON (see the module docs).
@@ -129,7 +234,7 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
             .unwrap_or("")
             .to_string()
     };
-    let pane = match (agent_pane(host, session, window), &task) {
+    let pane = match (pane_lookup(host, session, window, true), &task) {
         (Ok(p), _) => p,
         (Err(_), Some(_)) => json!({}),
         (Err(e), None) => return Err(e),
@@ -164,6 +269,11 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
     };
     if let Some(o) = v.as_object_mut() {
         o.insert("agent".into(), agent);
+        if harness == "claude"
+            && let Some(s) = pane["screen"].as_str().and_then(suggestion)
+        {
+            o.insert("suggestion".into(), s.into());
+        }
     }
     Ok(v)
 }
@@ -686,6 +796,37 @@ fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The end of an idle Claude Code screen with `input` in its box.
+    fn claude_screen(input: &str) -> String {
+        [
+            "\x1b[0m\x1b[38;2;153;153;153m\u{273b}\x1b[0m Brewed for 2m\r",
+            "\r",
+            "\x1b[0m\x1b[38;2;136;136;136m\u{2500}\u{2500}\u{2500}\r",
+            &format!("\u{276f}\u{a0}{input}\r"),
+            "\x1b[0m\x1b[38;2;136;136;136m\u{2500}\u{2500}\u{2500}\r",
+            "  \x1b[0m\x1b[38;2;153;153;153mctx 58k/1.0M 6% \x1b[0m\x1b[2m\x1b[38;2;153;153;153m|\x1b[0m\r",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn dim_text_in_claudes_input_box_is_its_suggestion() {
+        let screen = claude_screen("\x1b[0m\x1b[2mpoint rex at\x1b[1Cthe worktree\x1b[0m");
+        assert_eq!(
+            suggestion(&screen).as_deref(),
+            Some("point rex at the worktree")
+        );
+    }
+
+    #[test]
+    fn typed_or_empty_input_is_no_suggestion() {
+        assert_eq!(suggestion(&claude_screen("\x1b[0mfix the bug")), None);
+        assert_eq!(suggestion(&claude_screen("\x1b[0m")), None);
+        assert_eq!(suggestion("no prompt here"), None);
+        // A 2 inside a colour isn't dim.
+        assert_eq!(suggestion(&claude_screen("\x1b[38;2;2;2;2mtyped")), None);
+    }
 
     #[test]
     fn claude_logs_give_messages_tool_calls_and_questions() {

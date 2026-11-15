@@ -59,6 +59,9 @@ pub struct Preview {
     pub tokens: Option<u64>,
     /// The model the agent's last turn ran on, when its log says.
     pub model: Option<String>,
+    /// The prompt Claude Code suggests next, while its screen shows one
+    /// (for the reply box's ghost text).
+    pub suggestion: Option<String>,
     entries: Result<Vec<(String, String)>, String>,
     drawn: Option<(u16, Drawn)>,
 }
@@ -160,6 +163,11 @@ pub fn parse(body: &str) -> Option<Preview> {
         .ok()
         .and_then(|v| v["model"].as_str())
         .map(String::from);
+    let suggestion = v
+        .as_ref()
+        .ok()
+        .and_then(|v| v["suggestion"].as_str())
+        .map(String::from);
     let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -182,6 +190,7 @@ pub fn parse(body: &str) -> Option<Preview> {
         agent,
         tokens,
         model,
+        suggestion,
         entries,
         drawn: None,
     })

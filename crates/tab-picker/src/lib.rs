@@ -542,7 +542,8 @@ fn help_float_sections() -> Vec<help::Section> {
         Section::new(
             "Reply box",
             &[
-                ("⏎", "send"),
+                ("⏎", "send (empty: Claude's suggestion)"),
+                ("⇥ →", "take Claude's suggestion"),
                 ("⌥⏎ ⇧⏎", "new line"),
                 ("↑↓", "earlier messages, at the first or last line"),
                 ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
@@ -2014,6 +2015,24 @@ impl App {
         }
     }
 
+    /// The prompt Claude Code suggests next to the reply box's agent, while
+    /// the box is empty and the agent waits for one: the box shows it as
+    /// ghost text, Tab or Right takes it and Enter sends it.
+    fn reply_suggestion(&self) -> Option<String> {
+        let r = self.reply.as_ref()?;
+        let waiting = self
+            .selected_item()
+            .is_some_and(|i| matches!(self.flat(i).state, "idle" | "done"));
+        if !waiting || !r.prompt.is_empty() {
+            return None;
+        }
+        self.preview
+            .as_ref()
+            .filter(|pv| pv.pane.window == r.key.1)?
+            .suggestion
+            .clone()
+    }
+
     /// The reply box's Enter once the message is sent (`switchyard task act
     /// message` also removes the prompt file).
     fn finish_reply(&mut self) {
@@ -2048,7 +2067,8 @@ impl App {
     /// Keys while the reply box has focus: edit it (alt- or shift-Enter for
     /// a newline), scroll the preview with the page keys or shift and the
     /// arrows, Enter (see `finish_reply`), or Escape to leave it (Tab too,
-    /// while it's empty). ctrl-c clears the message, then leaves the box;
+    /// while it's empty and shows no suggestion; see `reply_suggestion`).
+    /// ctrl-c clears the message, then leaves the box;
     /// ctrl-g edits it in the editor (see `edit_reply`).
     fn reply_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -2063,6 +2083,7 @@ impl App {
         } else {
             Vec::new()
         };
+        let ghost = self.reply_suggestion();
         let Some(r) = &mut self.reply else { return };
         // The slash-command menu, while open, has Tab, the arrows and Escape.
         if r.prompt.menu_key(k) {
@@ -2084,6 +2105,13 @@ impl App {
                     r.prompt.set_text(&text);
                 }
             }
+            return;
+        }
+        // Tab or Right takes Claude's suggestion into the empty box.
+        if let Some(g) = ghost
+            .filter(|_| k.modifiers.is_empty() && matches!(k.code, KeyCode::Tab | KeyCode::Right))
+        {
+            r.prompt.set_text(&g);
             return;
         }
         match k.code {
@@ -2960,10 +2988,13 @@ impl App {
             })
         };
         let tokens = self.tokens_label();
+        let ghost = self.reply_suggestion();
         let (prompt, label, focused) = match (&mut self.reply, unfocused) {
             (Some(r), _) => {
-                // The chip row already names the agent.
-                r.prompt.set_placeholder("Type a message");
+                // The chip row already names the agent; Claude's suggestion
+                // shows as ghost text.
+                r.prompt
+                    .set_placeholder(ghost.as_deref().unwrap_or("Type a message"));
                 self.reply_card = Some((card, f.area()));
                 (&mut r.prompt, Some(r.label.clone()), true)
             }
@@ -4517,12 +4548,13 @@ impl App {
             return self.draw_scrollback_footer(f, area, sb);
         }
         if let Some(r) = &self.reply {
-            let ready = !r.prompt.text().is_empty() && r.prompt.saved_ok;
-            let hints = [
-                ("⏎", "send", if ready { p.pine } else { p.muted }),
-                ("⌃G", "editor", p.subtle),
-                ("F1", "keys", p.subtle),
-            ];
+            let ghost = self.reply_suggestion().is_some();
+            let ready = ghost || (!r.prompt.text().is_empty() && r.prompt.saved_ok);
+            let mut hints = vec![("⏎", "send", if ready { p.pine } else { p.muted })];
+            if ghost {
+                hints.push(("⇥", "take suggestion", p.subtle));
+            }
+            hints.extend([("⌃G", "editor", p.subtle), ("F1", "keys", p.subtle)]);
             let (spans, _) = draw::hints(p, &hints, area.width as usize);
             f.render_widget(Line::from(spans), area);
             return;
@@ -5025,10 +5057,14 @@ impl App {
         if k.code != KeyCode::Enter || newline {
             return false;
         }
-        let text = r.prompt.text();
-        if text.is_empty() {
-            return true;
-        }
+        // An empty box sends Claude's suggestion, if it shows one.
+        let text = match r.prompt.text() {
+            t if t.is_empty() => match self.reply_suggestion() {
+                Some(s) => s,
+                None => return true,
+            },
+            t => t,
+        };
         let Some(pick) = standalone::parse_pick(&self.pick()) else {
             return true;
         };
@@ -6034,7 +6070,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            help_text(&app).starts_with("Reply box\n⏎ send\n⌥⏎ ⇧⏎ new line"),
+            help_text(&app).starts_with(
+                "Reply box\n⏎ send (empty: Claude's suggestion)\n⇥ → take Claude's suggestion\n⌥⏎ ⇧⏎ new line"
+            ),
             "{}",
             help_text(&app)
         );
