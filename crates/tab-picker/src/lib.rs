@@ -812,9 +812,17 @@ impl App {
                     } else {
                         Tasks::Ready
                     };
+                    // Only the full read, begun after the archive ended, can
+                    // settle the row: the live read, and any read begun
+                    // before the archive, still lists the task as open.
+                    let settled =
+                        kind == "tasks" && self.archiving.is_none() && !self.gone_open(&tasks);
                     self.deliver(|app| {
                         app.tasks = tasks;
                         app.tasks_load = next;
+                        if settled {
+                            app.gone = None;
+                        }
                     });
                 }
                 Err(_) => self.tasks_failed(),
@@ -889,11 +897,6 @@ impl App {
         let keep = self.selected_key();
         let armed = self.armed;
         take(self);
-        // Data read after the archive ended says what it did, so the row
-        // it took away can go back to being whatever the registry says.
-        if self.archiving.is_none() {
-            self.gone = None;
-        }
         self.apply_pending();
         link(&mut self.tabs, &self.sessions, &mut self.tasks);
         let want = if self.follow {
@@ -4522,6 +4525,15 @@ impl App {
             .is_some_and(|g| self.key_of(item).as_ref() == Some(g))
     }
 
+    /// Whether `tasks` still list the row an archive took away as open.
+    fn gone_open(&self, tasks: &[Task]) -> bool {
+        self.gone.as_ref().is_some_and(|(session, window)| {
+            tasks
+                .iter()
+                .any(|t| t.ended.is_none() && &t.session_id == session && &t.window_id == window)
+        })
+    }
+
     /// Take the highlighted row out of the lists before its archive runs,
     /// with the highlight moved to the row below it (above, at the end).
     fn hide_for_archive(&mut self) {
@@ -4553,6 +4565,12 @@ impl App {
         match rx.try_recv() {
             Ok(r) => {
                 self.archiving = None;
+                // A failed archive left the row where it was: show it now.
+                // A done one stays hidden until the full read settles it.
+                if r.is_err() {
+                    self.gone = None;
+                    self.refilter();
+                }
                 self.note = Some(match r {
                     Ok(msg) => (msg, false),
                     Err(e) => (e, true),
@@ -4562,6 +4580,7 @@ impl App {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.archiving = None;
+                self.gone = None;
                 self.refetch();
             }
         }
@@ -6400,29 +6419,65 @@ mod tests {
     }
 
     #[test]
-    fn archive_takes_the_row_away_before_it_runs_and_brings_it_back_on_failure() {
+    fn archive_takes_the_row_away_and_keeps_it_away_until_the_full_read_settles_it() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\ta\tdone\tclaude\t~/r\nT\tb\tdone\tclaude\t~/r\n");
-        app.paste("rex-data:tasks\n[]");
-        let at = |app: &App, t: usize| app.rows.iter().position(|&i| i == Item::Tab(t)).unwrap();
-        app.selected = Some(at(&app, 0));
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        let key = app.selected_key().unwrap();
+        let open = format!(
+            r#"[{{"session_id":"{}","window_id":"{}","name":"a"}}]"#,
+            key.0, key.1
+        );
+        app.paste(&format!("rex-data:tasks\n{open}"));
+        let shows = |app: &App| {
+            app.rows
+                .iter()
+                .any(|&i| app.key_of(i).as_ref() == Some(&key))
+        };
+        assert!(shows(&app));
         // Hidden at once, with the highlight on the row below.
         app.hide_for_archive();
-        assert!(!app.rows.contains(&Item::Tab(0)), "{:?}", app.rows);
+        assert!(!shows(&app), "{:?}", app.rows);
         assert_eq!(app.selected_item(), Some(Item::Tab(1)));
         // Still hidden while the archive runs, whatever data arrives.
         let (tx, rx) = std::sync::mpsc::channel();
         app.archiving = Some(rx);
-        app.paste("rex-data:tasks\n[]");
-        assert!(!app.rows.contains(&Item::Tab(0)));
-        // The archive ends: the row stays hidden until fresh data arrives.
-        tx.send(Err("refused".into())).unwrap();
+        app.paste(&format!("rex-data:tasks\n{open}"));
+        assert!(!shows(&app));
+        // The archive succeeds. The next live read has the tab gone but
+        // the task still open, from before the archive: still hidden, and
+        // no orphan row for the task.
+        tx.send(Ok("archived a".into())).unwrap();
         app.take_archived();
         assert!(app.archiving.is_none());
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tb\tdone\tclaude\t~/r\n");
+        app.paste(&format!("rex-data:live\n{open}"));
+        assert!(!shows(&app), "{:?}", app.rows);
         assert!(app.gone.is_some());
-        // Data read after a failed archive brings the row back.
+        // The full read, after the archive, shows the task ended: settled.
+        let ended = format!(
+            r#"[{{"session_id":"{}","window_id":"{}","name":"a","ended_at":50,"ended_reason":"archived"}}]"#,
+            key.0, key.1
+        );
+        app.paste(&format!("rex-data:tasks\n{ended}"));
+        assert!(app.gone.is_none());
+        assert!(!shows(&app));
+    }
+
+    #[test]
+    fn a_failed_archive_brings_the_row_back_at_once() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\ta\tdone\tclaude\t~/r\nT\tb\tdone\tclaude\t~/r\n");
         app.paste("rex-data:tasks\n[]");
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        app.hide_for_archive();
+        assert!(!app.rows.contains(&Item::Tab(0)));
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.archiving = Some(rx);
+        tx.send(Err("refused".into())).unwrap();
+        app.take_archived();
         assert!(app.gone.is_none());
         assert!(app.rows.contains(&Item::Tab(0)), "{:?}", app.rows);
     }
