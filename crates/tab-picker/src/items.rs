@@ -664,7 +664,7 @@ impl Items {
         if text.height < 1 || text.width < 2 {
             return;
         }
-        let lines = reader_lines(thread, text.width as usize, p);
+        let lines = reader_lines(thread, &self.entry().link, text.width as usize, p);
         let rows = text.height as usize;
         let max = lines.len().saturating_sub(rows);
         self.page.set((rows, max));
@@ -690,6 +690,25 @@ impl Items {
     }
 }
 
+/// The reader's state pieces: the rows' `status` for its link, with a
+/// PR's state as the fetched thread gives it (`OPEN` stays `draft` for a
+/// draft, which the thread doesn't say); the tracker's own state, muted,
+/// for what `status` doesn't colour.
+fn reader_state(thread: &Thread, link: &Link, p: &Palette) -> Vec<(String, Color)> {
+    let mut l = link.clone();
+    if l.kind == "pr" && !thread.state.is_empty() {
+        let state = thread.state.to_lowercase();
+        if !(state == "open" && l.state == "draft") {
+            l.state = state;
+        }
+    }
+    let pieces = status(&l, p);
+    if pieces.is_empty() && !thread.state.is_empty() {
+        return vec![(thread.state.clone(), p.muted)];
+    }
+    pieces
+}
+
 /// When a comment was made, as `2026-11-14 19:27` (UTC, as the trackers
 /// give it), or as given when it isn't ISO 8601.
 fn when(at: &str) -> String {
@@ -701,7 +720,9 @@ fn when(at: &str) -> String {
 
 /// A thread as wrapped lines `width` columns wide; GitHub's Markdown
 /// bodies drawn as the preview draws an agent's (see preview's `markdown`).
-fn reader_lines(thread: &Thread, width: usize, p: &Palette) -> Vec<Line<'static>> {
+/// Its state is coloured as the work-items rows colour it (see
+/// `reader_state`).
+fn reader_lines(thread: &Thread, link: &Link, width: usize, p: &Palette) -> Vec<Line<'static>> {
     let wrap = |line: Line<'static>| crate::preview::wrap_line(line, width);
     let mut out: Vec<Line<'static>> = Vec::new();
     let title = if thread.title.is_empty() {
@@ -713,25 +734,29 @@ fn reader_lines(thread: &Thread, width: usize, p: &Palette) -> Vec<Line<'static>
         title,
         Style::new().fg(p.text).add_modifier(Modifier::BOLD),
     )));
-    let mut meta: Vec<String> = Vec::new();
-    if !thread.state.is_empty() {
-        meta.push(thread.state.clone());
-    }
+    let mut meta = reader_state(thread, link, p);
     if !thread.post.author.is_empty() {
-        meta.push(format!("by {}", thread.post.author));
+        meta.push((format!("by {}", thread.post.author), p.muted));
     }
     if !thread.post.at.is_empty() {
-        meta.push(when(&thread.post.at));
+        meta.push((when(&thread.post.at), p.muted));
     }
     let n = thread.comments.len();
-    meta.push(match n {
-        1 => "1 comment".into(),
-        n => format!("{n} comments"),
-    });
-    out.extend(wrap(Line::styled(
-        meta.join(" · "),
-        Style::new().fg(p.muted),
-    )));
+    meta.push((
+        match n {
+            1 => "1 comment".into(),
+            n => format!("{n} comments"),
+        },
+        p.muted,
+    ));
+    let mut spans = Vec::new();
+    for (i, (text, fg)) in meta.into_iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", Style::new().fg(p.muted)));
+        }
+        spans.push(Span::styled(text, Style::new().fg(fg)));
+    }
+    out.extend(wrap(Line::from(spans)));
     out.push(Line::default());
     let body = |out: &mut Vec<Line<'static>>, c: &Comment, empty: &str| {
         if c.body.is_empty() {
@@ -1122,7 +1147,7 @@ mod tests {
             }],
             markdown: false,
         };
-        let text: Vec<String> = reader_lines(&t, 80, &Palette::load())
+        let text: Vec<String> = reader_lines(&t, &Link::default(), 80, &Palette::load())
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
@@ -1142,6 +1167,50 @@ mod tests {
     }
 
     #[test]
+    fn the_reader_colours_state_and_checks_as_the_rows_do() {
+        let p = Palette::load();
+        let thread = |state: &str| Thread {
+            title: "t".into(),
+            state: state.into(),
+            ..Thread::default()
+        };
+        let pr = |state: &str| Link {
+            kind: "pr".into(),
+            state: state.into(),
+            checks: "pass".into(),
+            ..Link::default()
+        };
+        let meta = |t: &Thread, l: &Link| -> Vec<(String, Color)> {
+            reader_lines(t, l, 80, &p)[1]
+                .spans
+                .iter()
+                .map(|s| (s.content.to_string(), s.style.fg.unwrap()))
+                .collect()
+        };
+        let open = meta(&thread("OPEN"), &pr("open"));
+        assert_eq!(open[0], ("open".into(), p.pine));
+        assert_eq!(open[2], ("✓ checks".into(), p.pine));
+        // The thread is fresher than the link, but doesn't say draft.
+        assert_eq!(
+            meta(&thread("MERGED"), &pr("open"))[0],
+            ("merged".into(), p.iris)
+        );
+        assert_eq!(
+            meta(&thread("OPEN"), &pr("draft"))[0],
+            ("draft".into(), p.muted)
+        );
+        // What the rows don't colour stays as the tracker says it.
+        let issue = Link {
+            kind: "issue".into(),
+            ..Link::default()
+        };
+        assert_eq!(
+            meta(&thread("CLOSED"), &issue)[0],
+            ("CLOSED".into(), p.muted)
+        );
+    }
+
+    #[test]
     fn github_bodies_are_drawn_as_markdown() {
         let t = Thread {
             title: "t".into(),
@@ -1152,7 +1221,7 @@ mod tests {
             markdown: true,
             ..Thread::default()
         };
-        let lines = reader_lines(&t, 80, &Palette::load());
+        let lines = reader_lines(&t, &Link::default(), 80, &Palette::load());
         let text: Vec<String> = lines
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())

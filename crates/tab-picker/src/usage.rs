@@ -230,7 +230,7 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize, height: usize) -> 
         span(format!("{:>reset_width$}", "RESET IN"), p.subtle),
     ]));
     for w in &q.windows {
-        body.extend(window_lines(w, q, p, now, bar_width, reset_width));
+        body.push(window_row(w, q, p, now, bar_width, reset_width));
     }
     if q.windows.is_empty() {
         body.push(Line::from(span("No quota windows reported", p.gold)));
@@ -243,16 +243,16 @@ fn quota_card(q: &Quota, p: &Palette, now: u64, width: usize, height: usize) -> 
     framed(title, body, border, p, width, height)
 }
 
-/// A quota window's meter row, and a line for its status when that isn't
-/// the card's.
-fn window_lines(
+/// A quota window's meter row, with its status in place of its reset when
+/// that isn't the card's.
+fn window_row(
     w: &Window,
     q: &Quota,
     p: &Palette,
     now: u64,
     bar_width: usize,
     reset_width: usize,
-) -> Vec<Line<'static>> {
+) -> Line<'static> {
     let used = w.used.filter(|n| n.is_finite());
     let color = match used {
         Some(n) if n >= 100.0 => p.love,
@@ -263,19 +263,24 @@ fn window_lines(
     let filled = used
         .map(|n| crate::round_cells(n.clamp(0.0, 100.0) / 100.0 * crate::approx(bar_width as u64)));
     let meter = if let Some(n) = filled {
-        // Half-cell strokes leave gaps between ticks; a thin dashed track
-        // avoids solid blocks merging visually across adjacent quota rows.
+        // A heavy line on a light track, as the session table's share bars:
+        // unbroken and readable, but a line, so adjacent quota rows don't
+        // merge as solid blocks would.
         vec![
-            span("╸".repeat(n), color),
-            span("┄".repeat(bar_width - n), p.hl_med),
+            span("━".repeat(n), color),
+            span("─".repeat(bar_width - n), p.hl_high),
         ]
     } else {
         vec![span("·".repeat(bar_width), p.subtle)]
     };
-    let reset = match w.reset {
-        Some(at) if at > now => duration(at - now),
-        Some(_) => "due ↻".into(),
-        None => "unknown".into(),
+    // A window's own trouble takes its RESET IN cell, keeping the table's
+    // rows intact; the card's own status is in its title.
+    let trouble = (w.status != "ok" && w.status != q.status).then(|| w.status.replace('_', " "));
+    let reset = match (&trouble, w.reset) {
+        (Some(t), _) => t.clone(),
+        (None, Some(at)) if at > now => duration(at - now),
+        (None, Some(_)) => "due ↻".into(),
+        (None, None) => "unknown".into(),
     };
     let mut row = vec![span(format!("{:<4} ", w.label), p.text)];
     row.extend(meter);
@@ -285,20 +290,13 @@ fn window_lines(
     ));
     row.push(span(
         format!("{reset:>reset_width$}"),
-        if w.reset.is_some_and(|at| at <= now) {
+        if trouble.is_some() || w.reset.is_some_and(|at| at <= now) {
             p.gold
         } else {
             p.text
         },
     ));
-    let mut lines = vec![Line::from(row)];
-    if w.status != "ok" && w.status != q.status {
-        lines.push(Line::from(span(
-            format!("{}: {}", w.label, w.status.replace('_', " ")),
-            p.gold,
-        )));
-    }
-    lines
+    Line::from(row)
 }
 
 /// `body` in a card's rounded border `width` by at least `height`, with
@@ -650,7 +648,7 @@ fn table_row(t: &Total, cols: &[(Col, usize)], p: &Palette, max: u64, via: &str)
             Col::Share => {
                 let n = share_cells(t.tokens.total(), max, w);
                 row.push(span("━".repeat(n), p.foam));
-                row.push(span("─".repeat(w - n), p.hl_med));
+                row.push(span("─".repeat(w - n), p.hl_high));
             }
             Col::Requests => row.push(span(right(&t.requests.to_string(), w), p.text)),
             Col::Input => row.push(num(t.tokens.input)),
@@ -1060,6 +1058,27 @@ mod tests {
                 assert!(lines.iter().any(|l| l.to_string().contains("100%")));
             }
         }
+    }
+
+    #[test]
+    fn an_unavailable_window_keeps_its_row() {
+        let p = Palette::load();
+        let mut q = quota("codex", None);
+        q.windows[0].status = "unavailable".into();
+        q.windows[0].reset = None;
+        let mut month = q.windows[0].clone();
+        month.label = "30d".into();
+        month.used = Some(0.0);
+        month.status = "ok".into();
+        q.windows.push(month);
+        let lines: Vec<String> = quota_card(&q, &p, 1000, 60, 0)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let at = lines.iter().position(|l| l.contains("5h")).unwrap();
+        assert!(lines[at].contains("unavailable"), "{lines:?}");
+        assert!(lines[at + 1].contains("30d"), "{lines:?}");
+        assert!(!lines.iter().any(|l| l.contains("5h:")), "{lines:?}");
     }
 
     #[test]
