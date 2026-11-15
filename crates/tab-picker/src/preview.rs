@@ -12,7 +12,7 @@ use std::ops::Range;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use switchyard_ui::Palette;
 use switchyard_ui::draw::str_width;
@@ -262,13 +262,15 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
 /// with the bytes of `text` it was drawn from. Each block (see `blocks`)
 /// is drawn on its own so its lines know where they came from; a blank
 /// line goes between blocks, except between the items of a tight list.
-/// Rules are drawn across the width.
+/// Rules are drawn across the width; quotes, code blocks and links as
+/// `draw_line` draws them.
 pub(crate) fn markdown(
     text: &str,
     width: usize,
     p: &Palette,
 ) -> Vec<(Line<'static>, Option<Range<usize>>)> {
-    let options = tui_markdown::Options::new(Sheet(*p)).table_width(crate::cells(width));
+    let sheet = Sheet(*p);
+    let options = tui_markdown::Options::new(sheet.clone()).table_width(crate::cells(width));
     let mut out = Vec::new();
     let mut prev: Option<Range<usize>> = None;
     for (range, rule) in blocks(text) {
@@ -296,15 +298,8 @@ pub(crate) fn markdown(
         }
         let lead = lines.iter().take_while(|l| l.width() == 0).count();
         for l in lines.into_iter().skip(lead) {
-            let base = l.style;
-            let line = Line::from(
-                l.spans
-                    .into_iter()
-                    .map(|s| Span::styled(s.content.into_owned(), base.patch(s.style)))
-                    .collect::<Vec<_>>(),
-            );
             out.extend(
-                wrap_line(line, width)
+                draw_line(l, width, &sheet)
                     .into_iter()
                     .map(|row| (row, Some(range.clone()))),
             );
@@ -314,6 +309,97 @@ pub(crate) fn markdown(
         out.push((Line::default(), Some(0..text.len())));
     }
     out
+}
+
+/// A line as tui-markdown drew it, as rows `width` wide with its style
+/// on its spans. A quote's `>` markers become bars down every row, in
+/// the quote's colour; an alert's body is in the text's colour, its
+/// title and bar in the alert's. A code block's line sits on a band, so
+/// it reads as a block rather than as inline code. A link shows its text
+/// once, without its destination after it.
+fn draw_line(l: Line<'_>, width: usize, sheet: &Sheet) -> Vec<Line<'static>> {
+    use tui_markdown::StyleSheet as _;
+    let base = l.style;
+    let mut spans = l.spans;
+    drop_link_targets(&mut spans, sheet.link());
+    let depth = quote_depth(&spans);
+    let code = base == sheet.code();
+    let alert = depth > 0 && !code && base != sheet.blockquote();
+    let body = if alert {
+        Style { fg: None, ..base }
+    } else {
+        base
+    };
+    let rest: Vec<Span<'static>> = spans
+        .into_iter()
+        .skip(if depth > 0 { depth + 1 } else { 0 })
+        .map(|s| Span::styled(s.content.into_owned(), body.patch(s.style)))
+        .collect();
+    let room = width.saturating_sub(2 * depth).max(1);
+    let rows = if code {
+        band(rest, room, sheet.0.surface)
+    } else {
+        wrap_line(Line::from(rest), room)
+    };
+    if depth == 0 {
+        return rows;
+    }
+    let bar = Span::styled(
+        "▎ ".repeat(depth),
+        Style::new().fg(base.fg.unwrap_or(sheet.0.muted)),
+    );
+    rows.into_iter()
+        .map(|mut row| {
+            row.spans.insert(0, bar.clone());
+            row
+        })
+        .collect()
+}
+
+/// How deep in quotes a line is, by the markers tui-markdown puts before
+/// it: a `>` span for each level, then a space.
+fn quote_depth(spans: &[Span<'_>]) -> usize {
+    let depth = spans.iter().take_while(|s| s.content == ">").count();
+    match spans.get(depth) {
+        Some(s) if depth > 0 && s.content == " " => depth,
+        _ => 0,
+    }
+}
+
+/// Drops the ` (destination)` tui-markdown puts after a link's text: a
+/// plain ` (`, the destination in the link style, and `)`.
+fn drop_link_targets(spans: &mut Vec<Span<'_>>, link: Style) {
+    let mut i = 0;
+    while i + 2 < spans.len() {
+        if spans[i].content == " ("
+            && spans[i].style == Style::default()
+            && spans[i + 1].style == link
+            && spans[i + 2].content == ")"
+        {
+            spans.drain(i..i + 3);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+/// `spans` wrapped to a band `width` wide on `bg`, a column of padding
+/// either side.
+fn band(spans: Vec<Span<'static>>, width: usize, bg: Color) -> Vec<Line<'static>> {
+    wrap_line(Line::from(spans), width.saturating_sub(2).max(1))
+        .into_iter()
+        .map(|row| {
+            let pad = width.saturating_sub(row.width() + 1);
+            let spans = std::iter::once(Span::raw(" "))
+                .chain(row.spans)
+                .chain(std::iter::once(Span::raw(" ".repeat(pad))))
+                .map(|s| {
+                    let style = s.style.bg(bg);
+                    s.style(style)
+                });
+            Line::from(spans.collect::<Vec<_>>())
+        })
+        .collect()
 }
 
 /// Whether a block is a list item, by its marker.
@@ -368,8 +454,9 @@ fn blocks(text: &str) -> Vec<(Range<usize>, bool)> {
     out
 }
 
-/// Markdown styles from the palette. Code keeps the text's background, so
-/// it reads as a colour rather than a block.
+/// Markdown styles from the palette. Inline code keeps the text's
+/// background, so it reads as a colour; `draw_line` puts code blocks on
+/// a band.
 #[derive(Clone)]
 struct Sheet(Palette);
 
@@ -386,7 +473,11 @@ impl tui_markdown::StyleSheet for Sheet {
         ""
     }
     fn code(&self) -> Style {
-        Style::new().fg(self.0.foam)
+        // Removing HIDDEN, which nothing sets, changes nothing drawn but
+        // tells a code block's lines from a Note's, which share the colour.
+        Style::new()
+            .fg(self.0.foam)
+            .remove_modifier(Modifier::HIDDEN)
     }
     fn code_block_fence(&self) -> &'static str {
         ""
@@ -431,6 +522,11 @@ impl tui_markdown::StyleSheet for Sheet {
             Warning => self.0.gold,
             Caution => self.0.love,
         })
+    }
+    fn alert_icon(&self, _kind: tui_markdown::AlertKind) -> &'static str {
+        // The default's emoji are drawn wider than they measure; the bar
+        // and the title's colour mark the alert.
+        ""
     }
     fn table_header(&self) -> Style {
         Style::new().fg(self.0.foam).add_modifier(Modifier::BOLD)
@@ -714,7 +810,7 @@ mod tests {
                 "  ",
                 "  1. first",
                 "  ",
-                "  fn main() {}"
+                "   fn main() {}                         "
             ]
         );
         let style_of = |row: usize, word: &str| {
@@ -736,6 +832,116 @@ mod tests {
         assert_eq!(style_of(2, "code").fg, Some(p.foam));
         assert_eq!(style_of(2, "Some").fg, Some(p.text));
         assert_eq!(style_of(9, "fn main").fg, Some(p.foam));
+        // A code block sits on a band; inline code doesn't.
+        assert_eq!(style_of(9, "fn main").bg, Some(p.surface));
+        assert_eq!(style_of(2, "code").bg, None);
+    }
+
+    fn md_rows(md: &str, width: usize) -> Vec<Line<'static>> {
+        markdown(md, width, &Palette::load())
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect()
+    }
+
+    fn span_with<'a>(line: &'a Line<'static>, word: &str) -> &'a Span<'static> {
+        line.spans
+            .iter()
+            .find(|s| s.content.contains(word))
+            .unwrap()
+    }
+
+    #[test]
+    fn alerts_draw_as_callouts_with_a_bar_and_title() {
+        let p = Palette::load();
+        let lines = md_rows(
+            "> [!WARNING]\n> Mind the gap between the train and the platform.",
+            24,
+        );
+        let rows: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(
+            rows,
+            [
+                "▎ Warning",
+                "▎ Mind the gap between",
+                "▎ the train and the",
+                "▎ platform."
+            ]
+        );
+        // The bar and title in the alert's colour, the body in the text's.
+        assert_eq!(lines[0].spans[0].style.fg, Some(p.gold));
+        let title = span_with(&lines[0], "Warning").style;
+        assert_eq!(title.fg, Some(p.gold));
+        assert!(title.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(span_with(&lines[1], "Mind").style.fg, None);
+        assert!(rows.iter().all(|r| str_width(r) <= 24));
+
+        // A Note shares inline code's colour, but only its code blocks
+        // sit on a band.
+        let lines = md_rows("> [!NOTE]\n> Read this.\n>\n> ```\n> x\n> ```", 12);
+        assert_eq!(
+            lines.iter().map(text).collect::<Vec<_>>(),
+            ["▎ Note", "▎ Read this.", "▎ ", "▎  x        "]
+        );
+        assert_eq!(span_with(&lines[0], "Note").style.fg, Some(p.foam));
+        assert_eq!(span_with(&lines[1], "Read").style.bg, None);
+        assert_eq!(span_with(&lines[3], "x").style.bg, Some(p.surface));
+    }
+
+    #[test]
+    fn quotes_draw_a_bar_on_every_row_and_nest() {
+        let p = Palette::load();
+        let lines = md_rows("> a quote that wraps\n>\n> > nested", 12);
+        let rows: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(rows, ["▎ a quote", "▎ that wraps", "▎ ", "▎ ▎ nested"]);
+        assert_eq!(lines[0].spans[0].style.fg, Some(p.subtle));
+        assert!(
+            !lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
+    }
+
+    #[test]
+    fn code_blocks_fill_a_band_and_wrap_inside_it() {
+        let p = Palette::load();
+        let lines = md_rows("```\nlet a = 1;\n\nlet long_name = 2;\n```", 14);
+        let rows: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(
+            rows,
+            [
+                " let a = 1;   ",
+                "              ",
+                " let          ",
+                " long_name =  ",
+                " 2;           "
+            ]
+        );
+        assert!(
+            lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .all(|s| s.style.bg == Some(p.surface))
+        );
+    }
+
+    #[test]
+    fn links_show_their_text_once() {
+        let p = Palette::load();
+        let lines = md_rows(
+            "See [the docs](https://example.com/docs) or <https://example.com>.",
+            80,
+        );
+        assert_eq!(
+            lines.iter().map(text).collect::<Vec<_>>(),
+            ["See the docs or https://example.com."]
+        );
+        let link = span_with(&lines[0], "the docs").style;
+        assert_eq!(link.fg, Some(p.foam));
+        assert!(link.add_modifier.contains(Modifier::UNDERLINED));
+        // Text in brackets after a link stays.
+        assert_eq!(text(&md_rows("[a](b) (c)", 80)[0]), "a (c)");
     }
 
     #[test]
