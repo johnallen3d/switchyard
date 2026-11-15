@@ -7,7 +7,7 @@
 //! On the highlighted item: Enter or `o` opens it in the browser; `v`
 //! reads its description and comments here, in a scrolling reader over
 //! the float (a card, issue or PR; see core's `item_view`); `c`
-//! types a one-line comment for a card, issue or PR; `x` closes a card or
+//! types a comment for a card, issue or PR, in a wrapping prompt box; `x` closes a card or
 //! an issue (not a PR); `r` marks a
 //! draft PR ready for review. Nothing mutates without its explicit key and
 //! then a confirmation naming the item (Enter or `y` runs it, anything
@@ -28,8 +28,9 @@ use ratatui::widgets::{Block, Clear};
 use switchyard_core::item_actions::{Action, Item};
 use switchyard_core::item_view::{Comment, Thread};
 use switchyard_ui::Palette;
-use switchyard_ui::draw::{delete_word, str_width};
+use switchyard_ui::draw::str_width;
 use switchyard_ui::popup;
+use switchyard_ui::prompt_box::{self, PromptBox};
 
 use crate::model::Link;
 
@@ -56,8 +57,9 @@ impl Entry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Mode {
     List,
-    /// Typing a comment for the highlighted card, issue or PR.
-    Comment(String),
+    /// Typing a comment for the highlighted card, issue or PR (in
+    /// `Items::comment`).
+    Comment,
     /// Asking whether to run `action` (with a comment's `body`).
     Confirm {
         action: Action,
@@ -84,6 +86,21 @@ pub struct Items {
     pub reader_only: bool,
     /// The reader's last drawn height and furthest scroll, for its keys.
     page: Cell<(usize, usize)>,
+    /// The comment being typed, kept while confirming or after a failed
+    /// run. It is never saved to a prompt file.
+    comment: PromptBox,
+}
+
+/// Text rows the comment box shows, growing with the comment; longer ones
+/// scroll to their end.
+const COMMENT_MIN_ROWS: u16 = 3;
+const COMMENT_MAX_ROWS: u16 = 8;
+
+/// An empty comment box.
+fn comment_box() -> PromptBox {
+    let mut b = PromptBox::new();
+    b.set_placeholder("Type a comment");
+    b
 }
 
 /// What a key asks of the picker.
@@ -208,6 +225,7 @@ impl Items {
             mode: Mode::List,
             reader_only: false,
             page: Cell::new((0, 0)),
+            comment: comment_box(),
         })
     }
 
@@ -234,28 +252,23 @@ impl Items {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         match std::mem::replace(&mut self.mode, Mode::List) {
             Mode::List => self.list_key(k, ctrl),
-            Mode::Comment(mut text) => {
+            Mode::Comment => {
+                let newline = alt || k.modifiers.contains(KeyModifiers::SHIFT);
                 match k.code {
                     KeyCode::Esc => return Outcome::Stay,
                     KeyCode::Char('c') if ctrl => return Outcome::Stay,
-                    KeyCode::Enter if text.trim().is_empty() => {}
+                    KeyCode::Enter if newline => self.comment.field.insert_newline(),
+                    KeyCode::Enter if self.comment.text().is_empty() => {}
                     KeyCode::Enter => {
                         self.mode = Mode::Confirm {
                             action: Action::Comment,
-                            body: text.trim().to_string(),
+                            body: self.comment.text(),
                         };
                         return Outcome::Stay;
                     }
-                    KeyCode::Char('u') if ctrl => text.clear(),
-                    KeyCode::Char('w') if ctrl => delete_word(&mut text),
-                    KeyCode::Backspace if alt || ctrl => delete_word(&mut text),
-                    KeyCode::Backspace => {
-                        text.pop();
-                    }
-                    KeyCode::Char(c) if !ctrl && !alt => text.push(c),
-                    _ => {}
+                    _ => self.comment.key(k),
                 }
-                self.mode = Mode::Comment(text);
+                self.mode = Mode::Comment;
                 Outcome::Stay
             }
             Mode::Read { thread, scroll } => self.read_key(k, ctrl, thread, scroll),
@@ -266,7 +279,7 @@ impl Items {
                 },
                 // Back, keeping a comment's text to edit.
                 _ if action == Action::Comment => {
-                    self.mode = Mode::Comment(body);
+                    self.mode = Mode::Comment;
                     Outcome::Stay
                 }
                 _ => Outcome::Stay,
@@ -280,7 +293,8 @@ impl Items {
             let e = me.entry();
             if e.actions().contains(&a) {
                 me.mode = if a == Action::Comment {
-                    Mode::Comment(String::new())
+                    me.comment.clear();
+                    Mode::Comment
                 } else {
                     Mode::Confirm {
                         action: a,
@@ -373,7 +387,8 @@ impl Items {
                 };
             }
             KeyCode::Char('c') if self.entry().actions().contains(&Action::Comment) => {
-                self.mode = Mode::Comment(String::new());
+                self.comment.clear();
+                self.mode = Mode::Comment;
                 return Outcome::Stay;
             }
             KeyCode::Up | KeyCode::Char('k') => scroll.saturating_sub(1),
@@ -402,12 +417,26 @@ impl Items {
 
     /// After a failed run: back to the list, or to a comment's text so it
     /// isn't lost.
-    pub fn failed(&mut self, action: Action, body: String) {
+    pub fn failed(&mut self, action: Action, body: &str) {
         self.mode = if action == Action::Comment {
-            Mode::Comment(body)
+            if self.comment.text() != body {
+                self.comment.clear();
+                self.comment.paste(body);
+            }
+            Mode::Comment
         } else {
             Mode::List
         };
+    }
+
+    /// Text John pasted, into the comment being typed; false when no
+    /// comment is.
+    pub fn paste(&mut self, text: &str) -> bool {
+        let typing = self.mode == Mode::Comment;
+        if typing {
+            self.comment.paste(text);
+        }
+        typing
     }
 
     /// The footer's hints while the float is open.
@@ -425,7 +454,12 @@ impl Items {
                 h.extend([("esc", "dismiss"), ("?", "keys")]);
                 h
             }
-            Mode::Comment(_) => vec![("⏎", "review"), ("esc", "back"), ("F1", "keys")],
+            Mode::Comment => vec![
+                ("⏎", "review"),
+                ("⌥⏎", "newline"),
+                ("esc", "back"),
+                ("F1", "keys"),
+            ],
             Mode::Confirm { .. } => vec![("⏎ y", "yes"), ("esc", "no")],
             Mode::Read { .. } => {
                 let mut h = vec![("↑↓ j k", "scroll"), ("o", "open")];
@@ -457,7 +491,7 @@ impl Items {
     /// it), in columns, then,
     /// while typing a comment or confirming, the comment or the question.
     /// Its keys are in the footer (see `hints`).
-    pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
+    pub fn draw(&mut self, f: &mut Frame, area: Rect, p: &Palette) {
         if let Mode::Read { thread, scroll } = &self.mode {
             self.draw_reader(f, area, p, thread, *scroll);
             return;
@@ -487,12 +521,19 @@ impl Items {
         let title = format!("Work items · {}", self.label);
         // Less the borders and padding.
         let text_w = usize::from(popup::LIST_WIDTH.min(area.width).saturating_sub(4)).max(1);
-        // A confirmation's question, wrapped whole; a comment being typed.
+        // A confirmation's question, wrapped whole; the box a comment is
+        // typed in, as rows of its text and chrome.
         let foot = match &self.mode {
             Mode::Confirm { .. } => self
                 .question()
                 .map_or_else(Vec::new, |q| crate::preview::wrap(&q, text_w)),
-            Mode::Comment(_) => vec![String::new()],
+            Mode::Comment => {
+                let card_w = u16::try_from(text_w).unwrap_or(u16::MAX);
+                let rows = self
+                    .comment
+                    .rows(card_w, COMMENT_MIN_ROWS, COMMENT_MAX_ROWS);
+                vec![String::new(); usize::from(rows + prompt_box::CHROME_ROWS)]
+            }
             _ => Vec::new(),
         };
         // A blank line between the list and what is under it.
@@ -549,8 +590,9 @@ impl Items {
     }
 
     /// The box's last lines: a confirmation's question, wrapped, or the
-    /// comment being typed.
-    fn draw_foot(&self, f: &mut Frame, inner: Rect, foot: Vec<String>, p: &Palette) {
+    /// comment being typed, in a prompt box naming what it is on under its
+    /// text.
+    fn draw_foot(&mut self, f: &mut Frame, inner: Rect, foot: Vec<String>, p: &Palette) {
         let top = inner.bottom().saturating_sub(crate::cells(foot.len()));
         let line = |i: usize| Rect {
             y: top + crate::cells(i),
@@ -558,22 +600,33 @@ impl Items {
             ..inner
         };
         match &self.mode {
-            Mode::Comment(text) => {
-                if top < inner.y {
+            Mode::Comment => {
+                let top = top.max(inner.y);
+                let card = Rect {
+                    y: top,
+                    height: inner.bottom() - top,
+                    ..inner
+                };
+                let rows = crate::cells(foot.len()).saturating_sub(prompt_box::CHROME_ROWS);
+                let name = self.entry().name();
+                let Some((chips, skip)) = self.comment.draw(f, p, card, rows, true, None) else {
                     return;
+                };
+                let bg = p.overlay;
+                let mut left = vec![
+                    Span::styled("on ", Style::new().fg(p.muted).bg(bg)),
+                    Span::styled(
+                        name,
+                        Style::new().fg(p.text).bg(bg).add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if skip > 0 {
+                    left.push(Span::styled(
+                        format!("  +{skip} lines above"),
+                        Style::new().fg(p.muted).bg(bg),
+                    ));
                 }
-                let muted = Style::new().fg(p.muted);
-                f.render_widget(
-                    Line::from(vec![
-                        Span::styled(format!("comment on {}: ", self.entry().name()), muted),
-                        Span::styled(
-                            text.clone(),
-                            Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("▏", Style::new().fg(p.iris)),
-                    ]),
-                    line(0),
-                );
+                f.render_widget(Line::from(left), chips);
             }
             Mode::Confirm { action, .. } => {
                 // Red only for what can't be undone.
@@ -916,7 +969,7 @@ mod tests {
         press(&mut i, KeyCode::Char('c'));
         // Empty: Enter does nothing; letters (even x and r) are text.
         press(&mut i, KeyCode::Enter);
-        assert_eq!(i.mode, Mode::Comment(String::new()));
+        assert_eq!(i.mode, Mode::Comment);
         typed(&mut i, "rx ready ");
         press(&mut i, KeyCode::Enter);
         assert_eq!(
@@ -925,17 +978,40 @@ mod tests {
         );
         // No goes back to the text, which a failed run also keeps.
         press(&mut i, KeyCode::Esc);
-        assert_eq!(i.mode, Mode::Comment("rx ready".into()));
+        assert_eq!(
+            (&i.mode, i.comment.text()),
+            (&Mode::Comment, "rx ready".into())
+        );
         press(&mut i, KeyCode::Enter);
         let Outcome::Run { action, body, .. } = press(&mut i, KeyCode::Enter) else {
             panic!("no run")
         };
-        i.failed(action, body);
-        assert_eq!(i.mode, Mode::Comment("rx ready".into()));
+        i.failed(action, &body);
+        assert_eq!(
+            (&i.mode, i.comment.text()),
+            (&Mode::Comment, "rx ready".into())
+        );
         // Escape leaves the comment, then the float.
         press(&mut i, KeyCode::Esc);
         assert_eq!(i.mode, Mode::List);
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Close);
+    }
+
+    #[test]
+    fn a_comment_takes_newlines_and_pastes() {
+        let mut i = items();
+        assert!(!i.paste("not typing"));
+        press(&mut i, KeyCode::Down);
+        press(&mut i, KeyCode::Char('c'));
+        typed(&mut i, "one");
+        i.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert!(i.paste("two\r\nthree"));
+        assert_eq!(i.mode, Mode::Comment);
+        press(&mut i, KeyCode::Enter);
+        assert_eq!(
+            i.question().unwrap(),
+            "Post a comment on card 1041: “one\ntwo\nthree”?"
+        );
     }
 
     #[test]
@@ -967,7 +1043,7 @@ mod tests {
         );
         assert!(matches!(i.mode, Mode::Read { .. }));
         press(&mut i, KeyCode::Char('c'));
-        assert_eq!(i.mode, Mode::Comment(String::new()));
+        assert_eq!((&i.mode, i.comment.text()), (&Mode::Comment, String::new()));
         press(&mut i, KeyCode::Esc);
         i.show(Thread::default());
         // Esc goes back to the list, not out of the float.

@@ -511,6 +511,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("v", "read description and comments here"),
                 ("j k ␣ b g G", "scroll the reader; esc q back"),
                 ("c", "comment on a card, issue or PR (asks first)"),
+                ("⌥⏎", "new line in a comment"),
                 ("x", "close a card or issue (asks first)"),
                 ("r", "mark a draft PR ready (asks first)"),
                 ("⏎ y", "confirm; other keys go back"),
@@ -708,7 +709,11 @@ impl App {
     /// A bracketed paste: tabs, tasks, or a failure to get either.
     fn paste(&mut self, text: &str) {
         let Some((kind, body)) = protocol::data(text) else {
-            // Anything else John pasted goes into the reply box, if open.
+            // Anything else John pasted goes into a comment being typed, or
+            // the reply box, if open.
+            if self.items.as_mut().is_some_and(|i| i.paste(text)) {
+                return;
+            }
             if let Some(r) = &mut self.reply {
                 r.prompt.paste(text);
             }
@@ -2866,8 +2871,8 @@ impl App {
     }
 
     /// The ctrl-r work items float, when open (see items.rs).
-    fn draw_items(&self, f: &mut Frame, area: Rect) {
-        if let Some(i) = &self.items {
+    fn draw_items(&mut self, f: &mut Frame, area: Rect) {
+        if let Some(i) = &mut self.items {
             i.draw(f, area, &self.p);
         }
     }
@@ -4457,7 +4462,7 @@ impl App {
                     }
                     Err(e) => {
                         if let Some(i) = &mut self.items {
-                            i.failed(action, body);
+                            i.failed(action, &body);
                         }
                         self.note = Some((e, true));
                     }
@@ -4688,9 +4693,14 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                         .and_then(|()| out.flush());
                 }
             }
-            // cmd+k's `current`, and John's own pastes, for the reply box.
+            // cmd+k's `current`, and John's own pastes, for the reply box
+            // or a work item comment.
             Event::Paste(text)
                 if app.reply.is_some()
+                    || app
+                        .items
+                        .as_ref()
+                        .is_some_and(|i| i.mode == items::Mode::Comment)
                     || protocol::data(&text).is_some_and(|(k, _)| k == "current") =>
             {
                 app.paste(&text);

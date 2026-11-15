@@ -294,6 +294,13 @@ impl PromptBox {
             width: card.width.saturating_sub(4),
             height: rows,
         };
+        // The field keeps its scroll when text is deleted; back to the top
+        // once it all fits again, so no rows are left blank below.
+        let top = self.field.scroll_offset().0;
+        if top > 0 && self.rows(card.width, 0, u16::MAX) <= rows {
+            self.field
+                .scroll((-i16::try_from(top).unwrap_or(i16::MAX), 0));
+        }
         self.field.set_style(Style::new().fg(p.text).bg(fill));
         self.field
             .set_placeholder_style(Style::new().fg(p.muted).bg(fill));
