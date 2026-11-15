@@ -448,8 +448,19 @@ fn open_tab(
     run: &[&str],
 ) -> Result<(String, String), String> {
     if let Some(session) = existing {
+        // Leave the host's active window alone: the picker decides what
+        // John sees next (see lua/switchyard/new.lua).
         let mut args = vec![
-            "window", "new", "-s", &session, slug, "-c", cwd, "--json", "--",
+            "window",
+            "new",
+            "--focus=false",
+            "-s",
+            &session,
+            slug,
+            "-c",
+            cwd,
+            "--json",
+            "--",
         ];
         args.extend(run);
         let window = rex_json(host, &args)?;
