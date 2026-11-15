@@ -125,7 +125,7 @@ use ratatui::crossterm::execute;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 use switchyard_core::commands::{self, SlashCommand};
 use switchyard_core::rex::log;
@@ -134,6 +134,7 @@ use switchyard_ui::chrome;
 use switchyard_ui::draw::{self, delete_word, highlight, pill, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
+use switchyard_ui::popup;
 use switchyard_ui::prompt_box::{self, PromptBox};
 use switchyard_ui::protocol::{self, hex};
 
@@ -169,6 +170,14 @@ pub(crate) fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+/// Dim the float behind a popup, all but the bottom border, which keeps
+/// the popup's keys.
+pub(crate) fn backdrop(f: &mut Frame, p: &Palette) {
+    let mut area = f.area();
+    area.height = area.height.saturating_sub(1);
+    popup::backdrop(f, p, area);
 }
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
@@ -424,6 +433,9 @@ const DETAIL_LINK_ROWS: usize = 3;
 
 /// The widest a work item's title goes in the ctrl-b chooser.
 const CHOOSER_TITLE_MAX: usize = 60;
+
+/// The least room the chooser shows a link's URL in, after its title.
+const CHOOSER_URL_MIN: usize = 16;
 
 /// A task's links whose titles the right side's header shows.
 fn titled(links: &[Link]) -> impl Iterator<Item = &Link> {
@@ -2479,12 +2491,13 @@ impl App {
         } else {
             self.draw_list(f, body);
         }
-        self.draw_chooser(f, body);
-        self.draw_items(f, body);
-        self.draw_snooze(f, body);
         if let Some((card, rows)) = reply_card {
             self.draw_reply(f, card, rows);
         }
+        // Over the reply box, so their backdrop dims it too.
+        self.draw_chooser(f, body);
+        self.draw_items(f, body);
+        self.draw_snooze(f, body);
     }
 
     /// Inbox's list and the preview under it, when there is room for both:
@@ -2747,23 +2760,15 @@ impl App {
     fn draw_snooze(&self, f: &mut Frame, area: Rect) {
         let Some(prompt) = &self.snooze else { return };
         let p = &self.p;
-        let width = 60.min(area.width);
-        let height = 4.min(area.height);
-        let r = centered(area, width, height);
-        f.render_widget(Clear, r);
-        let title = format!(" Snooze {} ", prompt.label);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(title, Style::new().fg(p.text)));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
+        backdrop(f, p);
+        let r = popup::list_rect(area, 4);
+        let title = format!("Snooze {}", prompt.label);
+        let inner = popup::open(f, r, popup::block(p, &title));
         if inner.height == 0 {
             return;
         }
         let input = Line::from(vec![
-            Span::styled(" until ", Style::new().fg(p.muted)),
+            Span::styled("until ", Style::new().fg(p.muted)),
             Span::styled(
                 prompt.text.clone(),
                 Style::new().fg(p.text).add_modifier(Modifier::BOLD),
@@ -2783,7 +2788,7 @@ impl App {
             (Ok(0), _) => Line::from(vec![
                 Span::styled(
                     format!(
-                        " Snoozed until {} · ",
+                        "Snoozed until {} · ",
                         snooze::describe(prompt.current, self.now)
                     ),
                     Style::new().fg(p.muted),
@@ -2791,15 +2796,14 @@ impl App {
                 Span::styled("⏎", Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
                 Span::styled(" wakes it", Style::new().fg(p.muted)),
             ]),
-            (Ok(until), _) => Line::styled(
-                format!(" {}", snooze::describe(*until, self.now)),
-                Style::new().fg(p.pine),
-            ),
+            (Ok(until), _) => {
+                Line::styled(snooze::describe(*until, self.now), Style::new().fg(p.pine))
+            }
             (Err(_), true) => Line::styled(
-                format!(" Try {}", snooze::EXAMPLES),
+                format!("Try {}", snooze::EXAMPLES),
                 Style::new().fg(p.muted),
             ),
-            (Err(e), false) => Line::styled(format!(" {e}"), Style::new().fg(p.love)),
+            (Err(e), false) => Line::styled(e.clone(), Style::new().fg(p.love)),
         };
         f.render_widget(line, row);
     }
@@ -2809,54 +2813,27 @@ impl App {
     fn draw_chooser(&self, f: &mut Frame, area: Rect) {
         let Some(c) = &self.chooser else { return };
         let p = &self.p;
-        let want = c
-            .links
-            .iter()
-            .map(|l| {
-                let title = if l.title.is_empty() {
-                    0
-                } else {
-                    str_width(&l.title).min(CHOOSER_TITLE_MAX) + 2
-                };
-                str_width(&l.short())
-                    + l.badge_state().map_or(0, |(s, _)| str_width(&s) + 1)
-                    + title
-                    + str_width(&l.url)
-                    + 6
-            })
-            .max()
-            .unwrap_or(0);
-        let width = cells(want).saturating_add(2).min(area.width);
-        let height = cells(c.links.len()).saturating_add(2).min(area.height);
-        let r = centered(area, width, height);
-        f.render_widget(Clear, r);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(" Open link ", Style::new().fg(p.text)));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
+        backdrop(f, p);
+        let height = cells(c.links.len()).saturating_add(2);
+        let r = popup::list_rect(area, height);
+        let inner = popup::open(f, r, popup::block(p, "Open link"));
         for (i, l) in c.links.iter().enumerate().take(inner.height as usize) {
             let (short, state, url) = (l.short(), l.badge_state(), &l.url);
             let selected = i == c.selected;
-            let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
                 y: inner.y + cells(i),
                 height: 1,
                 ..inner
             };
-            f.buffer_mut().set_style(row, Style::new().bg(bg));
-            let edge = if selected {
-                Span::styled("▎", Style::new().fg(p.iris).bg(bg))
-            } else {
-                Span::styled(" ", Style::new().bg(bg))
-            };
+            if selected {
+                popup::select(f, p, inner, row);
+            }
+            let bg = if selected { p.overlay } else { p.base };
             let mut style = Style::new().fg(p.text).bg(bg);
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let mut spans = vec![edge, Span::styled(short, style)];
+            let mut spans = vec![Span::styled(short, style)];
             if let Some((text, tone)) = state {
                 let fg = match tone {
                     Tone::Merged => p.iris,
@@ -2874,11 +2851,15 @@ impl App {
                     Style::new().fg(p.subtle).bg(bg),
                 ));
             }
+            // The URL in what room the title leaves, unless that is too
+            // little to tell one from another.
             let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
-            spans.push(Span::styled(
-                preview::clip_width(&format!("  {url}"), room),
-                Style::new().fg(p.muted).bg(bg),
-            ));
+            if room >= CHOOSER_URL_MIN {
+                spans.push(Span::styled(
+                    preview::clip_width(&format!("  {url}"), room),
+                    Style::new().fg(p.muted).bg(bg),
+                ));
+            }
             f.render_widget(Line::from(spans), row);
         }
     }
@@ -4040,6 +4021,24 @@ impl App {
         f.render_widget(Line::from(spans), area);
     }
 
+    /// The footer's hints for the snooze prompt, work items or link
+    /// chooser, when one is open: the one place their keys are shown.
+    fn popup_hints(&self) -> Option<Vec<(&'static str, &'static str)>> {
+        if let Some(z) = &self.snooze {
+            let enter = match z.until {
+                Ok(0) => "wake",
+                _ => "snooze",
+            };
+            return Some(vec![("⏎", enter), ("esc", "cancel"), ("F1", "keys")]);
+        }
+        if let Some(i) = &self.items {
+            return Some(i.hints());
+        }
+        self.chooser
+            .as_ref()
+            .map(|_| vec![("⏎", "open"), ("esc", "close"), ("?", "keys")])
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         if let Some((msg, failed)) = &self.note {
@@ -4049,6 +4048,9 @@ impl App {
                 area,
             );
             return;
+        }
+        if let Some(h) = &self.help {
+            return self.draw_hints(f, area, &h.hints());
         }
         if let Some(sb) = &self.scrollback {
             return self.draw_scrollback_footer(f, area, sb);
@@ -4064,30 +4066,8 @@ impl App {
             f.render_widget(Line::from(spans), area);
             return;
         }
-        if let Some(z) = &self.snooze {
-            let enter = match z.until {
-                Ok(0) => "wake",
-                _ => "snooze",
-            };
-            let (spans, _) = draw::hints(
-                p,
-                &[("⏎", enter, p.subtle), ("F1", "keys", p.subtle)],
-                area.width as usize,
-            );
-            f.render_widget(Line::from(spans), area);
-            return;
-        }
-        if let Some(i) = &self.items {
-            return self.draw_hints(f, area, &i.hints());
-        }
-        if self.chooser.is_some() {
-            let (spans, _) = draw::hints(
-                p,
-                &[("⏎", "open", p.subtle), ("?", "keys", p.subtle)],
-                area.width as usize,
-            );
-            f.render_widget(Line::from(spans), area);
-            return;
+        if let Some(hints) = self.popup_hints() {
+            return self.draw_hints(f, area, &hints);
         }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_task()) {
             f.render_widget(Line::from(self.armed_task_spans(t)), area);

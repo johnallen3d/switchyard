@@ -23,11 +23,12 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
 
-use ratatui::widgets::{Block, Borders, Clear};
+use ratatui::widgets::{Block, Clear};
 use switchyard_core::item_actions::{Action, Item};
 use switchyard_core::item_view::{Comment, Thread};
 use switchyard_ui::Palette;
-use switchyard_ui::draw::{delete_word, str_width};
+use switchyard_ui::draw::delete_word;
+use switchyard_ui::popup;
 
 use crate::model::{Link, Tone};
 
@@ -102,9 +103,6 @@ pub enum Outcome {
     /// Why the key does nothing here, for the footer.
     Refuse(String),
 }
-
-/// The widest the list's box grows for its rows, in columns.
-const MAX_WIDTH: usize = 100;
 
 /// The key that asks for an action, as the float names it.
 fn action_key(a: Action) -> (&'static str, &'static str) {
@@ -385,14 +383,16 @@ impl Items {
         })
     }
 
-    /// A small box over the list: one item a line with its state, the
-    /// actions it takes and its title (its URL until the tracker names
-    /// it), then a line for the mode.
+    /// A box over the list: one item a line with its state, the actions it
+    /// takes and its title (its URL until the tracker names it), then,
+    /// while typing a comment or confirming, the comment or the question.
+    /// Its keys are in the footer (see `hints`).
     pub fn draw(&self, f: &mut Frame, area: Rect, p: &Palette) {
         if let Mode::Read { thread, scroll } = &self.mode {
             self.draw_reader(f, area, p, thread, *scroll);
             return;
         }
+        crate::backdrop(f, p);
         let row_text = |e: &Entry| {
             let acts: Vec<&str> = e.actions().into_iter().map(|a| action_key(a).0).collect();
             // Its title, which Enter's URL says nothing of; the URL only
@@ -403,66 +403,40 @@ impl Items {
             };
             (e.link.short(), e.link.badge_state(), acts.join(" "), about)
         };
-        let title = format!(" Work items · {} ", self.label);
-        let want = self
-            .entries
-            .iter()
-            .map(|e| {
-                let (short, state, acts, (about, _)) = row_text(e);
-                // A long title is cut at the box's edge rather than widening it.
-                (str_width(&short)
-                    + state.as_ref().map_or(0, |(s, _)| str_width(s) + 1)
-                    + str_width(&acts)
-                    + str_width(&about)
-                    + 8)
-                .min(MAX_WIDTH)
-            })
-            .chain([
-                str_width(&title) + 4,
-                self.question()
-                    .map_or(0, |q| (str_width(&q) + 4).min(MAX_WIDTH)),
-                56,
-            ])
-            .max()
-            .unwrap_or(0);
-        let width = crate::cells(want).saturating_add(2).min(area.width);
-        // A confirmation's question, wrapped whole, above its keys.
-        let asked = self.question().map_or_else(Vec::new, |q| {
-            crate::preview::wrap(&q, usize::from(width.saturating_sub(4)).max(1))
-        });
-        let height = crate::cells(self.entries.len() + asked.len())
-            .saturating_add(4)
-            .min(area.height);
-        let r = crate::centered(area, width, height);
-        f.render_widget(Clear, r);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(title, Style::new().fg(p.text)));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        let rows = usize::from(inner.height).saturating_sub(2 + asked.len());
+        let title = format!("Work items · {}", self.label);
+        // Less the borders and padding.
+        let text_w = usize::from(popup::LIST_WIDTH.min(area.width).saturating_sub(4)).max(1);
+        // A confirmation's question, wrapped whole; a comment being typed.
+        let foot = match &self.mode {
+            Mode::Confirm { .. } => self
+                .question()
+                .map_or_else(Vec::new, |q| crate::preview::wrap(&q, text_w)),
+            Mode::Comment(_) => vec![String::new()],
+            _ => Vec::new(),
+        };
+        // A blank line between the list and what is under it.
+        let below = if foot.is_empty() { 0 } else { foot.len() + 1 };
+        let height = crate::cells(self.entries.len() + below).saturating_add(2);
+        let r = popup::list_rect(area, height);
+        let inner = popup::open(f, r, popup::block(p, &title));
+        let rows = usize::from(inner.height).saturating_sub(below);
         for (i, e) in self.entries.iter().enumerate().take(rows) {
             let (short, state, acts, (about, titled)) = row_text(e);
             let selected = i == self.selected;
-            let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
                 y: inner.y + crate::cells(i),
                 height: 1,
                 ..inner
             };
-            f.buffer_mut().set_style(row, Style::new().bg(bg));
-            let edge = if selected {
-                Span::styled("▎", Style::new().fg(p.iris).bg(bg))
-            } else {
-                Span::styled(" ", Style::new().bg(bg))
-            };
+            if selected {
+                popup::select(f, p, inner, row);
+            }
+            let bg = if selected { p.overlay } else { p.base };
             let mut style = Style::new().fg(p.text).bg(bg);
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            let mut spans = vec![edge, Span::styled(short, style)];
+            let mut spans = vec![Span::styled(short, style)];
             if let Some((text, tone)) = state {
                 let fg = match tone {
                     Tone::Merged => p.iris,
@@ -487,118 +461,87 @@ impl Items {
             ));
             f.render_widget(Line::from(spans), row);
         }
-        self.draw_foot(f, inner, asked, p);
+        self.draw_foot(f, inner, foot, p);
     }
 
-    /// The box's last lines: a confirmation's question, wrapped, then the
-    /// mode line.
-    fn draw_foot(&self, f: &mut Frame, inner: Rect, asked: Vec<String>, p: &Palette) {
-        if inner.height < 2 {
-            return;
-        }
-        let bottom = Rect {
-            y: inner.bottom() - 1,
+    /// The box's last lines: a confirmation's question, wrapped, or the
+    /// comment being typed.
+    fn draw_foot(&self, f: &mut Frame, inner: Rect, foot: Vec<String>, p: &Palette) {
+        let top = inner.bottom().saturating_sub(crate::cells(foot.len()));
+        let line = |i: usize| Rect {
+            y: top + crate::cells(i),
             height: 1,
             ..inner
         };
-        // Red only for what can't be undone.
-        let fg = match self.mode {
-            Mode::Confirm {
-                action: Action::Close,
-                ..
-            } => p.love,
-            _ => p.text,
-        };
-        let above = bottom.y.saturating_sub(crate::cells(asked.len()));
-        for (i, q) in asked.into_iter().enumerate() {
-            let y = above + crate::cells(i);
-            if y >= inner.y {
-                let row = Rect { y, ..bottom };
-                let style = Style::new().fg(fg).add_modifier(Modifier::BOLD);
-                f.render_widget(Span::styled(format!(" {q}"), style), row);
+        match &self.mode {
+            Mode::Comment(text) => {
+                if top < inner.y {
+                    return;
+                }
+                let muted = Style::new().fg(p.muted);
+                f.render_widget(
+                    Line::from(vec![
+                        Span::styled(format!("comment on {}: ", self.entry().name()), muted),
+                        Span::styled(
+                            text.clone(),
+                            Style::new().fg(p.text).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled("▏", Style::new().fg(p.iris)),
+                    ]),
+                    line(0),
+                );
             }
+            Mode::Confirm { action, .. } => {
+                // Red only for what can't be undone.
+                let fg = if *action == Action::Close {
+                    p.love
+                } else {
+                    p.text
+                };
+                let style = Style::new().fg(fg).add_modifier(Modifier::BOLD);
+                for (i, q) in foot.into_iter().enumerate() {
+                    if line(i).y >= inner.y {
+                        f.render_widget(Span::styled(q, style), line(i));
+                    }
+                }
+            }
+            Mode::List | Mode::Read { .. } => {}
         }
-        f.render_widget(self.mode_line(p), bottom);
     }
 
-    /// The box's bottom line for its mode: the list's keys, the comment
-    /// being typed, or a confirmation's keys.
-    fn mode_line(&self, p: &Palette) -> Line<'static> {
-        let key = |k: &str| {
-            Span::styled(
-                k.to_string(),
-                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-            )
-        };
-        let muted = |s: &str| Span::styled(s.to_string(), Style::new().fg(p.muted));
-        match &self.mode {
-            Mode::List => {
-                let mut spans = vec![Span::raw(" ")];
-                for (i, (k, d)) in self
-                    .hints()
-                    .into_iter()
-                    .filter(|(k, _)| *k != "?")
-                    .enumerate()
-                {
-                    if i > 0 {
-                        spans.push(muted(" · "));
-                    }
-                    spans.extend([key(k), muted(&format!(" {d}"))]);
-                }
-                Line::from(spans)
-            }
-            Mode::Comment(text) => Line::from(vec![
-                muted(&format!(" comment on {}: ", self.entry().name())),
-                Span::styled(
-                    text.clone(),
-                    Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("▏", Style::new().fg(p.iris)),
-            ]),
-            Mode::Read { .. } => Line::default(),
-            // The question is drawn above, wrapped (see `draw_foot`).
-            Mode::Confirm { .. } => Line::from(vec![
-                Span::raw(" "),
-                key("⏎ y"),
-                muted(" yes · "),
-                key("esc"),
-                muted(" no"),
-            ]),
-        }
-    }
     /// The reader: a large box over the picker with the item's title,
     /// state and opening post, then each comment under a header naming
-    /// its author and time, wrapped to the box and scrolled.
+    /// its author and time, wrapped to the box and scrolled; how far down
+    /// in its bottom border. Its keys are in the footer.
     fn draw_reader(&self, f: &mut Frame, area: Rect, p: &Palette, thread: &Thread, scroll: usize) {
         let width = area.width.saturating_sub(4).min(100);
         let height = area.height.saturating_sub(2);
         let r = crate::centered(area, width, height);
+        crate::backdrop(f, p);
         // Blank the whole pane, so nothing under it shows round the box.
         f.render_widget(Clear, area);
         f.render_widget(Block::new().style(Style::new().bg(p.base)), area);
-        let title = format!(" {} · {} ", self.entry().name(), self.label);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(title, Style::new().fg(p.text)));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
-        if inner.height < 2 || inner.width < 4 {
+        let title = format!("{} · {}", self.entry().name(), self.label);
+        let mut block = popup::block(p, &title);
+        let text = block.inner(r);
+        if text.height < 1 || text.width < 2 {
             return;
         }
-        // A column each side, and the bottom row for keys.
-        let text = Rect {
-            x: inner.x + 1,
-            width: inner.width - 2,
-            height: inner.height - 1,
-            ..inner
-        };
         let lines = reader_lines(thread, text.width as usize, p);
         let rows = text.height as usize;
         let max = lines.len().saturating_sub(rows);
         self.page.set((rows, max));
         let scroll = scroll.min(max);
+        if let Some(pct) = (scroll * 100).checked_div(max) {
+            block = block.title_bottom(
+                Line::from(vec![
+                    Span::styled(format!(" {pct}% "), Style::new().fg(p.muted)),
+                    Span::styled("─", Style::new().fg(p.iris)),
+                ])
+                .right_aligned(),
+            );
+        }
+        popup::open(f, r, block);
         for (i, line) in lines.into_iter().skip(scroll).take(rows).enumerate() {
             let row = Rect {
                 y: text.y + crate::cells(i),
@@ -607,34 +550,6 @@ impl Items {
             };
             f.render_widget(line, row);
         }
-        let bottom = Rect {
-            y: inner.bottom() - 1,
-            height: 1,
-            ..inner
-        };
-        let key = |k: &str| {
-            Span::styled(
-                k.to_string(),
-                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-            )
-        };
-        let muted = |s: &str| Span::styled(s.to_string(), Style::new().fg(p.muted));
-        let mut spans = vec![Span::raw(" ")];
-        for (i, (k, d)) in self
-            .hints()
-            .into_iter()
-            .filter(|(k, _)| *k != "?")
-            .enumerate()
-        {
-            if i > 0 {
-                spans.push(muted(" · "));
-            }
-            spans.extend([key(k), muted(&format!(" {d}"))]);
-        }
-        if let Some(pct) = (scroll * 100).checked_div(max) {
-            spans.push(muted(&format!("   {pct}%")));
-        }
-        f.render_widget(Line::from(spans), bottom);
     }
 }
 

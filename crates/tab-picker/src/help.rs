@@ -15,10 +15,12 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 use switchyard_ui::Palette;
 use switchyard_ui::draw::{self, str_width};
 use switchyard_ui::fuzzy::score_fields;
+use switchyard_ui::glyphs::ICON_SEARCH;
+use switchyard_ui::popup;
 
 /// A group of bindings: its title and (keys, what they do).
 pub struct Section {
@@ -94,29 +96,30 @@ impl Help {
         Outcome::Stay
     }
 
+    /// The footer's hints while the keys are open.
+    pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        if self.typing {
+            vec![("⏎", "done"), ("⌃U", "clear")]
+        } else if self.filter.is_empty() {
+            vec![("/", "filter"), ("↑↓ j k", "scroll"), ("esc", "close")]
+        } else {
+            vec![("/", "filter"), ("↑↓ j k", "scroll"), ("esc", "clear")]
+        }
+    }
+
     /// The float over `area`: the filter, then the matching bindings under
     /// their group titles.
     pub fn draw(&mut self, f: &mut Frame, p: &Palette, area: Rect, sections: &[Section]) {
         let width = 64.min(area.width.saturating_sub(4));
-        // Less the borders and the scrollbar's column.
-        let lines = self.lines(p, sections, usize::from(width.saturating_sub(3)));
+        // Less the borders, the padding and the scrollbar's column.
+        let lines = self.lines(p, sections, usize::from(width.saturating_sub(5)));
         let height = crate::cells(lines.len())
             .saturating_add(4)
             .clamp(8, area.height.saturating_sub(2).max(8))
             .min(area.height);
         let r = crate::centered(area, width, height);
-        f.render_widget(Clear, r);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(
-                " Keys ",
-                Style::new().fg(p.text).add_modifier(Modifier::BOLD),
-            ));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
+        crate::backdrop(f, p);
+        let inner = popup::open(f, r, popup::block(p, "Keys"));
         if inner.height < 3 {
             return;
         }
@@ -128,7 +131,7 @@ impl Help {
         };
         let line = if self.typing || !self.filter.is_empty() {
             let mut spans = vec![
-                Span::styled(" / ", Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("{ICON_SEARCH}  "), Style::new().fg(p.iris)),
                 Span::styled(self.filter.clone(), Style::new().fg(p.text)),
             ];
             if self.typing {
@@ -137,17 +140,15 @@ impl Help {
             Line::from(spans)
         } else {
             Line::from(vec![
-                Span::styled(" / ", Style::new().fg(p.gold).add_modifier(Modifier::BOLD)),
-                Span::styled("filter", Style::new().fg(p.muted)),
+                Span::styled(format!("{ICON_SEARCH}  "), Style::new().fg(p.subtle)),
+                Span::styled("Filter keys", Style::new().fg(p.muted)),
             ])
         };
         f.render_widget(line, filter);
-        let close = Line::styled("esc close ", Style::new().fg(p.muted)).right_aligned();
-        f.render_widget(close, filter);
         let h = body.height as usize;
         self.offset = self.offset.min(lines.len().saturating_sub(h));
         if lines.is_empty() {
-            let none = Line::styled(" No keys match", Style::new().fg(p.muted));
+            let none = Line::styled("No keys match", Style::new().fg(p.muted));
             return f.render_widget(none, body);
         }
         let shown: Vec<Line> = lines.iter().skip(self.offset).take(h).cloned().collect();
@@ -185,20 +186,20 @@ impl Help {
                 out.push(Line::default());
             }
             out.push(Line::styled(
-                format!(" {}", s.title),
+                s.title.to_string(),
                 Style::new().fg(p.iris).add_modifier(Modifier::BOLD),
             ));
             for (k, d) in keys {
                 let pad = " ".repeat(col.saturating_sub(str_width(k)) + 2);
                 out.push(Line::from(vec![
-                    Span::raw("   "),
+                    Span::raw("  "),
                     Span::styled(
                         k.clone(),
                         Style::new().fg(p.gold).add_modifier(Modifier::BOLD),
                     ),
                     Span::raw(pad),
                     Span::styled(
-                        crate::preview::clip_width(d, width.saturating_sub(col + 5)),
+                        crate::preview::clip_width(d, width.saturating_sub(col + 4)),
                         Style::new().fg(p.text),
                     ),
                 ]));

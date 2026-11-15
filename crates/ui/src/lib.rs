@@ -1,5 +1,5 @@
 //! What the Rex float tools share on screen: the managed theme's palette,
-//! Nerd Font glyphs, the kitty-graphics corners, list and search drawing,
+//! Nerd Font glyphs, the kitty-graphics corners, list and search drawing, popups,
 //! fuzzy scoring, the prompt box, and the float protocol (bracketed-paste
 //! data in, the terminal title out).
 
@@ -8,6 +8,7 @@ pub mod draw;
 pub mod fuzzy;
 pub mod glyphs;
 pub mod palette;
+pub mod popup;
 pub mod prompt_box;
 pub mod protocol;
 pub mod slash;

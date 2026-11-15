@@ -28,7 +28,6 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear};
 use switchyard_core::hosts::Project;
 use switchyard_core::items::{OpenItem, OpenItems};
 use switchyard_core::links::{Tracker, parse_ref};
@@ -36,6 +35,7 @@ use switchyard_ui::Palette;
 use switchyard_ui::draw::{delete_word, highlight, keep_in_view, str_width};
 use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::SPINNER;
+use switchyard_ui::popup;
 
 use crate::model::{Link, Task};
 
@@ -689,35 +689,17 @@ impl Work {
     fn draw_chooser(&self, f: &mut Frame, area: Rect, p: &Palette) {
         let Some(c) = &self.chooser else { return };
         let chosen = self.chosen();
-        let width = self
-            .projects
-            .iter()
-            .map(|p| str_width(&p.name) + 6)
-            .chain([40])
-            .max()
-            .unwrap_or(40)
-            .min(area.width as usize);
-        let height = (chosen.len() + 4).min(area.height as usize).max(4);
-        let r = crate::centered(area, crate::cells(width), crate::cells(height));
-        f.render_widget(Clear, r);
-        let block = Block::new()
-            .borders(Borders::ALL)
-            .border_style(Style::new().fg(p.iris))
-            .style(Style::new().bg(p.base))
-            .title(Span::styled(" Project ", Style::new().fg(p.text)));
-        let inner = block.inner(r);
-        f.render_widget(block, r);
+        crate::backdrop(f, p);
+        let height = crate::cells(chosen.len() + 3).max(4);
+        let r = popup::list_rect(area, height);
+        let inner = popup::open(f, r, popup::block(p, "Project"));
         if inner.height < 2 {
             return;
         }
         let query = if c.query.is_empty() {
-            Line::from(vec![
-                Span::styled(" ", Style::new()),
-                Span::styled("type to filter", Style::new().fg(p.muted)),
-            ])
+            Line::styled("type to filter", Style::new().fg(p.muted))
         } else {
             Line::from(vec![
-                Span::styled(" ", Style::new()),
                 Span::styled(c.query.clone(), Style::new().fg(p.text)),
                 Span::styled("▏", Style::new().fg(p.iris)),
             ])
@@ -728,18 +710,15 @@ impl Work {
         let offset = at.saturating_sub(rows.saturating_sub(1));
         for (n, &i) in chosen.iter().enumerate().skip(offset).take(rows) {
             let selected = i == c.selected;
-            let bg = if selected { p.overlay } else { p.base };
             let row = Rect {
                 y: inner.y + 1 + crate::cells(n - offset),
                 height: 1,
                 ..inner
             };
-            f.buffer_mut().set_style(row, Style::new().bg(bg));
-            let edge = if selected {
-                Span::styled("▎", Style::new().fg(p.iris).bg(bg))
-            } else {
-                Span::styled(" ", Style::new().bg(bg))
-            };
+            if selected {
+                popup::select(f, p, inner, row);
+            }
+            let bg = if selected { p.overlay } else { p.base };
             let mut style = Style::new().fg(p.text).bg(bg);
             if i == self.project {
                 style = style.fg(p.iris);
@@ -747,13 +726,7 @@ impl Work {
             if selected {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            f.render_widget(
-                Line::from(vec![
-                    edge,
-                    Span::styled(self.projects[i].name.clone(), style),
-                ]),
-                row,
-            );
+            f.render_widget(Span::styled(self.projects[i].name.clone(), style), row);
         }
     }
 }
