@@ -661,6 +661,11 @@ struct App {
     /// A standalone archive running on its own thread, so the picker stays
     /// live meanwhile; its outcome becomes the note.
     archiving: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// The row a standalone archive is taking away, by its (session, window)
+    /// key: left out of the lists from the moment John asks, so it goes at
+    /// once rather than after the archive. Cleared by the first data that
+    /// arrives once the archive has ended (see `deliver`).
+    gone: Option<Key>,
     usage: usage::Usage,
     /// The Work view (see work.rs).
     work: work::Work,
@@ -751,6 +756,7 @@ impl App {
             note: None,
             feed: None,
             archiving: None,
+            gone: None,
             usage: usage::Usage::default(),
             work: work::Work::default(),
             launching: Vec::new(),
@@ -883,6 +889,11 @@ impl App {
         let keep = self.selected_key();
         let armed = self.armed;
         take(self);
+        // Data read after the archive ended says what it did, so the row
+        // it took away can go back to being whatever the registry says.
+        if self.archiving.is_none() {
+            self.gone = None;
+        }
         self.apply_pending();
         link(&mut self.tabs, &self.sessions, &mut self.tasks);
         let want = if self.follow {
@@ -1137,7 +1148,8 @@ impl App {
     /// it already), and a plain tab only in the quick float, which jumps to
     /// any tab.
     fn listed(&self, item: Item) -> bool {
-        !self.is_picker_tab(item)
+        !self.is_gone(item)
+            && !self.is_picker_tab(item)
             && (self.quick || !self.is_plain_tab(item))
             && !self.left_out(item)
     }
@@ -1207,6 +1219,7 @@ impl App {
         let mut rows: Vec<usize> = (0..self.tasks.len())
             .filter(|&k| self.tasks[k].ended.is_some())
             .filter(|&k| !(self.kept && self.tasks[k].archived()))
+            .filter(|&k| !self.is_gone(Item::Task(k)))
             .collect();
         rows.sort_by_key(|&k| std::cmp::Reverse(self.tasks[k].since));
         rows.into_iter().map(Item::Task).collect()
@@ -4492,6 +4505,38 @@ impl App {
         }
     }
 
+    /// Whether `item` is the row an archive is taking away (see `gone`).
+    fn is_gone(&self, item: Item) -> bool {
+        self.gone
+            .as_ref()
+            .is_some_and(|g| self.key_of(item).as_ref() == Some(g))
+    }
+
+    /// Take the highlighted row out of the lists before its archive runs,
+    /// with the highlight moved to the row below it (above, at the end).
+    fn hide_for_archive(&mut self) {
+        let Some(key) = self.selected_key() else {
+            return;
+        };
+        let at = self.selected.unwrap_or(0);
+        let below = self
+            .rows
+            .iter()
+            .enumerate()
+            .skip(at + 1)
+            .find(|(_, i)| selectable(i));
+        let above = self
+            .rows
+            .iter()
+            .enumerate()
+            .take(at)
+            .rev()
+            .find(|(_, i)| selectable(i));
+        let want = below.or(above).and_then(|(_, &i)| self.key_of(i));
+        self.gone = Some(key);
+        self.refilter_to(want);
+    }
+
     /// A finished archive's outcome, as the note; then fetch again.
     fn take_archived(&mut self) {
         let Some(rx) = &self.archiving else { return };
@@ -4505,7 +4550,10 @@ impl App {
                 self.refetch();
             }
             Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => self.archiving = None,
+            Err(TryRecvError::Disconnected) => {
+                self.archiving = None;
+                self.refetch();
+            }
         }
     }
 
@@ -4611,6 +4659,8 @@ impl App {
                     return true;
                 }
                 let note = (format!("Archiving {label} on {}…", pick.host), false);
+                // The row goes now; the archive takes a moment to run.
+                self.hide_for_archive();
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(standalone::archive(&pick.action, &pick));
@@ -6337,6 +6387,34 @@ mod tests {
         app.selected = Some(at(&app, 2));
         app.key(ctrl('x'));
         assert_eq!(app.pick(), "archive:-/s/ready");
+    }
+
+    #[test]
+    fn archive_takes_the_row_away_before_it_runs_and_brings_it_back_on_failure() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\ta\tdone\tclaude\t~/r\nT\tb\tdone\tclaude\t~/r\n");
+        app.paste("rex-data:tasks\n[]");
+        let at = |app: &App, t: usize| app.rows.iter().position(|&i| i == Item::Tab(t)).unwrap();
+        app.selected = Some(at(&app, 0));
+        // Hidden at once, with the highlight on the row below.
+        app.hide_for_archive();
+        assert!(!app.rows.contains(&Item::Tab(0)), "{:?}", app.rows);
+        assert_eq!(app.selected_item(), Some(Item::Tab(1)));
+        // Still hidden while the archive runs, whatever data arrives.
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.archiving = Some(rx);
+        app.paste("rex-data:tasks\n[]");
+        assert!(!app.rows.contains(&Item::Tab(0)));
+        // The archive ends: the row stays hidden until fresh data arrives.
+        tx.send(Err("refused".into())).unwrap();
+        app.take_archived();
+        assert!(app.archiving.is_none());
+        assert!(app.gone.is_some());
+        // Data read after a failed archive brings the row back.
+        app.paste("rex-data:tasks\n[]");
+        assert!(app.gone.is_none());
+        assert!(app.rows.contains(&Item::Tab(0)), "{:?}", app.rows);
     }
 
     #[test]
