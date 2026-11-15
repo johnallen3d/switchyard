@@ -96,6 +96,7 @@
 
 mod fed;
 mod help;
+mod history;
 mod items;
 mod model;
 mod preview;
@@ -437,6 +438,8 @@ struct Reply {
     key: Key,
     label: String,
     prompt: PromptBox,
+    /// Where Up and Down have stepped to in the session's earlier messages.
+    history: history::History,
 }
 
 /// Text rows the reply box grows between; longer messages scroll.
@@ -537,6 +540,7 @@ fn help_float_sections() -> Vec<help::Section> {
             &[
                 ("⏎", "send"),
                 ("⌥⏎ ⇧⏎", "new line"),
+                ("↑↓", "earlier messages, at the first or last line"),
                 ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
                 ("⌃V", "scroll back, then back here"),
                 ("⌃G", "edit in the editor"),
@@ -1907,6 +1911,7 @@ impl App {
             key,
             label,
             prompt: PromptBox::new(),
+            history: history::History::default(),
         });
     }
 
@@ -1960,9 +1965,33 @@ impl App {
             .modifiers
             .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT);
         let page = self.page();
+        let arrow = k.modifiers.is_empty() && matches!(k.code, KeyCode::Up | KeyCode::Down);
+        let messages = if arrow {
+            self.reply_messages()
+        } else {
+            Vec::new()
+        };
         let Some(r) = &mut self.reply else { return };
         // The slash-command menu, while open, has Tab, the arrows and Escape.
         if r.prompt.menu_key(k) {
+            return;
+        }
+        // Up on the first row recalls an earlier message, Down on the last a
+        // later one; elsewhere they move the cursor.
+        if arrow {
+            let before = r.prompt.field.cursor();
+            r.prompt.key(k);
+            if r.prompt.field.cursor() == before {
+                let recalled = if k.code == KeyCode::Up {
+                    r.history
+                        .older(&messages, &r.prompt.field.lines().join("\n"))
+                } else {
+                    r.history.newer(&messages)
+                };
+                if let Some(text) = recalled {
+                    r.prompt.set_text(&text);
+                }
+            }
             return;
         }
         match k.code {
@@ -1981,6 +2010,19 @@ impl App {
             KeyCode::Down if shift => self.scroll_preview(-3),
             _ => r.prompt.key(k),
         }
+    }
+
+    /// What John said earlier in the reply box's session, oldest first, as
+    /// far back as its transcript goes.
+    fn reply_messages(&self) -> Vec<String> {
+        let Some(r) = &self.reply else {
+            return Vec::new();
+        };
+        self.preview
+            .as_ref()
+            .filter(|pv| pv.pane.window == r.key.1)
+            .map(preview::Preview::user_messages)
+            .unwrap_or_default()
     }
 
     /// Give the reply box its agent's slash commands, once the transcript
@@ -6138,6 +6180,41 @@ mod tests {
         assert!(app.help.is_none());
         app.key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
         assert!(app.help.is_some() && help_text(&app).starts_with("Reply box"));
+    }
+
+    #[test]
+    fn up_and_down_in_the_reply_box_step_through_the_sessions_messages() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.paste("rex-data:rows\nS\t-\tlocal\ts\tdemo\nT\tagent\tdone\tclaude\t~/r\n");
+        app.paste("rex-data:tasks\n[]");
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        app.paste(&format!(
+            "rex-data:preview\n-/s/agent\n{}",
+            serde_json::json!({"entries": [
+                {"kind": "user", "text": "fix it"},
+                {"kind": "assistant", "text": "done"},
+                {"kind": "user", "text": "now\ntest it"},
+            ]})
+        ));
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let text = |app: &App| app.reply.as_ref().unwrap().prompt.field.lines().join("\n");
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        app.key(up);
+        assert_eq!(text(&app), "now\ntest it");
+        // Up on the second line moves to the first; again recalls further.
+        app.key(up);
+        assert_eq!(text(&app), "now\ntest it");
+        app.key(up);
+        assert_eq!(text(&app), "fix it");
+        app.key(up);
+        assert_eq!(text(&app), "fix it");
+        app.key(down);
+        assert_eq!(text(&app), "now\ntest it");
+        app.key(down);
+        assert_eq!(text(&app), "x");
     }
 
     #[test]

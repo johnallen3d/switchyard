@@ -85,6 +85,12 @@ impl PromptBox {
         self.field.clear();
     }
 
+    /// Replace the text with `text`, the cursor at its end.
+    pub fn set_text(&mut self, text: &str) {
+        self.clear();
+        self.paste(text);
+    }
+
     /// Edit with readline keys (see `text_key`).
     pub fn key(&mut self, k: KeyEvent) {
         text_key(&mut self.field, k);

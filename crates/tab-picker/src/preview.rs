@@ -92,6 +92,18 @@ impl Preview {
             .unwrap_or_default())
     }
 
+    /// John's messages, oldest first, a repeat of the one before left out,
+    /// for the reply box's history.
+    pub fn user_messages(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for (kind, text) in self.entries.iter().flatten() {
+            if kind == "user" && out.last() != Some(text) {
+                out.push(text.clone());
+            }
+        }
+        out
+    }
+
     /// The markdown lines `a..=b` (as last drawn) came from: for each entry
     /// they touch, its text from the first block they touch to the last,
     /// entries a blank line apart. A block is a paragraph, heading, table,
