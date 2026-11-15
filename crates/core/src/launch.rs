@@ -89,6 +89,23 @@ pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &s
     }
 }
 
+/// The `spawn` links a new task records: its work item alone when it has
+/// one, since the prompt may mention other refs only as examples or
+/// context; otherwise the refs the prompt names.
+fn spawn_links(work_item: Option<&str>, prompt: &str, tracker: &Tracker) -> Vec<serde_json::Value> {
+    let links = match work_item {
+        Some(item) => parse_ref(item, tracker).into_iter().collect(),
+        None => refs_in_text(prompt, tracker),
+    };
+    links
+        .into_iter()
+        .map(|mut l| {
+            l["source"] = "spawn".into();
+            l
+        })
+        .collect()
+}
+
 /// A work item as typed: one ref or key, without spaces.
 fn work_item_problem(item: &str) -> Option<&'static str> {
     item.chars()
@@ -96,8 +113,9 @@ fn work_item_problem(item: &str) -> Option<&'static str> {
         .then_some("a work item is one ref, without spaces")
 }
 
-/// Open the work's tab on `host` and record it, with the work items its
-/// prompt names as `spawn` links. An optional work item leads the prompt
+/// Open the work's tab on `host` and record it, with its work item, or
+/// without one the work items its prompt names, as `spawn` links (see
+/// `spawn_links`). An optional work item leads the prompt
 /// (see `work_item_prompt`). A path outside the catalog must be an
 /// existing Git folder on that explicit host. With `resume`, the tab
 /// resumes that agent session with its recorded profile instead of starting
@@ -245,13 +263,7 @@ fn launch_with(
     if let Some(r) = prompt_ref {
         discard_prompt(r);
     }
-    let links: Vec<serde_json::Value> = refs_in_text(&prompt, &tracker)
-        .into_iter()
-        .map(|mut l| {
-            l["source"] = "spawn".into();
-            l
-        })
-        .collect();
+    let links = spawn_links(work_item, &prompt, &tracker);
     let mut task = serde_json::json!({
         "host": host,
         "session_id": session,
@@ -521,6 +533,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(project.profile, "work");
+    }
+
+    #[test]
+    fn spawn_links_only_the_work_item_when_there_is_one() {
+        let fizzy = Tracker::new("fizzy:6284043/b", "https://github.com/o/r");
+        let prompt = "Let's work on https://app.fizzy.do/6284043/cards/1201\n\n\
+                      e.g. amfaro/calc#4540 or #4528";
+        let refs = |links: Vec<serde_json::Value>| -> Vec<String> {
+            links
+                .iter()
+                .map(|l| format!("{}:{}", l["ref"].as_str().unwrap(), l["source"]))
+                .collect()
+        };
+        assert_eq!(
+            refs(spawn_links(Some("#1201"), prompt, &fizzy)),
+            ["1201:\"spawn\""]
+        );
+        assert_eq!(refs(spawn_links(Some("ENG-12"), prompt, &fizzy)), [""; 0]);
+        assert_eq!(
+            refs(spawn_links(None, prompt, &fizzy)),
+            [
+                "1201:\"spawn\"",
+                "amfaro/calc#4540:\"spawn\"",
+                "4528:\"spawn\""
+            ]
+        );
     }
 
     #[test]

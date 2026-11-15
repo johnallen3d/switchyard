@@ -6,7 +6,8 @@
 
 use std::process::{Command, ExitCode, Stdio};
 
-use switchyard_core::links::ref_shape_ok;
+use switchyard_core::links::{Unlinked, ref_shape_ok};
+use switchyard_core::tasks::unlink_task_refs;
 
 const USAGE: &str = "usage: switchyard link [REF...]
        switchyard unlink REF...
@@ -15,7 +16,8 @@ Links the current branch to work items, which the agents inbox shows on its
 task: REF is #42 or 42 (an issue, or a card when the project's tracker is a
 Fizzy board), OWNER/REPO#42, fizzy:123, pr:57, or a GitHub issue or PR URL
 or Fizzy card URL. With no REF, lists the branch's links. unlink removes
-them. The refs live in the branch's git config, branch.BRANCH.switchyard-link.";
+them. The refs live in the branch's git config, branch.BRANCH.switchyard-link;
+unlink also removes those the task was spawned with from the task registry.";
 
 fn git(args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
@@ -50,16 +52,14 @@ fn run(args: &[String]) -> Result<(), String> {
         }
         return Ok(());
     }
+    if unlink {
+        unlink_refs(&key, &existing, refs)?;
+        switchyard_core::server::refresh();
+        return Ok(());
+    }
     for r in refs {
         let r = r.trim();
-        if unlink {
-            if existing.iter().any(|e| e == r) {
-                git(&["config", "--fixed-value", "--unset-all", &key, r])?;
-                println!("unlinked {r}");
-            } else {
-                eprintln!("switchyard: {r} is not linked");
-            }
-        } else if !ref_shape_ok(r) {
+        if !ref_shape_ok(r) {
             return Err(format!("{r}: not a work item ref\n\n{USAGE}"));
         } else if existing.iter().any(|e| e == r) {
             println!("already linked {r}");
@@ -72,6 +72,36 @@ fn run(args: &[String]) -> Result<(), String> {
     // than at its next timer, so the inbox shows the change; elsewhere
     // there is no server socket and this does nothing.
     switchyard_core::server::refresh();
+    Ok(())
+}
+
+/// Remove `refs` from the branch's git config and from its task's links in
+/// the registry, where spawn records the work items it was started for.
+fn unlink_refs(key: &str, existing: &[String], refs: &[String]) -> Result<(), String> {
+    let refs: Vec<&str> = refs.iter().map(|r| r.trim()).collect();
+    let top = git(&["rev-parse", "--show-toplevel"])?;
+    let top = std::fs::canonicalize(top.trim()).unwrap_or_else(|_| top.trim().into());
+    // The branch's config is the source of truth for agent links, so it is
+    // unlinked even when the registry can't be.
+    let registry = unlink_task_refs(&top, &refs).unwrap_or_else(|e| {
+        eprintln!("switchyard: could not unlink in the task registry: {e}");
+        refs.iter().map(|_| Unlinked::Absent).collect()
+    });
+    for (r, in_registry) in refs.iter().zip(registry) {
+        let in_config = existing.iter().any(|e| e == r);
+        if in_config {
+            git(&["config", "--fixed-value", "--unset-all", key, r])?;
+        }
+        match in_registry {
+            _ if in_config => println!("unlinked {r}"),
+            Unlinked::Removed => println!("unlinked {r}"),
+            Unlinked::Derived => eprintln!(
+                "switchyard: {r} comes from the branch name, its commits or PR, \
+                 so it can't be unlinked"
+            ),
+            Unlinked::Absent => eprintln!("switchyard: {r} is not linked"),
+        }
+    }
     Ok(())
 }
 

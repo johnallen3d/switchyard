@@ -676,6 +676,56 @@ pub fn add_link(task: &mut Value, mut link: Value, source: &str) -> bool {
     true
 }
 
+/// Whether `text`, a ref as `switchyard link` takes it, names `link`.
+/// It is read under the link's own tracker, so `42`, `#42` and `fizzy:42`
+/// name card 42, and `#7` names issue 7 in an issue link's repo.
+#[must_use]
+pub fn names_link(text: &str, link: &Value) -> bool {
+    let t = if link["system"] == "fizzy" {
+        Tracker {
+            cards: true,
+            ..Tracker::default()
+        }
+    } else {
+        Tracker {
+            github: link["ref"]
+                .as_str()
+                .and_then(|r| r.split_once('#'))
+                .map(|(repo, _)| repo.to_string()),
+            ..Tracker::default()
+        }
+    };
+    parse_ref(text, &t).is_some_and(|l| same(&l, link))
+}
+
+/// What `unlink` did to a task's links for one ref.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unlinked {
+    /// It removed the explicit links (spawn, agent, manual) the ref names.
+    Removed,
+    /// Only derived links name it; the branch, its commits or PR would bring
+    /// them back, so they stay.
+    Derived,
+    /// No link names it.
+    Absent,
+}
+
+/// Remove the task's explicit links that `text` names (see `names_link`).
+pub fn unlink(task: &mut Value, text: &str) -> Unlinked {
+    let Some(links) = task["links"].as_array_mut() else {
+        return Unlinked::Absent;
+    };
+    let before = links.len();
+    links.retain(|l| l["source"] == "derived" || !names_link(text, l));
+    if links.len() != before {
+        Unlinked::Removed
+    } else if links.iter().any(|l| names_link(text, l)) {
+        Unlinked::Derived
+    } else {
+        Unlinked::Absent
+    }
+}
+
 /// Make the task's derived links other than its PR exactly `derived`
 /// (from its branch name, commits and PR body), dropping any its branch
 /// no longer implies; those it still does keep their place. True when the
@@ -965,6 +1015,37 @@ mod tests {
             fixed_refs("Fixes #1, closes a/b#2.\nResolved: #3 and fix #1 again; fixing #9"),
             ["#1", "a/b#2", "#3"]
         );
+    }
+
+    #[test]
+    fn unlink_removes_explicit_links_by_any_form_of_their_ref() {
+        let mut task = json!({"links": [
+            {"kind":"card","system":"fizzy","ref":"4528","url":"","source":"spawn"},
+            {"kind":"issue","system":"github","ref":"amfaro/calc#4540","url":"u","source":"spawn"},
+            {"kind":"pr","system":"github","ref":"o/r#9","url":"p","source":"derived"},
+            {"kind":"card","system":"fizzy","ref":"12","url":"c","source":"agent"},
+        ]});
+        assert_eq!(unlink(&mut task, "#4528"), Unlinked::Removed);
+        assert_eq!(unlink(&mut task, "fizzy:4528"), Unlinked::Absent);
+        assert_eq!(unlink(&mut task, "amfaro/calc#4539"), Unlinked::Absent);
+        assert_eq!(
+            unlink(&mut task, "https://github.com/amfaro/calc/issues/4540"),
+            Unlinked::Removed
+        );
+        assert_eq!(unlink(&mut task, "pr:9"), Unlinked::Derived);
+        assert_eq!(unlink(&mut task, "#9"), Unlinked::Absent, "#9 is an issue");
+        assert_eq!(
+            unlink(&mut task, "https://app.fizzy.do/1/cards/12"),
+            Unlinked::Removed
+        );
+        let left: Vec<_> = task["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["ref"].as_str().unwrap())
+            .collect();
+        assert_eq!(left, ["o/r#9"]);
+        assert_eq!(unlink(&mut json!({}), "#1"), Unlinked::Absent);
     }
 
     #[test]

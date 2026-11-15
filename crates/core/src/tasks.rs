@@ -16,8 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::links::{
-    FIZZY_BOARD_SH, Lookup, Pr, Tracker, add_link, add_live, branch_number, find_prs, github_repo,
-    parse_ref, pr_key, set_agent_links, set_derived_items, set_derived_pr, tracker_or_fizzy,
+    FIZZY_BOARD_SH, Lookup, Pr, Tracker, Unlinked, add_link, add_live, branch_number, find_prs,
+    github_repo, parse_ref, pr_key, set_agent_links, set_derived_items, set_derived_pr,
+    tracker_or_fizzy, unlink,
 };
 use crate::rex::{home, host_bash, local_label, log, now};
 use crate::sessions::newest_session;
@@ -280,6 +281,58 @@ pub fn record_task(task: serde_json::Value) -> Result<(), String> {
     update_tasks(|tasks| {
         tasks.push(task);
         Ok(())
+    })
+}
+
+/// Remove each of `refs` (see `links::unlink`) from the links of the open
+/// tasks on this host whose worktree is `worktree`, the CLI's `unlink`.
+/// Gives what happened for each ref; on a host without the registry, which
+/// lives on the config host, every ref is `Absent`.
+///
+/// # Errors
+///
+/// Fails as `update_tasks` does.
+pub fn unlink_task_refs(worktree: &Path, refs: &[&str]) -> Result<Vec<Unlinked>, String> {
+    let path = tasks_path();
+    if !path.exists() {
+        return Ok(refs.iter().map(|_| Unlinked::Absent).collect());
+    }
+    unlink_at(&path, &local_label(), &home(), worktree, refs)
+}
+
+fn unlink_at(
+    path: &Path,
+    host: &str,
+    home: &Path,
+    worktree: &Path,
+    refs: &[&str],
+) -> Result<Vec<Unlinked>, String> {
+    update_at(path, |tasks| {
+        let mut mine: Vec<&mut serde_json::Value> = tasks
+            .iter_mut()
+            .filter(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host))
+            .filter(|t| {
+                let w = field(t, "worktree");
+                let w = match w.strip_prefix("~/") {
+                    Some(rest) => home.join(rest),
+                    None => PathBuf::from(w),
+                };
+                std::fs::canonicalize(&w).unwrap_or(w) == worktree
+            })
+            .collect();
+        Ok(refs
+            .iter()
+            .map(|r| {
+                let outcomes: Vec<Unlinked> = mine.iter_mut().map(|t| unlink(t, r)).collect();
+                if outcomes.contains(&Unlinked::Removed) {
+                    Unlinked::Removed
+                } else if outcomes.contains(&Unlinked::Derived) {
+                    Unlinked::Derived
+                } else {
+                    Unlinked::Absent
+                }
+            })
+            .collect())
     })
 }
 
@@ -1076,6 +1129,7 @@ fn commit_checked_at(
                 task["ended_at"] = newer["ended_at"].clone();
                 task["ended_reason"] = newer["ended_reason"].clone();
             }
+            keep_unlinked(task, newer);
         }
         let checked: HashSet<String> = merged.iter().map(task_key).collect();
         let launched: Vec<serde_json::Value> = fresh
@@ -1094,6 +1148,24 @@ fn commit_checked_at(
         fresh.clone_from(&merged);
         Ok(merged)
     })
+}
+
+/// Drop the explicit links (spawn, manual) of a checked `task` that its
+/// `newer` record no longer has: `unlink` removed them during the check,
+/// which only sets derived and agent links, so it must not bring them back.
+fn keep_unlinked(task: &mut serde_json::Value, newer: &serde_json::Value) {
+    let key = |l: &serde_json::Value| format!("{}\t{}\t{}", l["kind"], l["system"], l["ref"]);
+    let kept: HashSet<_> = newer["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(key)
+        .collect();
+    if let Some(links) = task["links"].as_array_mut() {
+        links.retain(|l| {
+            l["source"] == "derived" || l["source"] == "agent" || kept.contains(&key(l))
+        });
+    }
 }
 
 /// Copy each task's inbox state from `fresh`, a later read of the registry
@@ -1235,6 +1307,46 @@ mod tests {
         commit_checked_at(&path, checked, 40).unwrap();
         save_record_at(&path, &archived[0]).unwrap();
         assert_eq!(load_at(&path).unwrap()[0]["ended_reason"], "archived");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn unlink_removes_registry_links_and_a_check_does_not_restore_them() {
+        let path = registry("unlink");
+        let mut mine = task("a", 1);
+        mine["worktree"] = "~/repo/.worktrees/a".into();
+        mine["links"] = serde_json::json!([
+            {"kind":"card","system":"fizzy","ref":"1201","url":"","source":"spawn"},
+            {"kind":"card","system":"fizzy","ref":"4528","url":"","source":"spawn"},
+        ]);
+        let mut other = task("b", 2);
+        other["worktree"] = "/elsewhere".into();
+        other["links"] = mine["links"].clone();
+        save_at(&path, &[mine, other], true).unwrap();
+        // A check reads the registry before the unlink saves.
+        let checked = load_at(&path).unwrap();
+        let home = Path::new("/home/u");
+        let worktree = Path::new("/home/u/repo/.worktrees/a");
+        assert_eq!(
+            unlink_at(&path, "h", home, worktree, &["#4528", "#9"]).unwrap(),
+            [Unlinked::Removed, Unlinked::Absent]
+        );
+        assert_eq!(
+            unlink_at(&path, "other-host", home, worktree, &["#1201"]).unwrap(),
+            [Unlinked::Absent]
+        );
+        commit_checked_at(&path, checked, 10).unwrap();
+        let refs = |t: &serde_json::Value| -> Vec<String> {
+            t["links"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|l| l["ref"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let saved = load_at(&path).unwrap();
+        assert_eq!(refs(&saved[0]), ["1201"]);
+        assert_eq!(refs(&saved[1]), ["1201", "4528"], "another worktree's task");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
