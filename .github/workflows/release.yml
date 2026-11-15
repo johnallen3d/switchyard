@@ -1,7 +1,9 @@
 name: Release
 
-# Publish a GitHub Release for each green CI build of a push to main. The
-# release is named like `switchyard --version` names the build ("2026-11-14
+# Publish a GitHub Release when a push to main goes green, but only for the
+# commit still at main's tip. A build that a newer push has superseded is
+# skipped, and the newer build's release covers its commits, so pushes that
+# land while CI is running share one release. The release is named like `switchyard --version` names the build ("2026-11-14
 # 17:22 UTC (4e909b4)": the commit's UTC date and short hash, as flake.nix
 # computes it) and its notes are git-cliff's changes since the previous
 # release (see cliff.toml). The first release covers the whole history.
@@ -15,8 +17,8 @@ on:
 permissions:
   contents: read
 
-# Releases run one at a time, oldest first, so each one's notes start where
-# the last one's ended.
+# Releases run one at a time, oldest first, so each one's notes start where the
+# last one's ended.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -48,13 +50,21 @@ jobs:
             echo "tag=$y.$m.$d-$hh$mm-$short"
             echo "title=$y-$m-$d $hh:$mm UTC ($short)"
           } >>"$GITHUB_OUTPUT"
-      - name: Skip builds a release already covers
+      - name: Skip superseded or already released builds
         id: check
         env:
-          TAG: ${{ steps.build.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.build.outputs.sha }}
         run: |
-          # A rerun of an older CI run must not release a commit that an
-          # existing release (its own or a newer one's) already includes.
+          # A newer push's build will release this commit along with its own.
+          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+          if [ "$tip" != "$SHA" ]; then
+            echo "Superseded: main is at $tip, whose release will cover $SHA"
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A rerun, or a second run for the same build, must not release a
+          # commit that an existing release already includes.
           covered=$(git tag --contains HEAD --list '[0-9][0-9][0-9][0-9].[0-9][0-9].[0-9][0-9]-*')
           if [ -n "$covered" ]; then
             echo "Already released in: $covered"
