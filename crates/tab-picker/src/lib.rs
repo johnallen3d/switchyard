@@ -2367,12 +2367,16 @@ impl App {
             Some(r) => r.prompt.rows(main.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
             None => 1,
         };
-        let card_h = (rows + prompt_box::CHROME_ROWS).min(main.height.saturating_sub(head_h + 4));
+        let card_h = if self.reply_hidden() {
+            0
+        } else {
+            (rows + prompt_box::CHROME_ROWS).min(main.height.saturating_sub(head_h + 4))
+        };
         let [head, rule, pane, _, card] = Layout::vertical([
             Constraint::Length(head_h),
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(1),
+            Constraint::Length(u16::from(card_h > 0)),
             Constraint::Length(card_h),
         ])
         .areas(main);
@@ -2514,6 +2518,7 @@ impl App {
         let mut reply_card = None;
         let body = if !self.quick
             && self.view == View::Inbox
+            && !self.reply_hidden()
             && body.height >= prompt_box::CHROME_ROWS + 4
         {
             let rows = match &self.reply {
@@ -2712,7 +2717,7 @@ impl App {
                             let bg = if sel.is_some_and(|(a, b)| (a..=b).contains(&i)) {
                                 Some(p.hl_med)
                             } else if i == sb.cursor {
-                                Some(p.surface)
+                                Some(p.overlay)
                             } else {
                                 None
                             };
@@ -2723,6 +2728,20 @@ impl App {
                         })
                         .collect();
                     f.render_widget(Paragraph::new(shown), text);
+                    // A bar in the margin marks the cursor's line, which a
+                    // fill alone barely sets apart.
+                    if let Some(row) = sb
+                        .cursor
+                        .checked_sub(sb.top)
+                        .and_then(|r| u16::try_from(r).ok())
+                        && row < text.height
+                        && text.width > 0
+                    {
+                        let cell = &mut f.buffer_mut()[(text.x, text.y + row)];
+                        if cell.symbol() == " " {
+                            cell.set_symbol("▌").set_fg(p.iris);
+                        }
+                    }
                     if lines.len() > h {
                         draw::scrollbar(f, p, screen, sb.top, lines.len());
                     }
@@ -2742,9 +2761,15 @@ impl App {
         }
     }
 
+    /// Whether the reply box gives way: nothing is highlighted (such as a
+    /// search with no matches), so there is no one to message.
+    fn reply_hidden(&self) -> bool {
+        self.reply.is_none() && self.selected_item().is_none()
+    }
+
     /// The reply box: the prompt box with a chip row naming the agent it
-    /// goes to, filled brighter while it has focus. Unfocused, it says
-    /// what Tab would do.
+    /// goes to, filled brighter and barred in iris while it has focus.
+    /// Unfocused, it says what Tab would do.
     fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
         let p = self.p;
         let unfocused = if self.reply.is_some() {
@@ -2766,7 +2791,8 @@ impl App {
         let tokens = self.tokens_label();
         let (prompt, label, focused) = match (&mut self.reply, unfocused) {
             (Some(r), _) => {
-                r.prompt.set_placeholder(&format!("Message {}", r.label));
+                // The chip row already names the agent.
+                r.prompt.set_placeholder("Type a message");
                 self.reply_card = Some((card, f.area()));
                 (&mut r.prompt, Some(r.label.clone()), true)
             }
@@ -2781,6 +2807,16 @@ impl App {
             return;
         };
         let fill = if focused { p.overlay } else { p.surface };
+        if focused {
+            // An iris bar down the left edge: the brighter fill alone
+            // barely tells focus apart.
+            let buf = f.buffer_mut();
+            for y in card.y + 1..card.y + card.height.saturating_sub(1) {
+                buf[(card.x, y)]
+                    .set_symbol("▌")
+                    .set_style(Style::new().fg(p.iris).bg(fill));
+            }
+        }
         let mut left = Vec::new();
         if let Some(label) = label {
             left.push(Span::styled("to ", Style::new().fg(p.muted).bg(fill)));
@@ -3012,8 +3048,8 @@ impl App {
             View::Usage => "Search accounts, harnesses, models, and hosts",
             View::Work => "Search open work items",
         };
-        draw::search(f, p, area, &self.query, placeholder, typing, true);
         if matches!(self.view, View::Usage | View::Work) {
+            draw::search(f, p, area, &self.query, placeholder, typing, true);
             return;
         }
         let shown = self.rows.iter().filter(|r| selectable(r)).count();
@@ -3083,6 +3119,16 @@ impl App {
                 Style::new().fg(p.muted),
             ));
         }
+        // The placeholder stops short of the counts, cut with … if need be:
+        // less the icon's four cells, the counts and a space between.
+        let right_w: usize = right.iter().map(|s| str_width(&s.content)).sum();
+        let room = usize::from(area.width).saturating_sub(4 + right_w + 1);
+        let placeholder = if room == 0 {
+            String::new()
+        } else {
+            preview::clip_width(placeholder, room)
+        };
+        draw::search(f, p, area, &self.query, &placeholder, typing, true);
         f.render_widget(Line::from(right).right_aligned(), area);
     }
 
@@ -5700,6 +5746,33 @@ mod tests {
         // ctrl-y no longer opens it.
         app.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
         assert!(app.reply.is_none());
+        // With nothing highlighted, it gives way, expanded or not.
+        app.selected = None;
+        for _ in 0..2 {
+            let text = screen(&mut app);
+            assert!(
+                text.contains("Highlight an agent") && !text.contains("message it"),
+                "{text}"
+            );
+            app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        }
+    }
+
+    #[test]
+    fn a_narrow_search_cuts_its_placeholder_before_the_counts() {
+        let mut app = inbox_with_lifecycle();
+        let mut terminal = Terminal::new(TestBackend::new(44, 20)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .find(|r| r.contains("Search"))
+            .unwrap();
+        assert!(row.contains("Search… 1 done  1 working  4 tabs"), "{row}");
     }
 
     #[test]

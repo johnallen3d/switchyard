@@ -163,15 +163,10 @@ impl Help {
     }
 
     /// The bindings the filter matches, as drawn: a title over each group
-    /// with any, keys in one column, each action cut to fit `width`.
+    /// with any, its keys in a column as wide as they need, each action cut
+    /// to fit `width`.
     fn lines(&mut self, p: &Palette, sections: &[Section], width: usize) -> Vec<Line<'static>> {
         let pattern = Pattern::parse(&self.filter, CaseMatching::Smart, Normalization::Smart);
-        let col = sections
-            .iter()
-            .flat_map(|s| &s.keys)
-            .map(|(k, _)| str_width(k))
-            .max()
-            .unwrap_or(0);
         let mut out = Vec::new();
         for s in sections {
             let keys: Vec<_> = s
@@ -182,6 +177,9 @@ impl Help {
             if keys.is_empty() {
                 continue;
             }
+            // Each group's keys get a column as wide as its widest key, so
+            // one long key doesn't push every group's actions far right.
+            let col = keys.iter().map(|(k, _)| str_width(k)).max().unwrap_or(0);
             if !out.is_empty() {
                 out.push(Line::default());
             }
@@ -262,5 +260,21 @@ mod tests {
         assert_eq!(press(&mut h, KeyCode::Esc), Outcome::Stay);
         assert_eq!(h.filter, "");
         assert_eq!(press(&mut h, KeyCode::Esc), Outcome::Close);
+    }
+
+    #[test]
+    fn each_group_sizes_its_key_column_to_its_own_keys() {
+        let p = Palette::load();
+        let sections = [
+            Section::new("Short", &[("y", "copy")]),
+            Section::new("Long", &[("⌃F ⌃B PgDn PgUp", "a page")]),
+        ];
+        let text: Vec<String> = Help::default()
+            .lines(&p, &sections, 61)
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        assert_eq!(text[1], "  y  copy");
+        assert_eq!(text[4], "  ⌃F ⌃B PgDn PgUp  a page");
     }
 }
