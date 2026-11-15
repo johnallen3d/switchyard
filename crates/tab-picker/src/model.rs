@@ -189,8 +189,8 @@ impl Link {
         }
     }
 
-    /// A PR's state or checks, or a card's column and assignee (`✓ Done`
-    /// when closed), as a badge shows them after its ref.
+    /// A PR's state or checks, or a card's assignee (`✓ Done` when
+    /// closed), as a badge shows them after its ref.
     pub fn badge_state(&self) -> Option<(String, Tone)> {
         if self.kind == "card" {
             return self.card_state();
@@ -217,16 +217,10 @@ impl Link {
                 };
                 Some((format!("✓ {column}"), Tone::Merged))
             }
+            // An open card's column (`Maybe?`, `Doing`) belongs to the
+            // Work view and the reader, not a badge.
             "open" => {
-                let mut text = self.column.clone();
-                if !self.assignee.is_empty() {
-                    if !text.is_empty() {
-                        text.push(' ');
-                    }
-                    text.push('@');
-                    text.push_str(&self.assignee);
-                }
-                (!text.is_empty()).then_some((text, Tone::Muted))
+                (!self.assignee.is_empty()).then(|| (format!("@{}", self.assignee), Tone::Muted))
             }
             _ => None,
         }
@@ -635,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn card_badges_show_column_and_assignee_or_done() {
+    fn card_badges_show_assignee_or_done() {
         let open = Link {
             column: "In Progress".into(),
             assignee: "John".into(),
@@ -652,11 +646,11 @@ mod tests {
         };
         assert_eq!(
             text(&badges(std::slice::from_ref(&open), usize::MAX)),
-            "card 1156 In Progress @John"
+            "card 1156 @John"
         );
         assert_eq!(
             text(&badges(&[closed.clone(), triage], usize::MAX)),
-            "cards 1155 ✓ Done 1157 Maybe?"
+            "cards 1155 ✓ Done 1157"
         );
         assert_eq!(closed.badge_state().unwrap().1, Tone::Merged);
         // Without a lookup a card shows just its number.

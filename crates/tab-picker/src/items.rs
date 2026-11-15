@@ -24,7 +24,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::cell::Cell;
 
-use ratatui::widgets::{Block, Clear};
+use ratatui::widgets::{Block, Clear, Padding};
 use switchyard_core::item_actions::{Action, Item};
 use switchyard_core::item_view::{Comment, Thread};
 use switchyard_ui::Palette;
@@ -177,8 +177,213 @@ fn status(l: &Link, p: &Palette) -> Vec<(String, Color)> {
     out
 }
 
-/// The widest a row's status column gets before it is clipped.
-const STATUS_MAX: usize = 22;
+/// What a list row says beside an item's name: its `status`, less an open
+/// card's board column (`Maybe?`, `Doing`), which the reader still shows.
+fn row_status(l: &Link, p: &Palette) -> Vec<(String, Color)> {
+    let mut out = status(l, p);
+    if l.kind == "card" && l.state == "open" && !out.is_empty() {
+        out.remove(0);
+    }
+    out
+}
+
+/// Title lines an item shows in the list before the rest is cut with `…`.
+const TITLE_LINES: usize = 2;
+
+/// An item's icon, by kind, and its colour, by state, as GitHub draws
+/// them: a PR is open, draft, merged or closed; an issue or card open or
+/// done. (Nerd Font glyphs; see `switchyard_ui::glyphs`.)
+fn icon(l: &Link, p: &Palette) -> (&'static str, Color) {
+    let closed = l.state == "closed";
+    match l.kind.as_str() {
+        "pr" => match l.state.as_str() {
+            "draft" => ("\u{f4dd}", p.muted), // nf-oct-git_pull_request_draft
+            "merged" => ("\u{f419}", p.iris), // nf-oct-git_merge
+            "closed" => ("\u{f4dc}", p.love), // nf-oct-git_pull_request_closed
+            _ => ("\u{f407}", p.pine),        // nf-oct-git_pull_request
+        },
+        "issue" if closed => ("\u{f41d}", p.iris), // nf-oct-issue_closed
+        "issue" => ("\u{f41b}", p.pine),           // nf-oct-issue_opened
+        "card" if closed => ("\u{f49e}", p.iris),  // nf-oct-check_circle
+        "card" => ("\u{f0b78}", p.foam),           // nf-md-card_text_outline
+        "commit" => ("\u{f417}", p.subtle),        // nf-oct-git_commit
+        _ => ("\u{f44c}", p.subtle),               // nf-oct-link
+    }
+}
+
+/// An item as the list lays it out, `width` columns of text wide: its
+/// title (or its URL until the tracker names it), wrapped to at most
+/// `TITLE_LINES`, then one line of what it is, its name and `row_status`.
+struct Laid {
+    title: Vec<String>,
+    /// Whether the title is the URL standing in for one.
+    url: bool,
+}
+
+impl Laid {
+    fn new(e: &Entry, width: usize) -> Self {
+        let (text, url) = match e.link.title.trim() {
+            "" => (e.link.url.clone(), true),
+            t => (t.to_string(), false),
+        };
+        let mut title = if url {
+            vec![crate::preview::clip_width(&text, width)]
+        } else {
+            crate::preview::wrap(&text, width)
+        };
+        if title.len() > TITLE_LINES {
+            title.truncate(TITLE_LINES);
+            let last = &mut title[TITLE_LINES - 1];
+            *last = crate::preview::clip_width(&format!("{last} …"), width);
+            if !last.ends_with('…') {
+                let keep = width.saturating_sub(1);
+                *last = format!("{}…", crate::preview::clip_width(last, keep).trim_end());
+            }
+        }
+        if title.is_empty() {
+            title.push(String::new());
+        }
+        Self { title, url }
+    }
+
+    /// Its rows: the title's, then the line under it.
+    fn height(&self) -> usize {
+        self.title.len() + 1
+    }
+}
+
+/// The first of `heights` to show so that `selected` is in view in
+/// `rows`, with a blank row between items: the top, until the selection
+/// would fall off the bottom.
+fn first_shown(heights: &[usize], selected: usize, rows: usize) -> usize {
+    let span = |from: usize| -> usize {
+        heights[from..=selected].iter().sum::<usize>() + (selected - from)
+    };
+    let mut first = 0;
+    while first < selected && span(first) > rows {
+        first += 1;
+    }
+    first
+}
+
+/// The line under an item's title: its name, then what `row_status` says,
+/// in colour, clipped to `width`.
+fn meta_spans(e: &Entry, width: usize, bg: Color, p: &Palette) -> Vec<Span<'static>> {
+    let mut room = width;
+    let mut spans = Vec::new();
+    let mut push = |text: &str, fg: Color, spans: &mut Vec<Span<'static>>| {
+        let text = crate::preview::clip_width(text, room);
+        room = room.saturating_sub(str_width(&text));
+        spans.push(Span::styled(text, Style::new().fg(fg).bg(bg)));
+    };
+    push(&e.name(), p.subtle, &mut spans);
+    for (text, fg) in row_status(&e.link, p) {
+        push("  ·  ", p.muted, &mut spans);
+        push(&text, fg, &mut spans);
+    }
+    spans
+}
+
+/// Columns before an item's text: its icon and two spaces.
+const GUTTER: usize = 3;
+
+/// The items of `heights` shown in `rows` with `selected` in view (see
+/// `first_shown`), as many as fit from the first.
+fn shown(heights: &[usize], selected: usize, rows: usize) -> std::ops::Range<usize> {
+    let first = first_shown(heights, selected, rows);
+    let mut used = 0;
+    let mut end = first;
+    for h in &heights[first..] {
+        if used + h > rows {
+            break;
+        }
+        used += h + 1;
+        end += 1;
+    }
+    first..end.max((first + 1).min(heights.len()))
+}
+
+/// The list's box: `Work items` at the left of its top border and the
+/// task's `label`, muted, at the right; in its bottom border, how many
+/// items are scrolled out of view `above` and `beneath`.
+fn list_block(p: &Palette, label: &str, above: usize, beneath: usize) -> Block<'static> {
+    let right = |text: String| {
+        Line::from(vec![
+            Span::styled(text, Style::new().fg(p.muted)),
+            Span::styled("─", Style::new().fg(p.iris)),
+        ])
+        .right_aligned()
+    };
+    let block = popup::block(p, "Work items")
+        .padding(Padding::uniform(1))
+        .title_top(right(format!(" {label} ")));
+    let mut more = Vec::new();
+    if above > 0 {
+        more.push(format!("↑ {above}"));
+    }
+    if beneath > 0 {
+        more.push(format!("↓ {beneath}"));
+    }
+    if more.is_empty() {
+        block
+    } else {
+        block.title_bottom(right(format!(" {} more ", more.join("  "))))
+    }
+}
+
+/// One item of the list in `item` (rows of the box's `inner`): its icon,
+/// its title lines and the line under them; banded, with an iris bar in
+/// the padding at its left, when `selected`.
+fn draw_item(
+    f: &mut Frame,
+    p: &Palette,
+    inner: Rect,
+    item: Rect,
+    e: &Entry,
+    laid: &Laid,
+    selected: bool,
+) {
+    let bg = if selected { p.overlay } else { p.base };
+    let line = |n: usize| Rect {
+        x: item.x + crate::cells(GUTTER),
+        y: item.y + crate::cells(n),
+        width: item.width.saturating_sub(crate::cells(GUTTER)),
+        height: 1,
+    };
+    if selected {
+        popup::select(f, p, inner, item);
+        for dy in 0..item.height {
+            let bar = Rect {
+                x: item.x.saturating_sub(1),
+                y: item.y + dy,
+                width: 1,
+                height: 1,
+            };
+            f.render_widget(Span::styled("▌", Style::new().fg(p.iris).bg(bg)), bar);
+        }
+    }
+    let (glyph, fg) = icon(&e.link, p);
+    let at = Rect {
+        width: 1,
+        height: 1,
+        ..item
+    };
+    f.render_widget(Span::styled(glyph, Style::new().fg(fg).bg(bg)), at);
+    let mut style = Style::new().fg(p.text).bg(bg);
+    if laid.url {
+        style = style.fg(p.muted);
+    } else if selected {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    for (n, t) in laid.title.iter().enumerate() {
+        f.render_widget(Span::styled(t.clone(), style), line(n));
+    }
+    let width = usize::from(line(0).width);
+    f.render_widget(
+        Line::from(meta_spans(e, width, bg, p)),
+        line(laid.title.len()),
+    );
+}
 
 /// The key that asks for an action, as the float names it.
 fn action_key(a: Action) -> (&'static str, &'static str) {
@@ -486,39 +691,21 @@ impl Items {
         })
     }
 
-    /// A box over the list: one item a line with its name, its state and
-    /// checks (see `status`) and its title (its URL until the tracker names
-    /// it), in columns, then,
-    /// while typing a comment or confirming, the comment or the question.
-    /// Its keys are in the footer (see `hints`).
+    /// A box over the list, each item a block: its icon, coloured by
+    /// state (see `icon`), beside its title, wrapped to two lines, over a
+    /// muted line naming it with its state and checks (see `row_status`).
+    /// A blank line separates items and pads the box inside its border;
+    /// the highlighted item is banded with an iris bar at its left. The
+    /// list scrolls to keep the highlight in view, and the bottom border
+    /// says how many are out of it. While typing a comment or confirming,
+    /// the comment or the question is under the list. Its keys are in the
+    /// footer (see `hints`).
     pub fn draw(&mut self, f: &mut Frame, area: Rect, p: &Palette) {
         if let Mode::Read { thread, scroll } = &self.mode {
             self.draw_reader(f, area, p, thread, *scroll);
             return;
         }
         crate::backdrop(f, p);
-        let pieces = |e: &Entry| status(&e.link, p);
-        let joined = |ps: &[(String, Color)]| {
-            ps.iter()
-                .map(|(t, _)| t.as_str())
-                .collect::<Vec<_>>()
-                .join(" · ")
-        };
-        // Columns: name, status, then the title in what is left.
-        let name_w = self
-            .entries
-            .iter()
-            .map(|e| str_width(&e.name()))
-            .max()
-            .unwrap_or(0);
-        let status_w = self
-            .entries
-            .iter()
-            .map(|e| str_width(&joined(&pieces(e))))
-            .max()
-            .unwrap_or(0)
-            .min(STATUS_MAX);
-        let title = format!("Work items · {}", self.label);
         // Less the borders and padding.
         let text_w = usize::from(popup::LIST_WIDTH.min(area.width).saturating_sub(4)).max(1);
         // A confirmation's question, wrapped whole; the box a comment is
@@ -536,55 +723,31 @@ impl Items {
             }
             _ => Vec::new(),
         };
+        let body_w = text_w.saturating_sub(GUTTER).max(1);
+        let laid: Vec<Laid> = self.entries.iter().map(|e| Laid::new(e, body_w)).collect();
+        let heights: Vec<usize> = laid.iter().map(Laid::height).collect();
+        let list = heights.iter().sum::<usize>() + heights.len().saturating_sub(1);
         // A blank line between the list and what is under it.
         let below = if foot.is_empty() { 0 } else { foot.len() + 1 };
-        let height = crate::cells(self.entries.len() + below).saturating_add(2);
-        let r = popup::list_rect(area, height);
-        let inner = popup::open(f, r, popup::block(p, &title));
-        let rows = usize::from(inner.height).saturating_sub(below);
-        for (i, e) in self.entries.iter().enumerate().take(rows) {
-            let selected = i == self.selected;
-            let row = Rect {
-                y: inner.y + crate::cells(i),
-                height: 1,
+        // The border and a blank line inside it, above and below.
+        let height = crate::cells(list + below).saturating_add(4);
+        let rect = popup::list_rect(area, height);
+        let rows = usize::from(rect.height.saturating_sub(4)).saturating_sub(below);
+        let shown = shown(&heights, self.selected, rows);
+        let block = list_block(p, &self.label, shown.start, self.entries.len() - shown.end);
+        let inner = popup::open(f, rect, block);
+        let mut top = inner.y;
+        for (i, (e, l)) in self.entries.iter().zip(&laid).enumerate() {
+            if !shown.contains(&i) {
+                continue;
+            }
+            let item = Rect {
+                y: top,
+                height: crate::cells(l.height()),
                 ..inner
             };
-            if selected {
-                popup::select(f, p, inner, row);
-            }
-            let bg = if selected { p.overlay } else { p.base };
-            let mut style = Style::new().fg(p.text).bg(bg);
-            if selected {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            let name = e.name();
-            let pad = " ".repeat(name_w.saturating_sub(str_width(&name)));
-            let mut spans = vec![Span::styled(format!("{name}{pad}"), style)];
-            if status_w > 0 {
-                let mut room = status_w;
-                spans.push(Span::styled("  ", Style::new().bg(bg)));
-                for (j, (text, fg)) in pieces(e).into_iter().enumerate() {
-                    let sep = if j == 0 { "" } else { " · " };
-                    for (text, fg) in [(sep.to_string(), p.muted), (text, fg)] {
-                        let text = crate::preview::clip_width(&text, room);
-                        room = room.saturating_sub(str_width(&text));
-                        spans.push(Span::styled(text, Style::new().fg(fg).bg(bg)));
-                    }
-                }
-                spans.push(Span::styled(" ".repeat(room), Style::new().bg(bg)));
-            }
-            // Its title, which Enter's URL says nothing of; the URL only
-            // while the tracker hasn't said (see core's `titles`).
-            let (about, fg) = match e.link.title.trim() {
-                "" => (e.link.url.clone(), p.muted),
-                t => (t.to_string(), p.text),
-            };
-            let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
-            spans.push(Span::styled(
-                crate::preview::clip_width(&format!("  {about}"), room),
-                Style::new().fg(fg).bg(bg),
-            ));
-            f.render_widget(Line::from(spans), row);
+            draw_item(f, p, inner, item, e, l, i == self.selected);
+            top = item.bottom() + 1;
         }
         self.draw_foot(f, inner, foot, p);
     }
@@ -1124,10 +1287,55 @@ mod tests {
         };
         assert_eq!(text(&card("open", "Doing", "John")), ["Doing", "@John"]);
         assert_eq!(text(&card("closed", "", "")), ["✓ closed"]);
+        // The list leaves out an open card's column; the reader keeps it.
+        let row =
+            |l: &Link| -> Vec<String> { row_status(l, &p).into_iter().map(|(t, _)| t).collect() };
+        assert_eq!(row(&card("open", "Maybe?", "John")), ["@John"]);
+        assert_eq!(row(&card("open", "Maybe?", "")), Vec::<String>::new());
+        assert_eq!(row(&card("closed", "Done", "")), ["✓ Done"]);
+        assert_eq!(row(&pr("open", "pass")), ["open", "✓ checks"]);
         // Nothing known, nothing shown: no lookup yet, or an issue.
         let none: [String; 0] = [];
         assert_eq!(text(&card("", "", "")), none);
         assert_eq!(text(&link("issue", "github", "o/r#3", "u", "")), none);
+    }
+
+    #[test]
+    fn the_list_scrolls_to_keep_the_highlight_in_view() {
+        // Three 3-row items need 11 rows with the gaps between them.
+        let h = [3, 3, 3];
+        assert_eq!(shown(&h, 0, 11), 0..3);
+        assert_eq!(shown(&h, 0, 7), 0..2);
+        assert_eq!(shown(&h, 2, 7), 1..3);
+        // Too short for even one: the highlighted one still shows.
+        assert_eq!(shown(&h, 1, 2), 1..2);
+    }
+
+    #[test]
+    fn titles_wrap_to_two_lines_then_ellipsis() {
+        let mut e = items().entries.remove(0);
+        e.link.title = "one two three four five six seven".into();
+        let l = Laid::new(&e, 10);
+        assert_eq!(l.title.len(), 2);
+        assert!(l.title[1].ends_with('…'), "{:?}", l.title);
+        assert!(l.title.iter().all(|t| str_width(t) <= 10));
+        assert_eq!(l.height(), 3);
+        // No title yet: the URL, on one line, muted.
+        e.link.title = String::new();
+        let l = Laid::new(&e, 80);
+        assert!(l.url && l.title.len() == 1);
+    }
+
+    #[test]
+    fn icons_follow_kind_and_state() {
+        let p = Palette::load();
+        let pr = |state: &str| icon(&link("pr", "github", "o/r#1", "u", state), &p);
+        assert_eq!(pr("open"), ("\u{f407}", p.pine));
+        assert_eq!(pr("merged"), ("\u{f419}", p.iris));
+        assert_eq!(pr("closed").1, p.love);
+        let card = |state: &str| icon(&link("card", "fizzy", "1", "u", state), &p);
+        assert_eq!(card("open").1, p.foam);
+        assert_eq!(card("closed"), ("\u{f49e}", p.iris));
     }
 
     #[test]
