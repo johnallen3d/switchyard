@@ -50,23 +50,25 @@ pub fn frame(
         Span::styled(" ", Style::new().bg(p.base)),
     ];
     left.extend(extra);
-    frame_spans(f, p, left, shortcut, margin)
+    frame_spans(f, p, left, shortcut, margin, p.hl_med)
 }
 
-/// [`frame`] with the title's spans given whole.
+/// [`frame`] with the title's spans given whole and the border in `border`,
+/// which a mode can tint to stand out.
 pub fn frame_spans(
     f: &mut Frame,
     p: &Palette,
     left: Vec<Span<'static>>,
     shortcut: &str,
     margin: Margin,
+    border: Color,
 ) -> Rect {
     let area = f.area();
     f.buffer_mut()
         .set_style(area, Style::new().bg(p.base).fg(p.text));
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(p.hl_med).bg(p.base))
+        .border_style(Style::new().fg(border).bg(p.base))
         .title_top(Line::from(left).left_aligned())
         .style(Style::new().bg(p.base));
     if !shortcut.is_empty() {

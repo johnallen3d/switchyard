@@ -2315,14 +2315,17 @@ impl App {
         let room = (f.area().width as usize)
             .saturating_sub(4)
             .saturating_sub(spans_width(&chips));
+        let badge = self.mode_badge();
+        let room = room.saturating_sub(spans_width(&badge));
         let mut top = self.view_strip(room);
+        top.extend(badge);
         if !chips.is_empty() {
             if top.is_empty() {
                 top.push(Span::raw(" "));
             }
             top.extend(chips);
         }
-        let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1));
+        let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1), self.border());
         // Down to the bottom border, which holds the footer.
         let content = Rect {
             height: inner.height + 1,
@@ -2724,6 +2727,9 @@ impl App {
             Ok(lines) => {
                 let h = text.height as usize;
                 if let Some(sb) = &mut self.scrollback {
+                    // A raised fill under the whole pane marks it as the
+                    // one with the keys.
+                    f.buffer_mut().set_style(screen, Style::new().bg(p.surface));
                     sb.sync(lines.len(), h);
                     let sel = sb.selection();
                     let query = sb.query();
@@ -2993,6 +2999,39 @@ impl App {
     /// `room` it has; just the current one's name if they all don't fit.
     /// None in the quick float, which has only its list. ctrl-h and ctrl-l
     /// move along it; the footer says so.
+    /// The frame's border colour: iris in scrollback, so the whole window
+    /// says it has the keys, else the usual quiet line.
+    fn border(&self) -> Color {
+        if self.scrollback.is_some() {
+            self.p.iris
+        } else {
+            self.p.hl_med
+        }
+    }
+
+    /// A pill in the title naming the mode that has the keys, if any.
+    fn mode_badge(&self) -> Vec<Span<'static>> {
+        let p = &self.p;
+        let Some(sb) = &self.scrollback else {
+            return Vec::new();
+        };
+        let label = if sb.anchor.is_some() {
+            "SCROLLBACK · SELECT"
+        } else {
+            "SCROLLBACK"
+        };
+        let mut spans = draw::pill(
+            vec![Span::styled(
+                format!(" {label} "),
+                Style::new().fg(p.base).add_modifier(Modifier::BOLD),
+            )],
+            p.iris,
+            p.base,
+        );
+        spans.push(Span::raw(" "));
+        spans
+    }
+
     fn view_strip(&self, room: usize) -> Vec<Span<'static>> {
         if self.quick {
             return Vec::new();
@@ -3000,7 +3039,8 @@ impl App {
         let p = &self.p;
         let lit = Style::new().fg(p.iris).add_modifier(Modifier::BOLD);
         // After the corner and a dash, as the popups' titles start.
-        let dash = || Span::styled("─", Style::new().fg(p.hl_med));
+        let border = self.border();
+        let dash = || Span::styled("─", Style::new().fg(border));
         let mut spans = vec![dash(), Span::raw(" ")];
         for (i, v) in View::ALL.into_iter().enumerate() {
             if i > 0 {
@@ -4174,7 +4214,7 @@ impl App {
             width: outer.width - 4,
             height: 1,
         };
-        let border = Style::new().fg(self.p.hl_med).bg(self.p.base);
+        let border = Style::new().fg(self.border()).bg(self.p.base);
         let buf = f.buffer_mut();
         for x in row.x..row.right() {
             buf[(x, row.y)].set_symbol(" ");
