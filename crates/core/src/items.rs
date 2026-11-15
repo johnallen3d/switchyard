@@ -17,6 +17,7 @@ use crate::hosts::Project;
 use crate::item_actions::run_bounded;
 use crate::links::{FIZZY_BOARD_SH, Tracker, bounded_output, gh, tracker_or_fizzy};
 use crate::rex::{home, sh_quote};
+use crate::tasks::rfc3339_secs;
 
 /// How long one listing call may take before it is given up on.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -24,13 +25,19 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 pub const LIST_LIMIT: usize = 100;
 
 /// An open card or issue.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OpenItem {
     pub number: u64,
     pub title: String,
     /// The item's URL, the work item a launch is given: unambiguous on any
     /// host, whatever tracker its checkout there has.
     pub url: String,
+    /// When it was created, in seconds since the Unix epoch.
+    pub created: Option<u64>,
+    /// Its tags (Fizzy) or labels (GitHub).
+    pub labels: Vec<String>,
+    /// Who it's assigned to: names (Fizzy) or logins (GitHub).
+    pub assignees: Vec<String>,
 }
 
 /// A project's open items and what they are (`cards` or `issues`).
@@ -64,7 +71,7 @@ pub fn list_open(project: &Project) -> Result<OpenItems, String> {
             board,
             "--all",
             "--jq",
-            "[.data[]|{number,title,url}]",
+            "[.data[]|{number,title,url,created_at,tags,assignees:[.assignees[]?.name]}]",
         ]);
         // Away from any checkout's `.fizzy.yaml`; the board is explicit.
         cmd.current_dir(home());
@@ -97,7 +104,7 @@ pub fn list_open(project: &Project) -> Result<OpenItems, String> {
             "--limit",
             &limit,
             "--json",
-            "number,title,url",
+            "number,title,url,createdAt,labels,assignees",
         ],
     )
     .ok_or("gh issue list failed")?;
@@ -122,8 +129,26 @@ fn local_board(path: &str) -> String {
     bounded_output(&mut cmd, None, LIST_TIMEOUT).unwrap_or_default()
 }
 
+/// The names in a JSON list of strings or of objects naming themselves
+/// (`login`, as GitHub's assignees, before `name`, which may be empty).
+fn names(list: &Value) -> Vec<String> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            v.as_str()
+                .or_else(|| v["login"].as_str())
+                .or_else(|| v["name"].as_str())
+        })
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 /// Items from a JSON list of `{number, title, url}`, as both CLIs give
-/// them, capped at `LIST_LIMIT`.
+/// them, with what else they give (creation time, labels or tags,
+/// assignees), capped at `LIST_LIMIT`.
 fn parse(json: &str) -> Result<Vec<OpenItem>, String> {
     let list: Value =
         serde_json::from_str(json.trim()).map_err(|e| format!("work item list: {e}"))?;
@@ -135,6 +160,16 @@ fn parse(json: &str) -> Result<Vec<OpenItem>, String> {
                 number: i["number"].as_u64()?,
                 title: i["title"].as_str().unwrap_or("").trim().to_string(),
                 url: i["url"].as_str().filter(|u| !u.is_empty())?.to_string(),
+                created: i["created_at"]
+                    .as_str()
+                    .or_else(|| i["createdAt"].as_str())
+                    .and_then(rfc3339_secs),
+                labels: names(if i["tags"].is_null() {
+                    &i["labels"]
+                } else {
+                    &i["tags"]
+                }),
+                assignees: names(&i["assignees"]),
             })
         })
         .take(LIST_LIMIT)
@@ -151,7 +186,10 @@ mod tests {
             {"number": 1158, "title": " Spawn from a card ", "url": "https://app.fizzy.do/1/cards/1158"},
             {"number": 7, "title": "no url"},
             {"title": "no number", "url": "https://github.com/o/r/issues/3"},
-            {"number": 42, "title": "Fix it", "url": "https://github.com/o/r/issues/42"}
+            {"number": 42, "title": "Fix it", "url": "https://github.com/o/r/issues/42",
+             "createdAt": "2026-11-07T15:40:18Z",
+             "labels": [{"name": "bug", "color": "d73a4a"}],
+             "assignees": [{"login": "octo", "name": "Octo Cat"}]}
         ]"#;
         let items = parse(json).unwrap();
         assert_eq!(
@@ -160,15 +198,28 @@ mod tests {
                 OpenItem {
                     number: 1158,
                     title: "Spawn from a card".into(),
-                    url: "https://app.fizzy.do/1/cards/1158".into()
+                    url: "https://app.fizzy.do/1/cards/1158".into(),
+                    ..OpenItem::default()
                 },
                 OpenItem {
                     number: 42,
                     title: "Fix it".into(),
-                    url: "https://github.com/o/r/issues/42".into()
+                    url: "https://github.com/o/r/issues/42".into(),
+                    created: rfc3339_secs("2026-11-07T15:40:18Z"),
+                    labels: vec!["bug".into()],
+                    assignees: vec!["octo".into()],
                 },
             ]
         );
+        // Fizzy's shape, as the listing's jq gives it.
+        let card = parse(
+            r#"[{"number": 9, "title": "t", "url": "u", "created_at": "2026-11-15T03:05:47.144Z",
+                 "tags": ["feature"], "assignees": ["John Allen"]}]"#,
+        )
+        .unwrap();
+        assert_eq!(card[0].labels, ["feature"]);
+        assert_eq!(card[0].assignees, ["John Allen"]);
+        assert!(card[0].created.is_some());
         assert_eq!(parse("[]").unwrap(), [] as [OpenItem; 0]);
         assert!(parse("{\"ok\": false}").is_err());
         assert!(parse("not json").is_err());

@@ -8,8 +8,10 @@
 //! again. Each project is listed once, in the background, and kept.
 //!
 //! Items no open task links to come first. Those an open task links to
-//! follow, dimmed, under "With a task", each naming its task. Typing
-//! searches titles and numbers, as in the other views.
+//! follow, dimmed and marked (`TASK_MARK`), under "With a task", each
+//! naming its task. Each row shows what the listing gave besides the title:
+//! labels, assignee and age. Typing searches titles and numbers, as in the
+//! other views.
 //!
 //! On the highlighted item: Enter starts a session from it (auto host,
 //! claude, named from the item; see core's `launch`), in the background,
@@ -37,7 +39,20 @@ use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::SPINNER;
 use switchyard_ui::popup;
 
-use crate::model::{Link, Task};
+use crate::model::{Link, Task, age, now};
+
+/// Marks an item an open task links to, on its row and the head line's
+/// count.
+const TASK_MARK: &str = "●";
+/// The most labels a row shows, and the widest an assignee or label is
+/// drawn.
+const MAX_LABELS: usize = 2;
+const MAX_NAME: usize = 12;
+const MAX_LABEL: usize = 16;
+/// The narrowest a title is squeezed to before a row drops metadata.
+const MIN_TITLE: usize = 32;
+/// The narrowest labels are cut to before a row drops them.
+const MIN_LABELS: usize = 6;
 
 /// A project's listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -174,7 +189,11 @@ impl Work {
         if !self.catalog_read {
             self.catalog_read = true;
             match switchyard_core::hosts::catalog() {
-                Ok(p) => self.projects = p,
+                Ok(mut p) => {
+                    // By name, for the chooser.
+                    p.sort_by_cached_key(|p| p.name.to_lowercase());
+                    self.projects = p;
+                }
                 Err(e) => self.catalog_error = Some(e),
             }
         }
@@ -518,15 +537,16 @@ impl Work {
 
     /// The view: a line naming the project and what it lists, then the
     /// rows, free items first and those with a task dimmed under a
-    /// heading; the project chooser over them while it's open.
+    /// heading, and a blank line above the footer; the project chooser
+    /// over them while it's open.
     pub fn draw(&mut self, f: &mut Frame, area: Rect, p: &Palette, tick: usize) {
-        if area.height < 3 {
+        if area.height < 4 {
             return;
         }
         let head = Rect { height: 1, ..area };
         let list = Rect {
             y: area.y + 2,
-            height: area.height - 2,
+            height: area.height - 3,
             ..area
         };
         f.render_widget(self.head_line(p, tick), head);
@@ -565,12 +585,19 @@ impl Work {
             Some(Listing::Ready(l)) => {
                 let free = self.rows.iter().filter(|r| r.linked.is_none()).count();
                 let taken = self.rows.len() - free;
+                // "cards" or "issues", singular for one.
+                let noun = match l.items.len() {
+                    1 => l.noun.strip_suffix('s').unwrap_or(l.noun),
+                    _ => l.noun,
+                };
                 spans.push(Span::styled(
-                    format!("   {} open {}", l.items.len(), l.noun),
+                    format!("   {} open {noun}", l.items.len()),
                     muted,
                 ));
                 if taken > 0 {
-                    spans.push(Span::styled(format!(" · {taken} with a task"), muted));
+                    spans.push(Span::styled(" · ", muted));
+                    spans.push(Span::styled(TASK_MARK, Style::new().fg(p.foam)));
+                    spans.push(Span::styled(format!(" {taken} with a task"), muted));
                 }
                 if self.rows.len() < l.items.len() {
                     spans.push(Span::styled(
@@ -619,6 +646,7 @@ impl Work {
         self.offset = keep_in_view(self.offset, at, height, header_above)
             .min(lines.len().saturating_sub(height));
         let width = area.width as usize;
+        let names = self.name_width();
         for (n, line) in lines.iter().enumerate().skip(self.offset).take(height) {
             let r = Rect {
                 y: area.y + crate::cells(n - self.offset),
@@ -634,12 +662,34 @@ impl Work {
                     r,
                 ),
                 ListLine::Gap => {}
-                ListLine::Row(i) => self.draw_row(f, r, p, *i, width, tick),
+                ListLine::Row(i) => self.draw_row(f, r, p, *i, (width, names), tick),
             }
         }
     }
 
-    fn draw_row(&self, f: &mut Frame, r: Rect, p: &Palette, i: usize, width: usize, tick: usize) {
+    /// How wide the assignee column is: the widest shown assignee, so
+    /// ages line up.
+    fn name_width(&self) -> usize {
+        self.items()
+            .iter()
+            .map(|i| str_width(&assignee(i)))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// A row: the selection edge, the task mark, the number and the title,
+    /// then on the right its task or launch, labels, assignee and age. The
+    /// highlighted title is brightest, free ones next and those with a
+    /// task dimmest.
+    fn draw_row(
+        &self,
+        f: &mut Frame,
+        r: Rect,
+        p: &Palette,
+        i: usize,
+        (width, names): (usize, usize),
+        tick: usize,
+    ) {
         let row = &self.rows[i];
         let item = &self.items()[row.index];
         let selected = i == self.selected;
@@ -647,33 +697,80 @@ impl Work {
         f.buffer_mut().set_style(r, Style::new().bg(bg));
         let taken = row.linked.is_some();
         let starting = !taken && self.starting.contains(&item.url);
-        let right = match (&row.linked, starting) {
-            (Some(to), _) => {
-                Span::styled(format!("→ {} ", to.label), Style::new().fg(p.muted).bg(bg))
-            }
-            (None, true) => Span::styled(
-                format!("{} starting ", SPINNER[tick % SPINNER.len()]),
-                Style::new().fg(p.gold).bg(bg),
-            ),
-            (None, false) => Span::raw(""),
-        };
+        let on = |fg| Style::new().fg(fg).bg(bg);
         let edge = if selected {
-            Span::styled("▎", Style::new().fg(p.iris).bg(bg))
+            Span::styled("▎", on(p.iris))
         } else {
-            Span::styled(" ", Style::new().bg(bg))
+            Span::styled(" ", on(p.base))
         };
-        let number = format!("#{:<5}", item.number);
-        let room = width.saturating_sub(str_width(&number) + 3 + str_width(&right.content) + 1);
-        let fg = if taken { p.muted } else { p.text };
-        let mut base = Style::new().fg(fg).bg(bg);
+        let mark = if taken {
+            Span::styled(format!("{TASK_MARK} "), on(p.foam))
+        } else {
+            Span::styled("  ", on(p.base))
+        };
+        let number = format!("#{:<5} ", item.number);
+        let lead = 1 + 2 + str_width(&number);
+        // What the right shows, widest first to drop when the title needs
+        // the room: labels, then the assignee.
+        let task = match (&row.linked, starting) {
+            (Some(to), _) => Some(Span::styled(format!("→ {}", to.label), on(p.foam))),
+            (None, true) => Some(Span::styled(
+                format!("{} starting", SPINNER[tick % SPINNER.len()]),
+                on(p.gold),
+            )),
+            (None, false) => None,
+        };
+        let labels = labels(item);
+        let who = format!("{:>names$}", assignee(item));
+        let when = item
+            .created
+            .map(|c| age(now().saturating_sub(c)))
+            .unwrap_or_default();
+        // Each part takes its width and a two-cell gap (between parts, or
+        // from the title); the line ends one cell in.
+        let mut parts: Vec<Span<'static>> = task.into_iter().collect();
+        let mut used = 1 + parts
+            .iter()
+            .map(|s| str_width(&s.content) + 2)
+            .sum::<usize>();
+        // Labels take what the assignee and age leave, cut to fit.
+        let after = if names > 0 { names + 2 } else { 0 } + 6;
+        let label_room = width.saturating_sub(lead + MIN_TITLE + used + 2 + after);
+        let mut add = |parts: &mut Vec<Span<'static>>, text: String, fg, also: usize| {
+            let cells = str_width(&text) + 2;
+            if lead + MIN_TITLE + used + cells + also <= width {
+                used += cells;
+                parts.push(Span::styled(text, on(fg)));
+            }
+        };
+        if !labels.is_empty() && label_room >= MIN_LABELS {
+            add(&mut parts, clip(&labels, label_room), p.pine, after);
+        }
+        if names > 0 {
+            add(&mut parts, who, p.subtle, 6);
+        }
+        add(&mut parts, format!("{when:>4}"), p.muted, 0);
+        let mut right: Vec<Span<'static>> = Vec::new();
+        for part in parts {
+            right.push(part);
+            right.push(Span::styled("  ", on(p.base)));
+        }
+        right.pop();
+        right.push(Span::styled(" ", on(p.base)));
+        let room = width.saturating_sub(lead + used);
+        let fg = if selected {
+            p.text
+        } else if taken {
+            p.muted
+        } else {
+            p.subtle
+        };
+        let mut base = on(fg);
         if selected {
             base = base.add_modifier(Modifier::BOLD);
         }
-        let hl = Style::new().fg(p.gold).bg(bg).add_modifier(Modifier::BOLD);
-        let mut spans = vec![
-            edge,
-            Span::styled(format!("{number} "), Style::new().fg(p.muted).bg(bg)),
-        ];
+        let hl = on(p.gold).add_modifier(Modifier::BOLD);
+        let mut spans = vec![edge, mark, Span::styled(number, on(p.muted))];
         let title = if item.title.is_empty() {
             item.url.as_str()
         } else {
@@ -731,6 +828,50 @@ impl Work {
     }
 }
 
+/// Up to `MAX_LABELS` of an item's labels, each cut to `MAX_LABEL`, and
+/// how many more.
+fn labels(item: &OpenItem) -> String {
+    let mut shown: Vec<String> = item
+        .labels
+        .iter()
+        .take(MAX_LABELS)
+        .map(|l| clip(l, MAX_LABEL))
+        .collect();
+    if item.labels.len() > MAX_LABELS {
+        shown.push(format!("+{}", item.labels.len() - MAX_LABELS));
+    }
+    shown.join(" ")
+}
+
+/// Whom an item is assigned to, briefly: the first assignee's first name
+/// (or login), cut to `MAX_NAME`, and how many more.
+fn assignee(item: &OpenItem) -> String {
+    let Some(first) = item.assignees.first() else {
+        return String::new();
+    };
+    let name = clip(first.split_whitespace().next().unwrap_or(first), MAX_NAME);
+    match item.assignees.len() {
+        1 => name,
+        n => format!("{name}+{}", n - 1),
+    }
+}
+
+/// `s` cut to `max` cells, with an ellipsis when cut.
+fn clip(s: &str, max: usize) -> String {
+    if str_width(s) <= max {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for c in s.chars() {
+        if str_width(&out) + str_width(&c.to_string()) >= max {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -751,6 +892,7 @@ mod tests {
             number: n,
             title: title.into(),
             url: format!("https://app.fizzy.do/1/cards/{n}"),
+            ..OpenItem::default()
         }
     }
 
@@ -872,5 +1014,19 @@ mod tests {
             ),
             o => panic!("{o:?}"),
         }
+    }
+
+    #[test]
+    fn rows_name_a_few_labels_and_the_first_assignee_briefly() {
+        let item = OpenItem {
+            labels: vec!["enhancement".into(), "rust".into(), "schema".into()],
+            assignees: vec!["John Allen".into(), "octo".into()],
+            ..card(1, "t")
+        };
+        assert_eq!(labels(&item), "enhancement rust +1");
+        assert_eq!(assignee(&item), "John+1");
+        assert_eq!(assignee(&card(2, "t")), "");
+        assert_eq!(clip("jasmineHunderfeld", MAX_NAME), "jasmineHund…");
+        assert_eq!(clip("short", MAX_NAME), "short");
     }
 }

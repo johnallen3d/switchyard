@@ -2217,6 +2217,7 @@ mod tests {
             number: n,
             title: title.into(),
             url: format!("https://app.fizzy.do/1/cards/{n}"),
+            ..OpenItem::default()
         };
         app.open_items.insert(
             "~/catalog/repo".into(),
