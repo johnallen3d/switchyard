@@ -231,6 +231,19 @@ pub enum View {
 }
 
 impl View {
+    /// Every view, in the order ctrl-l moves through them.
+    const ALL: [View; 4] = [View::Inbox, View::Work, View::Usage, View::Archive];
+
+    /// Its name in the frame's view strip.
+    fn name(self) -> &'static str {
+        match self {
+            View::Inbox => "Inbox",
+            View::Work => "Work",
+            View::Usage => "Usage",
+            View::Archive => "Archive",
+        }
+    }
+
     /// `inbox` (or the older `all`), `work`, `usage` or `archive`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -251,6 +264,14 @@ impl View {
             (View::Archive, false) | (View::Work, true) => View::Inbox,
         }
     }
+}
+
+/// The footer's hint for moving along the frame's view strip.
+const VIEW_HINT: (&str, &str) = ("⌃H ⌃L", "views");
+
+/// Columns `spans` take.
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| str_width(&s.content)).sum()
 }
 
 /// A session the Work view is starting (see `App::launch`).
@@ -2242,9 +2263,16 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         self.reply_card = None;
-        let mut top = self.header_chips();
-        if !top.is_empty() {
-            top.insert(0, Span::raw(" "));
+        let chips = self.header_chips();
+        let room = (f.area().width as usize)
+            .saturating_sub(4)
+            .saturating_sub(spans_width(&chips));
+        let mut top = self.view_strip(room);
+        if !chips.is_empty() {
+            if top.is_empty() {
+                top.push(Span::raw(" "));
+            }
+            top.extend(chips);
         }
         let inner = draw::frame_spans(f, &self.p, top, "", Margin::new(2, 1));
         // Down to the bottom border, which holds the footer.
@@ -2875,6 +2903,42 @@ impl App {
         if let Some(i) = &mut self.items {
             i.draw(f, area, &self.p);
         }
+    }
+
+    /// The frame's title strip of the views, the current one lit, in what
+    /// `room` it has; just the current one's name if they all don't fit.
+    /// None in the quick float, which has only its list. ctrl-h and ctrl-l
+    /// move along it; the footer says so.
+    fn view_strip(&self, room: usize) -> Vec<Span<'static>> {
+        if self.quick {
+            return Vec::new();
+        }
+        let p = &self.p;
+        let lit = Style::new().fg(p.iris).add_modifier(Modifier::BOLD);
+        // After the corner and a dash, as the popups' titles start.
+        let dash = || Span::styled("─", Style::new().fg(p.hl_med));
+        let mut spans = vec![dash(), Span::raw(" ")];
+        for (i, v) in View::ALL.into_iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", Style::new().fg(p.overlay)));
+            }
+            let style = if v == self.view {
+                lit
+            } else {
+                Style::new().fg(p.muted)
+            };
+            spans.push(Span::styled(v.name(), style));
+        }
+        spans.push(Span::raw(" "));
+        if spans_width(&spans) > room {
+            spans = vec![
+                dash(),
+                Span::raw(" "),
+                Span::styled(self.view.name(), lit),
+                Span::raw(" "),
+            ];
+        }
+        spans
     }
 
     /// The active filters, for the frame's title.
@@ -4097,12 +4161,19 @@ impl App {
             return;
         }
         if self.view == View::Work {
-            return self.draw_hints(f, area, &self.work.hints());
+            let mut hints = self.work.hints();
+            // The view strip's keys, before the keys float's.
+            let at = hints.iter().position(|h| h.0 == "?").unwrap_or(hints.len());
+            hints.insert(at, VIEW_HINT);
+            return self.draw_hints(f, area, &hints);
         }
         let hints: &[(&str, &str, Color)] = if self.quick {
             &[("⏎", "jump", p.subtle), ("esc", "close", p.subtle)]
         } else {
-            &[("?", "keys", p.subtle)]
+            &[
+                (VIEW_HINT.0, VIEW_HINT.1, p.subtle),
+                ("?", "keys", p.subtle),
+            ]
         };
         let (spans, used) = draw::hints(p, hints, area.width as usize);
         f.render_widget(Line::from(spans), area);
@@ -5185,6 +5256,43 @@ mod tests {
             text.contains("Pinned") && text.contains("Snoozed") && text.contains("snoozed  1h"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn frame_names_the_views_and_footer_their_keys() {
+        // The frame drawn `width` wide, and its top and bottom rows.
+        let draw = |app: &mut App, width: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let buf = terminal.backend().buffer().clone();
+            let row = |y| (0..width).map(|x| buf[(x, y)].symbol()).collect::<String>();
+            (row(0), row(11), buf)
+        };
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        let (top, footer, buf) = draw(&mut app, 100);
+        assert!(
+            top.starts_with("╭─ Inbox · Work · Usage · Archive "),
+            "{top}"
+        );
+        assert!(footer.contains("⌃H ⌃L views"), "{footer}");
+        // The current view lit, the others not.
+        let fg = |name: &str| {
+            let x = top[..top.find(name).unwrap()].chars().count();
+            buf[(u16::try_from(x).unwrap(), 0)].fg
+        };
+        assert_eq!(fg("Archive"), app.p.iris);
+        assert_eq!(fg("Inbox"), app.p.muted);
+        // Too narrow for every name: the current one alone.
+        let (top, ..) = draw(&mut app, 24);
+        assert!(
+            top.starts_with("╭─ Archive ") && !top.contains("Inbox"),
+            "{top}"
+        );
+        // The quick float has one list and no views to move between.
+        app.view = View::Inbox;
+        app.quick = true;
+        let (top, footer, _) = draw(&mut app, 100);
+        assert!(!top.contains("Inbox") && !footer.contains("views"), "{top}");
     }
 
     #[test]
