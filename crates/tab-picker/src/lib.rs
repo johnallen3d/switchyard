@@ -4331,6 +4331,7 @@ impl App {
                     ("⇥", "choose the project"),
                     ("⌃F", "switch between work items and pull requests"),
                     ("⌃D", "show a pull request's description, diff or commits"),
+                    ("⌃G", "arm a pull request's approval: ⏎ approves it"),
                     ("⌃E", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "list the project again"),
@@ -4753,6 +4754,17 @@ impl App {
             f.render_widget(self.armed_interrupt_line(), area);
             return;
         }
+        if let (View::Work, Some((name, title))) = (self.view, self.work.armed_approval()) {
+            let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
+            let line = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("⏎", key),
+                Span::styled(format!(" approve {name} {title}"), Style::new().fg(p.love)),
+                Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
+            ]);
+            f.render_widget(line, area);
+            return;
+        }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_agent_tab()) {
             let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
             let line = Line::from(vec![
@@ -4941,7 +4953,7 @@ impl App {
         // The Work view's own keys (see work.rs); the rest search and
         // switch views as in the others.
         if self.view == View::Work {
-            return self.run_work_key(k);
+            return self.run_work_key(k, term);
         }
         // The Archive's project chooser has every key, Enter included.
         if self.projects.is_some() {
@@ -5036,7 +5048,7 @@ impl App {
     /// Run what a key in the Work view asks for: start a session from the
     /// highlighted item, show its task, read it or open it; false for the
     /// keys it leaves to the list.
-    fn run_work_key(&mut self, k: KeyEvent) -> bool {
+    fn run_work_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         // Any other key drops a ctrl-v waiting on the item.
         self.work.detail.want_scroll = false;
         let page = usize::try_from(self.page()).unwrap_or(1);
@@ -5051,6 +5063,8 @@ impl App {
             work::Outcome::Pass => return false,
             work::Outcome::Stay => {}
             work::Outcome::Refuse(why) => self.note = Some((why, true)),
+            work::Outcome::Arm => self.note = None,
+            work::Outcome::Approve { item, url, name } => self.approve_pr(&item, &url, &name, term),
             work::Outcome::Open(url) => {
                 self.note = Some(match standalone::open_url(&url) {
                     Ok(()) => (format!("opened {url}"), false),
@@ -5084,6 +5098,33 @@ impl App {
             work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
         }
         true
+    }
+
+    /// Approve a pull request the Work view lists, under its project's
+    /// profile, then list the project's pull requests again to show it.
+    fn approve_pr(
+        &mut self,
+        item: &switchyard_core::item_actions::Item,
+        url: &str,
+        name: &str,
+        term: &mut DefaultTerminal,
+    ) {
+        let profile = self
+            .work
+            .current()
+            .map(|p| p.profile.clone())
+            .unwrap_or_default();
+        self.busy(term, format!("Approving {name}…"));
+        let action = switchyard_core::item_actions::Action::Approve;
+        self.note = Some(
+            match standalone::item_action(action, item, "", &profile, url) {
+                Ok(_) => {
+                    self.work.load(true);
+                    (format!("approved {name}"), false)
+                }
+                Err(e) => (e, true),
+            },
+        );
     }
 
     /// Start a session from a work item in the background: auto host,

@@ -387,6 +387,8 @@ fn action_key(a: Action) -> (&'static str, &'static str) {
         Action::Comment => ("c", "comment"),
         Action::Close => ("x", "close"),
         Action::Ready => ("r", "mark ready"),
+        // The Work view's ctrl-g; the float doesn't offer it.
+        Action::Approve => ("⌃G", "approve"),
     }
 }
 
@@ -508,6 +510,7 @@ impl Items {
                 Action::Close => format!("{}: x closes Fizzy cards and GitHub issues", e.name()),
                 Action::Ready if e.link.kind == "pr" => format!("{} isn't a draft", e.name()),
                 Action::Ready => format!("{} isn't a PR: r marks a draft PR ready", e.name()),
+                Action::Approve => format!("{}: approve PRs from the Work view", e.name()),
             };
             Outcome::Refuse(why)
         };
@@ -674,6 +677,7 @@ impl Items {
             Action::Comment => format!("Post a comment on {name}: “{body}”?"),
             Action::Close => format!("Close {name}?"),
             Action::Ready => format!("Mark {name} ready for review?"),
+            Action::Approve => format!("Approve {name}?"),
         })
     }
 

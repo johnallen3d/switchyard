@@ -437,7 +437,7 @@ pub fn item_action(
     );
     if r.is_ok() {
         match (action, item) {
-            (Action::Ready, _) => switchyard_core::links::forget_pr(url),
+            (Action::Ready | Action::Approve, _) => switchyard_core::links::forget_pr(url),
             // A closed card's column and state are cached for a few minutes
             // (see core's cards); the next refresh should ask Fizzy at once.
             (Action::Close, Item::Card { account, number }) => {

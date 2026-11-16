@@ -19,7 +19,10 @@
 //! On the highlighted item: Enter starts a session from it (auto host,
 //! claude, named from the item; see core's `launch`), in the background,
 //! switching to Inbox, which highlights the session once it lists, or on
-//! a dimmed item jumps to its task; ctrl-b opens it in the browser.
+//! a dimmed item jumps to its task; ctrl-b opens it in the browser. On a
+//! pull request that isn't a draft, ctrl-g arms its approval, as ctrl-x
+//! arms an archive elsewhere: Enter then approves it (`gh pr review
+//! --approve`) and any other key disarms it.
 //!
 //! With room, the view splits: the list on the left and the highlighted
 //! item on the right, its description and comments, and for a pull
@@ -41,6 +44,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use switchyard_core::hosts::Project;
+use switchyard_core::item_actions::Item;
 use switchyard_core::items::{OpenItem, OpenItems};
 use switchyard_core::links::{Tracker, parse_ref};
 use switchyard_ui::Palette;
@@ -150,6 +154,14 @@ pub enum Outcome {
     Scroll,
     /// Open the URL in the browser here.
     Open(String),
+    /// ctrl-g armed an approval: the footer says what Enter will do.
+    Arm,
+    /// Approve the pull request at `url`, named `name` (`#57`).
+    Approve {
+        item: Item,
+        url: String,
+        name: String,
+    },
     /// Why the key does nothing here, for the footer.
     Refuse(String),
 }
@@ -175,6 +187,8 @@ pub struct Work {
     pub starting: HashSet<String>,
     /// The highlighted item's side (see detail.rs).
     pub detail: Detail,
+    /// The pull request ctrl-g armed to approve, by URL, until the next key.
+    pub approving: Option<String>,
 }
 
 impl Default for Work {
@@ -195,6 +209,7 @@ impl Default for Work {
             chooser: None,
             starting: HashSet::new(),
             detail: Detail::default(),
+            approving: None,
         }
     }
 }
@@ -468,6 +483,9 @@ impl Work {
 
     /// A key in the view, `page` rows a page.
     pub fn key(&mut self, k: KeyEvent, page: usize) -> Outcome {
+        // Enter approves an armed pull request; any other key but ctrl-g
+        // disarms it.
+        let approving = self.approving.take();
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
@@ -535,6 +553,7 @@ impl Work {
             KeyCode::PageDown => self.step((self.selected + page).min(last)),
             KeyCode::Home => self.step(0),
             KeyCode::End => self.step(last),
+            KeyCode::Enter if approving.is_some() => self.approve(approving.as_deref()),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('v') if ctrl => match self.selected_item() {
                 Some(_) => Outcome::Scroll,
@@ -544,6 +563,7 @@ impl Work {
                 Some(item) => Outcome::Open(item.url.clone()),
                 None => Outcome::Stay,
             },
+            KeyCode::Char('g') if ctrl => self.arm_approval(),
             // Searching brings back the list it searches.
             KeyCode::Char(_) if !ctrl => {
                 self.detail.expanded = false;
@@ -571,6 +591,59 @@ impl Work {
             url: item.url.clone(),
             name: format!("#{} {}", item.number, item.title),
         }
+    }
+
+    /// The highlighted pull request, when it can be approved: as an item,
+    /// with its URL and `#N`; else why not.
+    fn approvable(&self) -> Result<(Item, String, String), Outcome> {
+        if self.kind != Kind::Prs {
+            return Err(Outcome::Refuse(
+                "ctrl-g approves pull requests; ctrl-f lists them".into(),
+            ));
+        }
+        let pr = self.selected_item().ok_or(Outcome::Stay)?;
+        let name = format!("#{}", pr.number);
+        if pr.draft {
+            return Err(Outcome::Refuse(format!("{name} is a draft")));
+        }
+        let item = link_key(&pr.url)
+            .and_then(|(kind, system, reference)| {
+                Item::from_link(&kind, &system, &reference, &pr.url, "open")
+            })
+            .filter(|i| matches!(i, Item::Pr { .. }))
+            .ok_or_else(|| Outcome::Refuse(format!("{name} isn't a GitHub pull request")))?;
+        Ok((item, pr.url.clone(), name))
+    }
+
+    /// ctrl-g: arm the highlighted pull request's approval, for Enter.
+    fn arm_approval(&mut self) -> Outcome {
+        match self.approvable() {
+            Ok((_, url, _)) => {
+                self.approving = Some(url);
+                Outcome::Arm
+            }
+            Err(why) => why,
+        }
+    }
+
+    /// Enter on an armed approval: approve the highlighted pull request if
+    /// it is the one `armed` (the highlight can't move while armed).
+    fn approve(&self, armed: Option<&str>) -> Outcome {
+        match self.approvable() {
+            Ok((item, url, name)) if armed == Some(url.as_str()) => {
+                Outcome::Approve { item, url, name }
+            }
+            Ok(_) => Outcome::Stay,
+            Err(why) => why,
+        }
+    }
+
+    /// The armed approval's pull request, `#N` and its title, for the
+    /// footer.
+    pub fn armed_approval(&self) -> Option<(String, String)> {
+        let pr = self.selected_item()?;
+        (self.approving.as_deref() == Some(pr.url.as_str()))
+            .then(|| (format!("#{}", pr.number), pr.title.clone()))
     }
 
     fn step(&mut self, to: usize) -> Outcome {
@@ -652,6 +725,9 @@ impl Work {
         }
         if self.selected_row().is_some() {
             h.extend([("⌃V", "scroll"), ("⌃B", "open")]);
+        }
+        if self.kind == Kind::Prs && self.selected_item().is_some_and(|i| !i.draft) {
+            h.push(("⌃G", "approve"));
         }
         if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
             h.push(("⌃D", self.detail.lens_for(&l).next().name()));
@@ -1331,6 +1407,62 @@ mod tests {
         w.key(ctrl_f, 10);
         w.refilter("", &[]);
         assert_eq!(w.selected_item().unwrap().number, 3);
+    }
+
+    #[test]
+    fn ctrl_g_arms_an_approval_and_enter_approves() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_g = || KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        let mut w = work();
+        w.refilter("", &[]);
+        // Work items aren't approved.
+        assert!(matches!(w.key(ctrl_g(), 10), Outcome::Refuse(_)));
+        w.kind = Kind::Prs;
+        let pr = |n: u64, draft: bool| OpenItem {
+            number: n,
+            title: format!("PR {n}"),
+            url: format!("https://github.com/o/r/pull/{n}"),
+            draft,
+            ..OpenItem::default()
+        };
+        w.lists.insert(
+            ("sy".into(), Kind::Prs),
+            Listing::Ready(OpenItems {
+                noun: "pull requests",
+                items: vec![pr(5, false), pr(4, true)],
+            }),
+        );
+        w.refilter("", &[]);
+        assert_eq!(w.key(ctrl_g(), 10), Outcome::Arm);
+        assert_eq!(w.armed_approval(), Some(("#5".into(), "PR 5".into())));
+        // Any other key disarms it, and Enter goes back to launching.
+        w.key(key(KeyCode::Home), 10);
+        assert_eq!(w.armed_approval(), None);
+        assert!(matches!(
+            w.key(key(KeyCode::Enter), 10),
+            Outcome::Launch { .. }
+        ));
+        // ctrl-g again keeps it armed; Enter approves.
+        w.key(ctrl_g(), 10);
+        assert_eq!(w.key(ctrl_g(), 10), Outcome::Arm);
+        assert_eq!(
+            w.key(key(KeyCode::Enter), 10),
+            Outcome::Approve {
+                item: Item::Pr {
+                    repo: "o/r".into(),
+                    number: "5".into(),
+                    draft: false,
+                },
+                url: "https://github.com/o/r/pull/5".into(),
+                name: "#5".into(),
+            }
+        );
+        assert_eq!(w.approving, None);
+        // Moving disarms; a draft can't be armed.
+        w.key(ctrl_g(), 10);
+        w.key(key(KeyCode::Down), 10);
+        assert_eq!(w.armed_approval(), None);
+        assert_eq!(w.key(ctrl_g(), 10), Outcome::Refuse("#4 is a draft".into()));
     }
 
     #[test]

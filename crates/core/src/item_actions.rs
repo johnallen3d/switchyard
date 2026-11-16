@@ -1,6 +1,7 @@
 //! Actions on a task's linked work items, for the tab picker: comment on
 //! a Fizzy card or a GitHub issue or PR, close a card or an issue, and mark
-//! a draft PR ready for review. (A PR isn't closed from here.)
+//! a draft PR ready for review, and approve a PR. (A PR isn't closed from
+//! here.)
 //! (Opening an item in the browser needs only its URL; editing items stays
 //! in the CLIs.)
 //!
@@ -29,6 +30,8 @@ pub enum Action {
     Comment,
     Close,
     Ready,
+    /// Approve a PR: the Work view's, not offered by `Item::actions`.
+    Approve,
 }
 
 impl Action {
@@ -39,6 +42,7 @@ impl Action {
             Action::Comment => "comment on",
             Action::Close => "close",
             Action::Ready => "mark ready",
+            Action::Approve => "approve",
         }
     }
 }
@@ -173,6 +177,9 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
         (Action::Ready, Item::Pr { repo, number, .. }) => {
             Ok(gh(s(&["pr", "ready", number, "-R", repo])))
         }
+        (Action::Approve, Item::Pr { repo, number, .. }) => {
+            Ok(gh(s(&["pr", "review", number, "-R", repo, "--approve"])))
+        }
         (action, item) => Err(format!("can't {} {}", action.verb(), item.name())),
     }
 }
@@ -199,6 +206,7 @@ pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<Str
         Action::Comment => format!("commented on {name}"),
         Action::Close => format!("closed {name}"),
         Action::Ready => format!("marked {name} ready for review"),
+        Action::Approve => format!("approved {name}"),
     })
 }
 
@@ -388,6 +396,10 @@ mod tests {
             args,
             ["issue", "comment", "3", "-R", "o/r", "--body", "on it"]
         );
+        let (program, args, _) = plan(Action::Approve, &pr, "").unwrap();
+        assert_eq!(program, "gh");
+        assert_eq!(args, ["pr", "review", "57", "-R", "o/r", "--approve"]);
+        assert!(plan(Action::Approve, &issue, "").is_err());
         let (_, args, _) = plan(Action::Comment, &pr, "lgtm").unwrap();
         assert_eq!(args, ["pr", "comment", "57", "-R", "o/r", "--body", "lgtm"]);
         assert!(plan(Action::Comment, &issue, " ").is_err());
