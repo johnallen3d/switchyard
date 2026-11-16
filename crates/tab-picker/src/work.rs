@@ -15,7 +15,8 @@
 //!
 //! On the highlighted item: Enter starts a session from it (auto host,
 //! claude, named from the item; see core's `launch`), in the background,
-//! or on a dimmed item jumps to its task; ctrl-v reads it in place (the
+//! switching to Inbox, which highlights the session once it lists, or on
+//! a dimmed item jumps to its task; ctrl-v reads it in place (the
 //! work items float's reader, see items.rs); ctrl-b opens it in the
 //! browser. This holds the view's state and keys; `standalone_key` runs
 //! what they ask for (see `Outcome`).

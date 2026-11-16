@@ -45,7 +45,8 @@
 //!   shows the transcript, and ctrl-e expands it over the list.
 //! - Work: one catalog project's open cards or issues, the ones an open
 //!   task links to dimmed; Enter starts a session from the highlighted
-//!   item, or goes to its task (see work.rs).
+//!   item, switching to Inbox and highlighting the session once it lists,
+//!   or goes to its task (see work.rs).
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
@@ -204,6 +205,8 @@ const SECTIONS: [&str; 10] = [
 /// How long a pin or snooze made here holds over deliveries that don't
 /// have it yet (the registry is saved, but the data was read before).
 const PENDING_TTL: Duration = Duration::from_secs(15);
+/// How long after a Work view launch Inbox waits for its row to highlight.
+const LAUNCHED_TTL: Duration = Duration::from_secs(30);
 
 /// How long a fed quick float waits for the config host to act on its pick
 /// (see fed.rs) before saying it didn't.
@@ -682,6 +685,9 @@ struct App {
     /// Sessions the Work view is starting: the item's URL and name, and
     /// the launch's outcome to come.
     launching: Vec<Launching>,
+    /// A session the Work view started, to highlight in Inbox once its
+    /// row is listed, and when it started.
+    launched: Option<(Key, Instant)>,
     /// The last pane capture (see preview.rs), shown while its row is
     /// highlighted.
     preview: Option<preview::Preview>,
@@ -772,6 +778,7 @@ impl App {
             usage: usage::Usage::default(),
             work: work::Work::default(),
             launching: Vec::new(),
+            launched: None,
             preview: None,
             asked: None,
             scroll: (0, None),
@@ -958,6 +965,38 @@ impl App {
             if self.selected_key().as_ref() != Some(&key) {
                 self.close_reply();
             }
+        }
+        self.focus_launched();
+    }
+
+    /// Highlight the session the Work view started, once Inbox lists it.
+    /// Leaving Inbox gives up on it, as does its row not showing in time;
+    /// an open prompt or float keeps its row until it closes.
+    fn focus_launched(&mut self) {
+        let Some((key, at)) = self.launched.clone() else {
+            return;
+        };
+        if self.view != View::Inbox || at.elapsed() > LAUNCHED_TTL {
+            self.launched = None;
+            return;
+        }
+        if self.chooser.is_some()
+            || self.projects.is_some()
+            || self.items.is_some()
+            || self.snooze.is_some()
+            || self.reply.is_some()
+        {
+            return;
+        }
+        if let Some(row) = self
+            .rows
+            .iter()
+            .position(|&i| self.key_of(i).as_ref() == Some(&key))
+        {
+            self.selected = Some(row);
+            self.follow = false;
+            self.armed = Armed::No;
+            self.launched = None;
         }
     }
 
@@ -4921,6 +4960,10 @@ impl App {
         }
         self.note = Some((format!("Starting {name}…"), false));
         self.work.starting.insert(url.clone());
+        // Inbox is where the new session will show: go there now, with the
+        // Work view's search cleared, and highlight it when it lists.
+        self.query.clear();
+        self.set_view(View::Inbox);
         let (tx, rx) = chan::channel();
         let item = url.clone();
         std::thread::spawn(move || {
@@ -4948,7 +4991,10 @@ impl App {
         });
         for (url, name, r) in done {
             self.note = Some(match r {
-                Some(Ok((host, _, _))) => (format!("started {name} on {host}"), false),
+                Some(Ok((host, session, window))) => {
+                    self.launched = Some(((session, window), Instant::now()));
+                    (format!("started {name} on {host}"), false)
+                }
                 Some(Err(e)) => {
                     self.work.starting.remove(&url);
                     (format!("{name}: {e}"), true)
@@ -4958,6 +5004,7 @@ impl App {
                     (format!("{name}: the launch went away"), true)
                 }
             });
+            self.focus_launched();
             self.refetch();
         }
     }
@@ -5668,6 +5715,36 @@ mod tests {
         assert_eq!(app.rows.iter().filter(|r| selectable(r)).count(), 6);
         let mut seen = HashSet::new();
         assert!(app.rows.iter().all(|r| !selectable(r) || seen.insert(*r)));
+    }
+
+    #[test]
+    fn a_work_launch_is_highlighted_in_inbox_once_it_lists() {
+        let mut app = inbox();
+        let first = app.selected_key();
+        app.launched = Some((("s".into(), "fresh".into()), Instant::now()));
+        app.deliver(|_| {});
+        // Not listed yet: the highlight stays and the launch waits.
+        assert_eq!(app.selected_key(), first);
+        assert!(app.launched.is_some());
+        app.deliver(|app| {
+            app.tasks.push(
+                parse_tasks(
+                    &serde_json::json!([
+                        {"session_id":"s", "window_id":"fresh", "name":"fresh", "status":"working"}
+                    ])
+                    .to_string(),
+                )
+                .unwrap()
+                .remove(0),
+            );
+        });
+        assert_eq!(app.selected_key(), Some(("s".into(), "fresh".into())));
+        assert!(app.launched.is_none());
+        // Leaving Inbox gives it up.
+        app.launched = Some((("s".into(), "later".into()), Instant::now()));
+        app.set_view(View::Usage);
+        app.deliver(|_| {});
+        assert!(app.launched.is_none());
     }
 
     #[test]
