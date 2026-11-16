@@ -91,8 +91,9 @@ fn checkout_script(cwd: &str) -> String {
 /// A task record for an agent tab Switchyard has none for (started by hand,
 /// say), so it can be archived like a spawned one: its checkout, branch
 /// and harness from the agent's pane. In a primary checkout, the archive
-/// only closes the tab.
-fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, String> {
+/// only closes the tab. `Adopted::Folder` when the agent isn't in a Git
+/// checkout at all: there is nothing to archive but the tab.
+fn adopt(host: &str, session: &str, window: &str) -> Result<Adopted, String> {
     let pane = crate::transcript::agent_pane(host, session, window)?;
     let cwd = pane["cwd"].as_str().unwrap_or("");
     if cwd.is_empty() {
@@ -101,9 +102,7 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, S
     let out =
         host_bash(host, &checkout_script(cwd)).ok_or_else(|| format!("{host} can't be reached"))?;
     if !out.status.success() {
-        return Err(format!(
-            "{cwd} isn't a Git checkout: nothing to archive but the tab"
-        ));
+        return Ok(Adopted::Folder(cwd.to_string()));
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut f = text.trim_end_matches('\n').split('\t');
@@ -127,7 +126,7 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, S
     // Rex names Claude Code `claude-code`; spawned tasks record `claude`.
     let app = pane["app"].as_str().unwrap_or("");
     let harness = app.strip_suffix("-code").unwrap_or(app);
-    Ok(serde_json::json!({
+    Ok(Adopted::Task(serde_json::json!({
         "host": host,
         "session_id": session,
         "window_id": window,
@@ -141,7 +140,15 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<serde_json::Value, S
         "created_at": now(),
         "ended_at": null,
         "ended_reason": null,
-    }))
+    })))
+}
+
+/// What `adopt` made of an agent tab Switchyard has no task for.
+enum Adopted {
+    /// A task record for its checkout.
+    Task(serde_json::Value),
+    /// The folder it works in, which isn't a Git checkout.
+    Folder(String),
 }
 
 /// Close a task's tab, or a hidden task's block wherever it is; a tab
@@ -525,7 +532,14 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
     }
     let mut tasks = load_tasks()?;
     let archiving = matches!(action, "archive" | "force-archive");
-    let i = action_task(&mut tasks, archiving, host, session, window)?;
+    let i = match action_task(&mut tasks, archiving, host, session, window)? {
+        Target::Task(i) => i,
+        Target::Folder(cwd) => {
+            close_tab(host, session, window);
+            kill_if_empty(host, session);
+            return Ok(format!("closed the tab; {cwd} isn't a Git checkout"));
+        }
+    };
     if archiving && tasks[i]["ended_at"].is_null() {
         save_record(&tasks[i])?;
     }
@@ -711,20 +725,21 @@ pub fn auto_archive(tasks: &[serde_json::Value]) -> Vec<Result<String, String>> 
 /// task. For an archive of a tab that is still open, the latest ended task
 /// reopened (it ended by mistake), or else one adopted for the agent in it,
 /// so any agent tab can be archived. Otherwise the latest ended task
-/// (closing its tab left the worktree).
+/// (closing its tab left the worktree). An agent outside any Git checkout
+/// has no task: its archive only closes the tab.
 fn action_task(
     tasks: &mut Vec<serde_json::Value>,
     archiving: bool,
     host: &str,
     session: &str,
     window: &str,
-) -> Result<usize, String> {
+) -> Result<Target, String> {
     let here = |t: &serde_json::Value| in_window(t, window);
     if let Some(i) = tasks
         .iter()
         .position(|t| t["ended_at"].is_null() && here(t))
     {
-        return Ok(i);
+        return Ok(Target::Task(i));
     }
     if archiving && agent_block(host, session, window).is_ok() {
         // The caller saves it now, so a refusal (uncommitted changes) still
@@ -733,12 +748,29 @@ fn action_task(
             let task = tasks[i].as_object_mut().ok_or("bad task record")?;
             task.insert("ended_at".into(), serde_json::Value::Null);
             task.insert("ended_reason".into(), serde_json::Value::Null);
-            return Ok(i);
+            return Ok(Target::Task(i));
         }
-        tasks.push(adopt(host, session, window)?);
-        return Ok(tasks.len() - 1);
+        return match adopt(host, session, window)? {
+            Adopted::Task(task) => {
+                tasks.push(task);
+                Ok(Target::Task(tasks.len() - 1))
+            }
+            Adopted::Folder(cwd) => Ok(Target::Folder(cwd)),
+        };
     }
-    Ok(tasks.iter().rposition(here).ok_or("no task for that tab")?)
+    tasks
+        .iter()
+        .rposition(here)
+        .map(Target::Task)
+        .ok_or_else(|| "no task for that tab".into())
+}
+
+/// What an action on a tab acts on (see `action_task`).
+enum Target {
+    /// The index of its task in the registry.
+    Task(usize),
+    /// The folder of an agent outside any Git checkout.
+    Folder(String),
 }
 
 /// Why an archive of `label` is refused, naming the first few files of its
