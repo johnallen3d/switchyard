@@ -82,6 +82,36 @@ pub fn pool_in(config: &config::Config, hosts: &[String], profile: &str) -> Vec<
         .unwrap_or_else(|| config.hosts.clone())
 }
 
+/// Hosts a project may be moved to by hand: its own pool, plus every host
+/// its profile's pool or catalog projects use, so personal work offers the
+/// personal hosts (and the Mac where personal projects pin "config") and
+/// work stays on the work hosts. "config" stays unresolved, as in `pool`.
+#[must_use]
+pub fn compatible(project: &Project) -> Vec<String> {
+    match config::load() {
+        Ok(c) => compatible_in(c, &project.hosts, &project.profile),
+        Err(_) => project.hosts.clone(),
+    }
+}
+
+/// `compatible` for a project's `hosts` override and profile under `config`.
+#[must_use]
+pub fn compatible_in(config: &config::Config, hosts: &[String], profile: &str) -> Vec<String> {
+    let mut out = pool_in(config, hosts, profile);
+    let group = pool_in(config, &[], profile);
+    let pinned = config
+        .projects
+        .iter()
+        .filter(|p| p.profile == profile)
+        .flat_map(|p| p.hosts.iter().cloned());
+    for h in group.into_iter().chain(pinned) {
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    out
+}
+
 /// A pool entry as a Rex host label; only called on the config host.
 #[must_use]
 pub fn resolve(host: &str) -> String {
@@ -354,6 +384,39 @@ mod tests {
             Probe::new("a", Metrics { mem_gib: 2.0, ..m }, 0, false).score,
             1.5
         ));
+    }
+
+    #[test]
+    fn compatible_hosts_stay_within_the_profile() {
+        let config: config::Config = toml::from_str(
+            r#"
+            hosts = ["miller", "drummer", "omarchy"]
+            [pools]
+            personal = ["omarchy"]
+            work = ["miller", "drummer"]
+            [[projects]]
+            profile = "personal"
+            hosts = ["config"]
+            [[projects]]
+            profile = "personal"
+            [[projects]]
+            profile = "work"
+            "#,
+        )
+        .unwrap();
+        let s = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            compatible_in(&config, &[], "personal"),
+            s(&["omarchy", "config"])
+        );
+        assert_eq!(
+            compatible_in(&config, &s(&["config"]), "personal"),
+            s(&["config", "omarchy"])
+        );
+        assert_eq!(
+            compatible_in(&config, &[], "work"),
+            s(&["miller", "drummer"])
+        );
     }
 
     #[test]

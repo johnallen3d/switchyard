@@ -40,7 +40,7 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
 use switchyard_core::commands::{self, SlashCommand};
 use switchyard_core::folders::{self, Folder};
-use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, dev_hosts, pool};
+use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, compatible, dev_hosts, pool};
 use switchyard_core::items::{self, OpenItem, OpenItems};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
@@ -580,17 +580,39 @@ impl App {
         matches!(self.loads.get(self.listed()), Some(Load::Waiting) | None)
     }
 
-    /// ctrl-o: the next host chip. Leaving `auto` skips the host it already
-    /// shows, so the first press changes where the work would run.
+    /// ctrl-o: the next host chip the highlighted pick may use. Leaving
+    /// `auto` skips the host it already shows, so the first press changes
+    /// where the work would run.
     fn next_host(&mut self) {
         let n = self.hosts.len().max(1);
-        let from_auto = self.hosts.get(self.host).is_some_and(|h| h == AUTO);
+        let from_auto = self.chosen() == AUTO;
         let shown = self.auto_host();
-        self.host = (self.host + 1) % n;
-        if from_auto && shown.as_deref() == self.hosts.get(self.host).map(String::as_str) {
-            self.host = (self.host + 1) % n;
-        }
+        let start = if from_auto { 0 } else { self.host };
+        let next = (1..=n).map(|step| (start + step) % n).find(|&i| {
+            let h = self.hosts[i].as_str();
+            self.allowed(h) && !(from_auto && shown.as_deref() == Some(h))
+        });
+        self.host = next.unwrap_or(0);
         self.host_changed();
+    }
+
+    /// Whether the host chip may be `host` for the highlighted pick: a
+    /// catalog project only moves to hosts of its profile (see
+    /// `hosts::compatible`); `auto`, folders and nothing are unrestricted.
+    fn allowed(&self, host: &str) -> bool {
+        host == AUTO
+            || self.project().is_none_or(|project| {
+                compatible(project)
+                    .iter()
+                    .any(|h| self.host_label(h) == host)
+            })
+    }
+
+    /// The host chip as it applies to the highlighted pick: `auto` when the
+    /// chosen host is not one the pick may use.
+    fn chosen(&self) -> &str {
+        let host = self.hosts[self.host].as_str();
+        if self.allowed(host) { host } else { AUTO }
     }
 
     /// A pool entry as its host label: the config host by its own name.
@@ -761,7 +783,7 @@ impl App {
         if self.folder().is_some() {
             self.listed()
         } else {
-            &self.hosts[self.host]
+            self.chosen()
         }
     }
 
@@ -1679,7 +1701,7 @@ impl App {
         let p = self.p;
         let chip_bg = p.hl_med;
         let changed = |on: bool| Style::new().fg(if on { p.gold } else { p.text });
-        let host = self.hosts[self.host].as_str();
+        let host = self.chosen();
         let host_text = match (host, self.project()) {
             (AUTO, _) if self.kind == Kind::Session => self.here.clone(),
             (AUTO, Some(project)) => {
