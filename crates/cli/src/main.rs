@@ -5,7 +5,8 @@
 //! new-session picker, switchyard-spawn), `link` and `unlink` (link.rs),
 //! `usage` and `server` (switchyard-server).
 //!
-//! `float new`, `float feed`, `task` (task.rs) and `transcript --local` are plumbing for
+//! `float new`, `float feed`, `task` (task.rs), `transcript --local` and
+//! `diff --local` are plumbing for
 //! the Rex config's Lua, core, and other hosts, so they stay out of the
 //! top-level help.
 
@@ -200,6 +201,12 @@ fn main() -> ExitCode {
                 "{}",
                 switchyard_core::transcript::local(profile, harness, dir, agent_session, pid)
             );
+            ExitCode::SUCCESS
+        }
+        // What the highlighted task has changed, for the picker's preview,
+        // read on the agent's host (see core's changes).
+        ["diff", "--local", dir] => {
+            println!("{}", switchyard_core::changes::local(dir));
             ExitCode::SUCCESS
         }
         _ => usage_error(USAGE),

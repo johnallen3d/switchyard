@@ -6,7 +6,7 @@
 //! host that runs `host_rows.lua` on every server,
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
-//! for the preview (see preview.rs). It acts on Enter, ctrl-b (open the
+//! for the preview (see preview.rs), or its changes (see changes.rs). It acts on Enter, ctrl-b (open the
 //! task's work item), ctrl-r's work item actions (see items.rs), ctrl-t
 //! (pin), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
@@ -26,7 +26,7 @@ use switchyard_core::tasks::{live_tasks, reconcile_tasks};
 use switchyard_core::{actions, server};
 use switchyard_ui::protocol::{DATA, unhex};
 
-use crate::preview;
+use crate::{changes, preview};
 
 /// One server's rows (see `host_rows.lua`).
 const HOST_ROWS: &str = include_str!("../../../lua/switchyard/host_rows.lua");
@@ -89,6 +89,8 @@ pub struct Feed {
     poke: Sender<()>,
     /// The tab whose transcript to fetch for the preview (see preview.rs).
     preview: Sender<Option<preview::Pane>>,
+    /// The tab whose changes to fetch for the preview (see changes.rs).
+    changes: Sender<Option<preview::Pane>>,
 }
 
 impl Feed {
@@ -107,6 +109,7 @@ impl Feed {
             thread::spawn(move || follow_server(first, &tx, &poke, &on_server));
         }
         let (preview, wants) = mpsc::channel();
+        let (changes, changes_wanted) = mpsc::channel();
         if !quick {
             let usage_tx = tx.clone();
             thread::spawn(move || {
@@ -122,9 +125,16 @@ impl Feed {
             });
             let preview_tx = tx.clone();
             thread::spawn(move || preview::follow(&wants, &preview_tx));
+            let changes_tx = tx.clone();
+            thread::spawn(move || changes::follow(&changes_wanted, &changes_tx));
         }
         thread::spawn(move || fetch_when_needed(&tx, &poked, &on_server));
-        Feed { rx, poke, preview }
+        Feed {
+            rx,
+            poke,
+            preview,
+            changes,
+        }
     }
 
     pub fn poke(&self) {
@@ -134,6 +144,11 @@ impl Feed {
     /// Fetch this tab's transcript for the preview from now on (None: none).
     pub fn preview(&self, want: Option<preview::Pane>) {
         let _ = self.preview.send(want);
+    }
+
+    /// Fetch this tab's changes for the preview from now on (None: none).
+    pub fn changes(&self, want: Option<preview::Pane>) {
+        let _ = self.changes.send(want);
     }
 }
 

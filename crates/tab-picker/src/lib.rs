@@ -19,6 +19,7 @@
 //!   header says "tabs only".
 //! - `usage` and `usage-error`: accounting for the Usage view.
 //! - `preview`: the highlighted agent's transcript (see preview.rs).
+//! - `changes`: the highlighted task's diff and commits (see changes.rs).
 //!
 //! cmd+i also pastes `current`, SESSION/WINDOW, the tab it was pressed on,
 //! into the terminal (or passes it as `--current` when opening the picker),
@@ -42,7 +43,9 @@
 //!   work items and host over its whole status message, the agent's
 //!   transcript, live, and the reply box. ctrl-e collapses the sidebar, and
 //!   typing to search brings it back. Narrower, a preview under the list
-//!   shows the transcript, and ctrl-e expands it over the list.
+//!   shows the transcript, and ctrl-e expands it over the list. ctrl-d
+//!   turns the transcript into the task's diff against its base branch,
+//!   then its commits, then back (see changes.rs).
 //! - Work: one catalog project's open cards or issues, the ones an open
 //!   task links to dimmed; Enter starts a session from the highlighted
 //!   item, switching to Inbox and highlighting the session once it lists,
@@ -97,6 +100,7 @@
 //! showing its outcome. No key quits it: it's a tab, closed like any
 //! other (cmd+w).
 
+mod changes;
 mod fed;
 mod help;
 mod history;
@@ -508,6 +512,65 @@ fn right_header(cols: RightCols) -> String {
     )
 }
 
+/// Lines drawn under scrollback's cursor, selection and search in `text`
+/// (within `screen`, which holds the scrollbar), moving it to suit them.
+fn draw_scrollback(
+    f: &mut Frame,
+    p: &Palette,
+    screen: Rect,
+    text: Rect,
+    lines: &[Line<'static>],
+    sb: &mut scrollback::Scrollback,
+) {
+    let h = text.height as usize;
+    // A raised fill under the whole pane marks it as the
+    // one with the keys.
+    f.buffer_mut().set_style(screen, Style::new().bg(p.surface));
+    sb.sync(lines.len(), h);
+    let sel = sb.selection();
+    let query = sb.query();
+    let lit = Style::new().fg(p.base).bg(p.gold);
+    let end = lines.len().min(sb.top + h);
+    let shown: Vec<Line> = (sb.top..end)
+        .map(|i| {
+            let mut line = lines[i].clone();
+            if let Some(q) = query {
+                let at = scrollback::matches(&scrollback::line_text(&line), q);
+                line = scrollback::mark(line, &at, lit);
+            }
+            let bg = if sel.is_some_and(|(a, b)| (a..=b).contains(&i)) {
+                Some(p.hl_med)
+            } else if i == sb.cursor {
+                Some(p.overlay)
+            } else {
+                None
+            };
+            match bg {
+                Some(bg) => line.style(Style::new().bg(bg)),
+                None => line,
+            }
+        })
+        .collect();
+    f.render_widget(Paragraph::new(shown), text);
+    // A bar in the margin marks the cursor's line, which a
+    // fill alone barely sets apart.
+    if let Some(row) = sb
+        .cursor
+        .checked_sub(sb.top)
+        .and_then(|r| u16::try_from(r).ok())
+        && row < text.height
+        && text.width > 0
+    {
+        let cell = &mut f.buffer_mut()[(text.x, text.y + row)];
+        if cell.symbol() == " " {
+            cell.set_symbol("▌").set_fg(p.iris);
+        }
+    }
+    if lines.len() > h {
+        draw::scrollbar(f, p, screen, sb.top, lines.len());
+    }
+}
+
 /// How wide a row's work-item badges may be in a list `width` wide.
 fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
@@ -523,6 +586,7 @@ fn help_float_sections() -> Vec<help::Section> {
             &[
                 ("⌃V", "scroll back"),
                 ("⇧↑ ⇧PgUp", "scroll back from here"),
+                ("⌃D", "the task's diff, then commits, then back"),
                 ("⇥", "message the agent"),
             ],
         ),
@@ -693,6 +757,16 @@ struct App {
     preview: Option<preview::Preview>,
     /// The pane a standalone picker last asked its feed to capture.
     asked: Option<preview::Pane>,
+    /// What the preview shows of the highlighted agent (ctrl-d).
+    lens: changes::Lens,
+    /// The last changes fetched (see changes.rs), shown while their row is
+    /// highlighted and a lens other than the transcript is on.
+    changes: Option<changes::Changes>,
+    /// The tab a standalone picker last asked its feed for changes of.
+    asked_changes: Option<preview::Pane>,
+    /// The first line of the changes shown, from the top, and the tab and
+    /// lens that is for.
+    changes_top: (usize, Option<(preview::Pane, changes::Lens)>),
     /// The preview fills the picker (ctrl-e), for reading: with the
     /// sidebar, it is collapsed.
     expanded: bool,
@@ -781,6 +855,10 @@ impl App {
             launched: None,
             preview: None,
             asked: None,
+            lens: changes::Lens::Transcript,
+            changes: None,
+            asked_changes: None,
+            changes_top: (0, None),
             scroll: (0, None),
             scrollback: None,
             transcript: Rect::default(),
@@ -850,6 +928,7 @@ impl App {
             "usage" => self.usage.paste(body),
             "usage-error" => self.usage.error = Some(body.trim().to_string()),
             "preview" => self.preview = preview::parse(body).or(self.preview.take()),
+            "changes" => self.changes = changes::parse(body).or(self.changes.take()),
             "current" => self.set_current(body),
             // cmd+1-4 on the picker's tab (see lua/switchyard/tab-picker.lua).
             "view" if !self.quick => {
@@ -2351,6 +2430,7 @@ impl App {
                 self.expanded = !self.expanded;
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
+            KeyCode::Char('d') if ctrl && self.view == View::Inbox => self.lens = self.lens.next(),
             KeyCode::Char('p') if ctrl => self.step(-1),
             KeyCode::Char('n') if ctrl => self.step(1),
             // ctrl-j and ctrl-k wrap past either end of the list.
@@ -2407,6 +2487,13 @@ impl App {
                 self.enter_scrollback(Some(k));
             }
             KeyCode::Home if self.expanded => self.enter_scrollback(Some(k)),
+            // The changes start at their top, so forward goes into
+            // scrollback as back does.
+            KeyCode::Down | KeyCode::PageDown | KeyCode::End
+                if (shift || self.expanded) && self.lens != changes::Lens::Transcript =>
+            {
+                self.enter_scrollback(Some(k));
+            }
             KeyCode::Down | KeyCode::PageDown if shift || self.expanded => {}
             KeyCode::End if self.expanded => {}
             KeyCode::Up if alt => self.jump_group(false),
@@ -2436,7 +2523,11 @@ impl App {
     /// Scroll the preview back (positive) or forward; `draw_preview` keeps it
     /// within the capture.
     fn scroll_preview(&mut self, delta: isize) {
-        self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
+        if self.lens == changes::Lens::Transcript {
+            self.scroll.0 = self.scroll.0.saturating_add_signed(delta);
+        } else {
+            self.changes_top.0 = self.changes_top.0.saturating_add_signed(-delta);
+        }
     }
 
     fn delete_word(&mut self) {
@@ -2444,13 +2535,19 @@ impl App {
         self.refilter();
     }
 
-    /// The highlighted agent's transcript as text, wrapped as last drawn.
+    /// The highlighted agent's transcript (or the changes the lens shows)
+    /// as text, wrapped as last drawn.
     fn transcript_text(&mut self) -> Option<Vec<String>> {
         let p = self.p;
         let pane = self.preview_want()?;
         let width = self.transcript.width;
         if width == 0 {
             return None;
+        }
+        if self.lens != changes::Lens::Transcript {
+            let ch = self.changes.as_mut().filter(|c| c.pane == pane)?;
+            let lines = ch.lines(self.lens, width, self.now, &p).ok()?;
+            return Some(lines.iter().map(scrollback::line_text).collect());
         }
         let pv = self.preview.as_mut().filter(|pv| pv.pane == pane)?;
         let lines = pv.lines(width, &p).ok()?;
@@ -2461,14 +2558,19 @@ impl App {
     /// shows, then `k` in it.
     fn enter_scrollback(&mut self, k: Option<KeyEvent>) {
         let (Some(pane), Some(lines)) = (self.preview_want(), self.transcript_text()) else {
-            self.note = Some(("no transcript here to scroll back through".into(), true));
+            self.note = Some(("nothing here to scroll through".into(), true));
             return;
         };
         if lines.is_empty() {
             return;
         }
         let h = self.transcript.height as usize;
-        let back = if self.scroll.1.as_ref() == Some(&pane) {
+        let back = if self.lens != changes::Lens::Transcript {
+            lines
+                .len()
+                .saturating_sub(h)
+                .saturating_sub(self.changes_top.0)
+        } else if self.scroll.1.as_ref() == Some(&pane) {
             self.scroll.0
         } else {
             0
@@ -2495,7 +2597,12 @@ impl App {
             scrollback::Outcome::Stay => sb.sync(lines.len(), height),
             scrollback::Outcome::Exit => self.leave_scrollback(),
             scrollback::Outcome::Copy(from, to) => {
-                let Some(text) = self.preview.as_ref().and_then(|pv| pv.source(from, to)) else {
+                let text = if self.lens == changes::Lens::Transcript {
+                    self.preview.as_ref().and_then(|pv| pv.source(from, to))
+                } else {
+                    lines.get(from..=to).map(|l| l.join("\n"))
+                };
+                let Some(text) = text else {
                     return self.leave_scrollback();
                 };
                 let count = text.lines().count();
@@ -2510,8 +2617,14 @@ impl App {
     }
 
     /// Back to the live end of the transcript.
+    /// Leave scrollback: the transcript back at its end, the changes where
+    /// scrollback left them.
     fn leave_scrollback(&mut self) {
-        self.scrollback = None;
+        if let Some(sb) = self.scrollback.take()
+            && self.lens != changes::Lens::Transcript
+        {
+            self.changes_top.0 = sb.top;
+        }
         self.scroll.0 = 0;
     }
 
@@ -2923,6 +3036,9 @@ impl App {
         if self.scroll.1.as_ref() != Some(&pane) {
             self.scroll = (0, Some(pane.clone()));
         }
+        if self.lens != changes::Lens::Transcript {
+            return self.draw_changes(f, screen, &pane);
+        }
         // Leave a column for the scrollbar.
         let text = Rect {
             width: screen.width.saturating_sub(2),
@@ -2937,53 +3053,7 @@ impl App {
             Ok(lines) => {
                 let h = text.height as usize;
                 if let Some(sb) = &mut self.scrollback {
-                    // A raised fill under the whole pane marks it as the
-                    // one with the keys.
-                    f.buffer_mut().set_style(screen, Style::new().bg(p.surface));
-                    sb.sync(lines.len(), h);
-                    let sel = sb.selection();
-                    let query = sb.query();
-                    let lit = Style::new().fg(p.base).bg(p.gold);
-                    let end = lines.len().min(sb.top + h);
-                    let shown: Vec<Line> = (sb.top..end)
-                        .map(|i| {
-                            let mut line = lines[i].clone();
-                            if let Some(q) = query {
-                                let at = scrollback::matches(&scrollback::line_text(&line), q);
-                                line = scrollback::mark(line, &at, lit);
-                            }
-                            let bg = if sel.is_some_and(|(a, b)| (a..=b).contains(&i)) {
-                                Some(p.hl_med)
-                            } else if i == sb.cursor {
-                                Some(p.overlay)
-                            } else {
-                                None
-                            };
-                            match bg {
-                                Some(bg) => line.style(Style::new().bg(bg)),
-                                None => line,
-                            }
-                        })
-                        .collect();
-                    f.render_widget(Paragraph::new(shown), text);
-                    // A bar in the margin marks the cursor's line, which a
-                    // fill alone barely sets apart.
-                    if let Some(row) = sb
-                        .cursor
-                        .checked_sub(sb.top)
-                        .and_then(|r| u16::try_from(r).ok())
-                        && row < text.height
-                        && text.width > 0
-                    {
-                        let cell = &mut f.buffer_mut()[(text.x, text.y + row)];
-                        if cell.symbol() == " " {
-                            cell.set_symbol("▌").set_fg(p.iris);
-                        }
-                    }
-                    if lines.len() > h {
-                        draw::scrollbar(f, p, screen, sb.top, lines.len());
-                    }
-                    return;
+                    return draw_scrollback(f, p, screen, text, lines, sb);
                 }
                 let top = lines.len().saturating_sub(h);
                 self.scroll.0 = self.scroll.0.min(top);
@@ -2994,6 +3064,69 @@ impl App {
                 );
                 if lines.len() > h {
                     draw::scrollbar(f, p, screen, skip, lines.len());
+                }
+            }
+        }
+    }
+
+    /// The highlighted task's changes, under a line naming the lenses
+    /// (the one on lit) and summing up what it shows; from their top until
+    /// John scrolls.
+    fn draw_changes(&mut self, f: &mut Frame, area: Rect, pane: &preview::Pane) {
+        let p = self.p;
+        let p = &p;
+        let muted = |text: &str| vec![Line::styled(text.to_string(), Style::new().fg(p.muted))];
+        let [head, screen] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        // Leave a column for the scrollbar.
+        let text = Rect {
+            width: screen.width.saturating_sub(2),
+            ..screen
+        };
+        self.transcript = text;
+        let lens = self.lens;
+        let key = (pane.clone(), lens);
+        if self.changes_top.1.as_ref() != Some(&key) {
+            self.changes_top = (0, Some(key));
+        }
+        let ch = self.changes.as_mut().filter(|c| c.pane == *pane);
+        let mut spans = Vec::new();
+        for l in changes::Lens::ALL {
+            let style = if l == lens {
+                Style::new().fg(p.iris).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(p.muted)
+            };
+            spans.push(Span::styled(l.name(), style));
+            spans.push(Span::raw("  "));
+        }
+        if let Some(sum) = ch.as_ref().and_then(|c| c.summary(lens)) {
+            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+            let room = (head.width as usize).saturating_sub(used);
+            spans.push(Span::styled(
+                preview::clip_width(&sum, room),
+                Style::new().fg(p.subtle),
+            ));
+        }
+        f.render_widget(Line::from(spans), head);
+        let Some(ch) = ch else {
+            return draw::centered(f, screen, muted("Reading the changes…"));
+        };
+        match ch.lines(lens, text.width, self.now, p) {
+            Err(e) => draw::centered(f, screen, muted(e)),
+            Ok(lines) => {
+                if let Some(sb) = &mut self.scrollback {
+                    return draw_scrollback(f, p, screen, text, lines, sb);
+                }
+                let h = text.height as usize;
+                let top = self.changes_top.0.min(lines.len().saturating_sub(h));
+                self.changes_top.0 = top;
+                f.render_widget(
+                    Paragraph::new(lines[top..lines.len().min(top + h)].to_vec()),
+                    text,
+                );
+                if lines.len() > h {
+                    draw::scrollbar(f, p, screen, top, lines.len());
                 }
             }
         }
@@ -4306,6 +4439,14 @@ impl App {
         }
         if self.preview_want().is_some() {
             row.push(("⇥", "message the agent"));
+            row.push((
+                "⌃D",
+                match self.lens.next() {
+                    changes::Lens::Transcript => "show the transcript",
+                    changes::Lens::Diff => "show the diff",
+                    changes::Lens::Commits => "show the commits",
+                },
+            ));
         }
         row
     }
@@ -4684,6 +4825,13 @@ impl App {
     fn ask_preview(&mut self) {
         let Some(feed) = &self.feed else { return };
         let want = self.preview_want();
+        let changes = want
+            .clone()
+            .filter(|_| self.lens != changes::Lens::Transcript);
+        if changes != self.asked_changes {
+            feed.changes(changes.clone());
+            self.asked_changes = changes;
+        }
         if want != self.asked {
             feed.preview(want.clone());
             self.asked = want;

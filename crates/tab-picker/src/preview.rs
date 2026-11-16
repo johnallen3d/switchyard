@@ -43,7 +43,7 @@ pub struct Agent {
 }
 
 impl Pane {
-    fn header(&self) -> String {
+    pub fn header(&self) -> String {
         format!("{}/{}/{}", self.target, self.session, self.window)
     }
 }
@@ -699,11 +699,25 @@ pub fn clip_width(s: &str, room: usize) -> String {
 /// it changes), once the highlight settles and every REFRESH after,
 /// sending each as a paste on `tx`; returns once the picker has gone.
 pub fn follow(asks: &Receiver<Option<Pane>>, tx: &Sender<String>) {
+    follow_with(asks, tx, "preview", REFRESH, |p| {
+        switchyard_core::transcript::fetch(&p.target, &p.session, &p.window)
+    });
+}
+
+/// `follow` for any fetch: `fetch` what the picker wants once the highlight
+/// settles and every `refresh` after, sending each as a `kind` paste.
+pub fn follow_with(
+    asks: &Receiver<Option<Pane>>,
+    tx: &Sender<String>,
+    kind: &str,
+    refresh: Duration,
+    fetch: impl Fn(&Pane) -> serde_json::Value,
+) {
     let mut want: Option<Pane> = None;
     let mut last: Option<Instant> = None;
     loop {
         let timeout = match (&want, last) {
-            (Some(_), Some(at)) => REFRESH.saturating_sub(at.elapsed()),
+            (Some(_), Some(at)) => refresh.saturating_sub(at.elapsed()),
             _ => Duration::from_secs(3600),
         };
         match asks.recv_timeout(timeout) {
@@ -725,9 +739,9 @@ pub fn follow(asks: &Receiver<Option<Pane>>, tx: &Sender<String>) {
             last = None;
             continue;
         };
-        let json = switchyard_core::transcript::fetch(&pane.target, &pane.session, &pane.window);
+        let json = fetch(pane);
         if tx
-            .send(format!("{DATA}preview\n{}\n{json}", pane.header()))
+            .send(format!("{DATA}{kind}\n{}\n{json}", pane.header()))
             .is_err()
         {
             return;

@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod autoname;
 pub mod cards;
+pub mod changes;
 pub mod commands;
 pub mod config;
 pub mod folders;
