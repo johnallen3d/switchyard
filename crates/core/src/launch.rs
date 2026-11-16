@@ -171,13 +171,25 @@ fn kept_prompt(prompt_ref: &str) -> String {
 /// it starts hidden, with no parent.
 #[derive(Clone, Copy, Debug)]
 pub struct Placement<'a> {
-    /// The Rex window of the agent that spawned it, if known: the registry
-    /// keeps it as `parent_window`, and the tab picker nests the task under
-    /// that tab.
-    pub parent: Option<&'a str>,
+    /// The agent that spawned it, if known: the registry keeps it as
+    /// `parent_window`, `parent_host` and `parent_session`, and the tab
+    /// picker nests the task under that tab.
+    pub parent: Option<Parent<'a>>,
     /// Start it hidden, in a detached block rather than a tab (see
     /// `hidden`); its block ID is then its window ID.
     pub hidden: bool,
+}
+
+/// Where the agent that spawned a task is.
+#[derive(Clone, Copy, Debug)]
+pub struct Parent<'a> {
+    /// The Rex label of its host.
+    pub host: &'a str,
+    pub session: &'a str,
+    pub window: &'a str,
+    /// Tell it when the task settles (see switchyard-server's `notices`);
+    /// kept as `notify_parent: false` when off.
+    pub notify: bool,
 }
 
 impl Default for Placement<'_> {
@@ -332,8 +344,13 @@ fn launch_with(
         "ended_at": null,
         "ended_reason": null,
     });
-    if let Some(parent) = placement.parent.filter(|p| !p.is_empty()) {
-        task["parent_window"] = parent.into();
+    if let Some(parent) = placement.parent.filter(|p| !p.window.is_empty()) {
+        task["parent_window"] = parent.window.into();
+        task["parent_host"] = parent.host.into();
+        task["parent_session"] = parent.session.into();
+        if !parent.notify {
+            task["notify_parent"] = false.into();
+        }
     }
     // The tab is already open: a registry failure only costs the inbox entry.
     if let Err(e) = record_task(task) {

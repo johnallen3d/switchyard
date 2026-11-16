@@ -145,23 +145,35 @@ JSON replies). It listens on loopback and the Mac's Tailscale address, port
 tailnet is the boundary. Requests from browsers (with an `Origin` header)
 are refused.
 
-| Tool           | Does                                                    |
-| -------------- | ------------------------------------------------------- |
-| `list_tasks`   | Open tasks with live agent status                       |
-| `spawn_task`   | Start a task: catalog project, name, prompt, harness    |
-| `read_task`    | Status and the last transcript entries                  |
-| `message_task` | Type text into the agent's tab (not while it's blocked) |
-| `stop_task`    | Archive (refused with uncommitted changes)              |
+| Tool             | Does                                                     |
+| ---------------- | -------------------------------------------------------- |
+| `list_tasks`     | Open tasks with live agent status                        |
+| `spawn_task`     | Start a task: catalog project, name, prompt, harness     |
+| `read_task`      | Status and the last transcript entries                   |
+| `message_task`   | Type text into the agent's tab (not while it's blocked)  |
+| `message_parent` | From a spawned task: type text into its spawner's tab    |
+| `stop_task`      | Archive (refused with uncommitted changes)               |
 
 Tasks are named `PROJECT/NAME`. `spawn_task` records the new task as the
-calling agent's child (`parent_window` in the registry), and the tab
+calling agent's child (`parent_window`, `parent_host` and
+`parent_session` in the registry), and the tab
 picker's Inbox shows it nested under the agent's row, when it knows the
 agent's Rex location: from the `parent_session` and `parent_block`
 arguments, else from the `X-Rex-Session` and `X-Rex-Block` request headers.
 A client config sends the headers from the agent's environment, so agents
 needn't pass anything. Empty values and unexpanded placeholders (such as a
-literal `${REX_BLOCK}`) are ignored. To add it to Claude Code on another
-host:
+literal `${REX_BLOCK}`) are ignored.
+
+The server tells the parent when a child settles, so it needn't poll or set
+a timer: each time the child's agent stops working (idle, done, or waiting
+on a prompt), it types a short notice into the parent's agent with the
+child's last message. A child with a timer or background job pending will
+resume by itself and gets no notice until it settles for good. Pass
+`notify_parent: false` to `spawn_task` to turn this off. A child can also
+write to its parent mid-work with `message_parent`, which finds the
+child's task from its Rex block the same way.
+
+To add it to Claude Code on another host:
 
 ```bash
 claude mcp add --transport http switchyard \

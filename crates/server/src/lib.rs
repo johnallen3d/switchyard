@@ -10,7 +10,8 @@
 //!   rows changed, and on a slow timer (see `watch`).
 //! - Tasks: the registry, with live agent status from the rows, checked
 //!   against the hosts in the background (see `tasks`), and the timers
-//!   agents have set from their logs (see `wakes`).
+//!   agents have set from their logs (see `wakes`). Agents that spawned
+//!   tasks hear when those settle (see `notices`).
 //! - Host info for the spawn picker and `auto`: zoxide folders and load,
 //!   kept over SSH in the background (see `hostinfo`).
 //!
@@ -28,6 +29,7 @@
 
 mod hostinfo;
 mod mcp;
+mod notices;
 mod socket;
 mod state;
 mod tasks;

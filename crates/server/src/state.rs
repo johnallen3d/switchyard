@@ -32,6 +32,7 @@ use serde_json::{Value, json};
 use switchyard_core::hosts::Metrics;
 use switchyard_core::tasks::{TabStatus, apply_live, parse_window_status};
 
+use crate::notices;
 use crate::wakes::{self, Wake};
 
 /// A duration in whole milliseconds for a client, saturating (never reached).
@@ -171,6 +172,9 @@ pub struct State {
     pub info: HostInfo,
     /// What each open task's log said of a timer, by window (see `wakes`).
     waits: HashMap<String, Wake>,
+    /// The last status seen of each open task with a parent, by window
+    /// (see `notices`).
+    seen: HashMap<String, String>,
     seq: u64,
     subscribers: Vec<Sender<String>>,
 }
@@ -285,6 +289,15 @@ impl State {
         let live = self.live();
         match &self.tasks.list {
             Some(list) => wakes::due(&mut self.waits, list, &live),
+            None => Vec::new(),
+        }
+    }
+
+    /// The notices to send parents (see `notices::due`).
+    pub fn due_notices(&mut self) -> Vec<notices::Job> {
+        let live = self.live();
+        match &self.tasks.list {
+            Some(list) => notices::due(&mut self.seen, list, &live),
             None => Vec::new(),
         }
     }
@@ -433,11 +446,16 @@ impl Shared {
         }
     }
 
-    /// Read the logs of tabs that have settled for timers, in the
-    /// background (see `wakes`): after new rows or tasks.
+    /// Read the logs of tabs that have settled for timers, and tell
+    /// parents of their child tasks that have, in the background (see
+    /// `wakes` and `notices`): after new rows or tasks.
     pub fn check_wakes(self: &Arc<Self>) {
-        let jobs = self.lock().due_wakes();
+        let (jobs, notes) = {
+            let mut state = self.lock();
+            (state.due_wakes(), state.due_notices())
+        };
         wakes::start(self, jobs);
+        notices::start(notes);
     }
 }
 

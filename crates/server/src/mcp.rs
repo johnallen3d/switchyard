@@ -11,14 +11,19 @@
 //!
 //! Tools (see `TOOLS`) wrap core: `list_tasks` (the snapshot's open tasks
 //! with live agent status), `spawn_task` (`launch_text`), `read_task`
-//! (`transcript`), `message_task` (`actions::message`) and `stop_task` (a
-//! plain archive, never force-archive). They name a task `PROJECT/NAME`, as
-//! the pickers label it.
+//! (`transcript`), `message_task` (`actions::message`), `message_parent`
+//! (`notices::send`, to the agent that spawned the caller's task) and
+//! `stop_task` (a plain archive, never force-archive). They name a task
+//! `PROJECT/NAME`, as the pickers label it.
 //!
 //! `spawn_task` nests the new task under the caller's tab when it knows
 //! where the caller is: from its `parent_session` / `parent_block`
 //! arguments, else from the request's `X-Rex-Session` / `X-Rex-Block`
-//! headers, which a client config fills from `REX_SESSION` / `REX_BLOCK`.
+//! headers, which a client config fills from `REX_SESSION` / `REX_BLOCK`,
+//! and records where the caller is, so the server can tell it when the
+//! task settles (see `notices`) unless `notify_parent` is false.
+//! `message_parent` finds the caller's task the same way, from its
+//! `session` / `block` arguments or those headers.
 //! Empty values and unexpanded placeholders (`${REX_BLOCK}`) count as
 //! absent.
 
@@ -31,11 +36,13 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use switchyard_core::hosts::catalog;
-use switchyard_core::launch::{Placement, launch_text};
+use switchyard_core::launch::{Parent, Placement, launch_text};
 use switchyard_core::naming::name_char;
+use switchyard_core::rex::local_label;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
 
+use crate::notices;
 use crate::state::Shared;
 
 /// Protocol revisions this endpoint speaks, newest first: it uses only
@@ -56,7 +63,9 @@ const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claud
 working in a Git worktree of a catalog project on one of John's hosts. Tasks are named PROJECT/NAME. \
 list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
 spawn_task starts one with a first prompt; read_task shows what its agent has been saying; \
-message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes).";
+message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes). \
+A task spawned with your parent_block tells you when its agent stops working, so wait for that rather than polling; \
+a spawned agent can write to its spawner with message_parent.";
 
 #[derive(Clone)]
 pub struct Endpoint {
@@ -420,6 +429,7 @@ fn tools() -> Value {
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
                     "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
                     "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set." },
+                    "notify_parent": { "type": "boolean", "default": true, "description": "With parent_block known, type a short notice into your tab each time the task's agent stops working (idle, done, or waiting on a prompt), with its last message, so you needn't poll it or set a timer." },
                     "hidden": { "type": "boolean", "default": true, "description": "Start the agent hidden, in no tab (the default); false gives it a tab of its own. ctrl-y in the tab picker (cmd+i) shows a hidden agent in a tab and hides it again." },
                 },
                 "required": ["project", "name", "prompt"],
@@ -448,6 +458,21 @@ fn tools() -> Value {
                 "type": "object",
                 "properties": { "task": task, "text": { "type": "string" } },
                 "required": ["task", "text"],
+            },
+        },
+        {
+            "name": "message_parent",
+            "description": "From a task spawned by another agent: send that agent text, typed into its tab \
+    (as message_task does), to report progress or ask it something without ending your turn. Refused \
+    while it waits on a prompt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" },
+                    "session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable." },
+                    "block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable." },
+                },
+                "required": ["text"],
             },
         },
         {
@@ -512,6 +537,7 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
             let (host, session, window) = tab(&task);
             actions::message(host, session, window, text).map(|msg| json!({ "message": msg }))
         }
+        "message_parent" => message_parent(args, caller, endpoint),
         "stop_task" => {
             let task = find_open(str_arg(args, "task")?, endpoint)?;
             let (host, session, window) = tab(&task);
@@ -521,6 +547,29 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
         }
         _ => Err(format!("unknown tool {name}")),
     }
+}
+
+/// Send text to the agent that spawned the caller's task, found from the
+/// caller's block.
+fn message_parent(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
+    let text = str_arg(args, "text")?;
+    let pick = |key: &str, header: &Option<String>| {
+        args[key]
+            .as_str()
+            .and_then(location)
+            .or_else(|| header.as_deref().and_then(location))
+            .map(String::from)
+    };
+    let session = pick("session", &caller.session);
+    let block = pick("block", &caller.block).ok_or("block is required: pass your REX_BLOCK")?;
+    let tab = caller_tab(endpoint, session.as_deref(), Some(&block))
+        .ok_or_else(|| format!("no Rex server has block {block}"))?;
+    let task = load_tasks()?
+        .into_iter()
+        .find(|t| t["ended_at"].is_null() && in_window(t, &tab.window))
+        .ok_or("your tab isn't an open Switchyard task")?;
+    let text = format!("[switchyard] From your child task {}: {text}", label(&task));
+    notices::send(&task, &text).map(|msg| json!({ "message": msg }))
 }
 
 fn tab(task: &Value) -> (&str, &str, &str) {
@@ -598,9 +647,19 @@ fn find_task(wanted: &str, open: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// The window holding `block`, from the first of `hosts` (Rex server
-/// names, `local` for this one) that has it.
-fn block_window(hosts: &[String], block: &str) -> Option<String> {
+/// Where a Rex block is: its host's Rex label, session and window. A
+/// hidden agent's block is in no window, and its task is keyed by the
+/// block (see core's `launch`), so the block stands in for it.
+#[derive(Clone, Debug, PartialEq)]
+struct Tab {
+    host: String,
+    session: String,
+    window: String,
+}
+
+/// Where `block` is, from the first of `hosts` (Rex server names, `local`
+/// for this one) that has it.
+fn block_window(hosts: &[String], block: &str) -> Option<Tab> {
     hosts.iter().find_map(|host| {
         let mut cmd = std::process::Command::new("rex");
         if host != "local" {
@@ -614,11 +673,35 @@ fn block_window(hosts: &[String], block: &str) -> Option<String> {
             .ok()
             .filter(|o| o.status.success())?;
         let info: Value = serde_json::from_slice(&out.stdout).ok()?;
-        info["block"]["window_id"]
+        let window = info["block"]["window_id"]
             .as_str()
             .filter(|w| !w.is_empty())
-            .map(String::from)
+            .unwrap_or(block);
+        Some(Tab {
+            host: if host == "local" {
+                local_label()
+            } else {
+                host.clone()
+            },
+            session: info["session_id"].as_str().unwrap_or("").to_string(),
+            window: window.to_string(),
+        })
     })
+}
+
+/// Where the caller's block is, from the given session and block (see
+/// `parent_location`).
+fn caller_tab(endpoint: &Endpoint, session: Option<&str>, block: Option<&str>) -> Option<Tab> {
+    let block = block?;
+    let hosts = endpoint
+        .shared
+        .lock()
+        .hosts_for_session(session.unwrap_or(""));
+    let found = block_window(&hosts, block);
+    if found.is_none() {
+        crate::log(&format!("mcp: no Rex server has block {block}"));
+    }
+    found
 }
 
 /// The spawner's Rex session and block: each from the tool arguments
@@ -658,16 +741,12 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
     // The spawner's tab, so the picker can nest the task under it. Not
     // finding it only costs the nesting.
     let (parent_session, parent_block) = parent_location(args, caller);
-    let parent = parent_block.and_then(|block| {
-        let hosts = endpoint
-            .shared
-            .lock()
-            .hosts_for_session(parent_session.unwrap_or(""));
-        let window = block_window(&hosts, block);
-        if window.is_none() {
-            crate::log(&format!("mcp: spawn_task: no Rex server has block {block}"));
-        }
-        window
+    let parent_tab = caller_tab(endpoint, parent_session, parent_block);
+    let parent = parent_tab.as_ref().map(|tab| Parent {
+        host: &tab.host,
+        session: &tab.session,
+        window: &tab.window,
+        notify: args["notify_parent"].as_bool().unwrap_or(true),
     });
     let (host, session, window) = launch_text(
         host,
@@ -677,7 +756,7 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         prompt,
         opt_arg(args, "work_item"),
         Placement {
-            parent: parent.as_deref(),
+            parent,
             hidden: args["hidden"].as_bool().unwrap_or(true),
         },
     )?;
@@ -852,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_five_tools() {
+    fn lists_six_tools() {
         let names: Vec<String> = tools()
             .as_array()
             .unwrap()
@@ -866,6 +945,7 @@ mod tests {
                 "spawn_task",
                 "read_task",
                 "message_task",
+                "message_parent",
                 "stop_task"
             ]
         );
