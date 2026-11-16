@@ -67,7 +67,9 @@
 //! or of any agent tab, even one with no open task (an agent at its prompt
 //! included); elsewhere it says in the footer why it can't. Enter runs it;
 //! with uncommitted changes Enter first moves on to "are you sure". Any
-//! other key disarms.
+//! other key disarms. ctrl-c, in Inbox, likewise arms an interrupt of the
+//! highlighted agent while it's working, and Enter presses Escape in its
+//! tab (see core's actions); one waiting on a prompt or idle is refused.
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
 //! a new tab), and ctrl-t pins or unpins the highlighted open task (`pinned` in the registry),
@@ -329,6 +331,8 @@ enum Armed {
     No,
     Archive,
     Force,
+    /// ctrl-c on a working agent: Enter presses Escape in its tab.
+    Interrupt,
 }
 
 impl Armed {
@@ -1222,6 +1226,7 @@ impl App {
         match armed {
             Armed::No => true,
             Armed::Archive | Armed::Force => self.armable(),
+            Armed::Interrupt => self.interruptible(),
         }
     }
 
@@ -1879,6 +1884,7 @@ impl App {
             Armed::Archive if dirty => "ask",
             Armed::Archive => "archive",
             Armed::Force => "force-archive",
+            Armed::Interrupt => "interrupt",
             Armed::No => match task {
                 Some(t) if t.ended.is_some() => "resume",
                 Some(_) => "task",
@@ -2356,6 +2362,11 @@ impl App {
             self.arm_archive();
             return;
         }
+        // ctrl-c arms an interrupt of a working agent; Enter sends it.
+        if matches!(k.code, KeyCode::Char('c') if ctrl) && self.view == View::Inbox {
+            self.arm_interrupt();
+            return;
+        }
         // standalone_key acts on Enter before it gets here.
         if k.code == KeyCode::Enter {
             self.armed = Armed::No;
@@ -2385,6 +2396,44 @@ impl App {
             Armed::Archive | Armed::Force if dirty => Armed::Force,
             armed if armed.archives() => armed,
             _ => Armed::Archive,
+        };
+    }
+
+    /// Whether the highlighted row is an agent that is working, so ctrl-c
+    /// can interrupt it.
+    fn interruptible(&self) -> bool {
+        self.preview_want().is_some()
+            && self
+                .selected_item()
+                .is_some_and(|i| self.flat(i).state == "working")
+    }
+
+    /// ctrl-c: arm an interrupt of the highlighted agent, which must be
+    /// working; a note says why when it can't. Again disarms it.
+    fn arm_interrupt(&mut self) {
+        if self.armed == Armed::Interrupt {
+            self.armed = Armed::No;
+            return;
+        }
+        self.armed = Armed::No;
+        if self.preview_want().is_none() {
+            self.note = Some(("highlight an agent to interrupt it".into(), true));
+            return;
+        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let label = self.selected_label();
+        self.note = match self.flat(item).state {
+            "working" => {
+                self.armed = Armed::Interrupt;
+                None
+            }
+            "blocked" => Some((
+                format!("{label} is waiting on a prompt; answer it in its tab"),
+                true,
+            )),
+            _ => Some((format!("{label} isn't working: nothing to interrupt"), true)),
         };
     }
 
@@ -4417,6 +4466,9 @@ impl App {
         if !links.is_empty() {
             row.push(("⌃R", "work items: open, read, comment, close, mark ready"));
         }
+        if self.view == View::Inbox && self.interruptible() {
+            row.push(("⌃C", "interrupt the agent (asks first)"));
+        }
         if self.can_pin() {
             row.push((
                 "⌃T",
@@ -4681,6 +4733,25 @@ impl App {
         spans
     }
 
+    /// The footer while ctrl-c has armed an interrupt of the highlighted
+    /// agent.
+    fn armed_interrupt_line(&self) -> Line<'static> {
+        let p = &self.p;
+        let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("⏎", key),
+            Span::styled(
+                format!(" interrupt {}", self.selected_label()),
+                Style::new().fg(p.love),
+            ),
+            Span::styled(
+                ": presses Escape in its tab · other keys cancel",
+                Style::new().fg(p.muted),
+            ),
+        ])
+    }
+
     /// Footer key hints (key, what it does), as many as fit.
     fn draw_hints(&self, f: &mut Frame, area: Rect, hints: &[(&str, &str)]) {
         let p = &self.p;
@@ -4744,6 +4815,10 @@ impl App {
         }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_task()) {
             f.render_widget(Line::from(self.armed_task_spans(t)), area);
+            return;
+        }
+        if self.armed == Armed::Interrupt {
+            f.render_widget(self.armed_interrupt_line(), area);
             return;
         }
         if let (true, Some(t)) = (self.armed.archives(), self.selected_agent_tab()) {
@@ -5021,6 +5096,7 @@ impl App {
                 self.archiving = Some(rx);
                 note
             }
+            "interrupt" => self.interrupt(&pick, &label),
             "resume" => {
                 self.busy(term, format!("Resuming {label}…"));
                 done(standalone::resume(&pick), format!("resumed {label}"))
@@ -5037,6 +5113,16 @@ impl App {
         self.note = Some(note);
         self.refetch();
         true
+    }
+
+    /// Enter on an armed interrupt: press Escape in the agent's tab; the
+    /// outcome to show.
+    fn interrupt(&mut self, pick: &standalone::Pick, label: &str) -> (String, bool) {
+        self.armed = Armed::No;
+        match standalone::interrupt(pick) {
+            Ok(msg) => (msg, false),
+            Err(e) => (format!("{label}: {e}"), true),
+        }
     }
 
     /// Run what a key in the Work view asks for: start a session from the

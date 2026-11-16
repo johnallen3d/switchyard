@@ -315,6 +315,44 @@ fn message_from(
     Ok(format!("sent to {label}"))
 }
 
+/// Interrupt the agent in `window` on `host`: press Escape in its pane, as
+/// John would in the tab, which stops Claude's or Pi's current turn. Only a
+/// working agent is interrupted, going by its pane's status at the moment:
+/// Escape would dismiss a blocked agent's prompt, and twice at an idle
+/// Claude's prompt opens its rewind menu.
+///
+/// # Errors
+///
+/// Fails when the tab or its agent pane can't be found, the agent isn't
+/// working, or Rex refuses the key.
+pub fn interrupt(host: &str, session: &str, window: &str) -> Result<String, String> {
+    let pane = crate::transcript::agent_pane(host, session, window)?;
+    let block = pane["block"]
+        .as_str()
+        .filter(|b| !b.is_empty())
+        .ok_or("no agent in that tab")?;
+    let label = load_tasks()
+        .ok()
+        .and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|t| t["ended_at"].is_null() && in_window(t, window))
+                .map(label_of)
+        })
+        .unwrap_or_else(|| "the agent".into());
+    match pane["state"].as_str() {
+        Some("working") => {}
+        Some("blocked") => {
+            return Err(format!(
+                "{label} is waiting on a prompt; answer it in its tab"
+            ));
+        }
+        _ => return Err(format!("{label} isn't working: nothing to interrupt")),
+    }
+    rex(host, &["send-key", "-s", session, "-b", block, "escape"])?;
+    Ok(format!("interrupted {label}"))
+}
+
 /// `message` with the text of a prompt file (`LABEL:ID`, see `prompts`),
 /// which is removed once sent.
 ///

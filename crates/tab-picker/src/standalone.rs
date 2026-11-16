@@ -332,6 +332,14 @@ pub fn message(p: &Pick, text: &str) -> Result<String, String> {
     )
 }
 
+/// Interrupt the pick's agent; Ok is the outcome to show.
+pub fn interrupt(p: &Pick) -> Result<String, String> {
+    logged(
+        "interrupt",
+        actions::interrupt(&p.host, &p.session, &p.window),
+    )
+}
+
 /// Resume an ended task in a new tab and show it.
 pub fn resume(p: &Pick) -> Result<(), String> {
     let out = logged(
