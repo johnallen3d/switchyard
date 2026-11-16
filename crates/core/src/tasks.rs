@@ -336,8 +336,7 @@ fn unlink_at(
     })
 }
 
-/// Every window on a host's Rex server, and every hidden task's block (by
-/// its block ID, in a tab or not), with its most urgent agent status, as
+/// Every window on a host's Rex server with its most urgent agent status, as
 /// `WINDOW_ID<TAB>STATE<TAB>UPDATED_AT<TAB>MSG` lines (the last three empty
 /// for a tab with no status), after an `S<TAB>SESSION_ID` line for each
 /// session whose windows were read. A tab shows its most urgent pane, as in
@@ -347,39 +346,25 @@ local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
 local lines = {}
 local function clean(s) return (tostring(s or ""):gsub("[\t\r\n]", " ")) end
--- A hidden task's block, listed by its block shown or not (see `hidden`).
-local function hidden(label) return (label or ""):sub(1, 17) == "switchyard-hidden" end
 local list = rex.call("session.list")
 for _, s in ipairs((list and list.sessions) or {}) do
   rex.session.attach{ session_id = s.session_id }
   local view = rex.session.view{ session_id = s.session_id }
   if view and view.windows then lines[#lines + 1] = "S\t" .. s.session_id end
-  local function add(key, blocks)
-    local best
-    for _, id in ipairs(blocks) do
-      local st = rex.block.call(T, "program_status", { session_id = s.session_id, block_id = id })
-      for _, r in ipairs((st and st.records) or {}) do
-        if best == nil or (urgency[r.state] or 0) > (urgency[best.state] or 0) then best = r end
-      end
-    end
-    best = best or {}
-    lines[#lines + 1] = table.concat({ key, clean(best.state), clean(best.updated_at), clean(best.msg) }, "\t")
-  end
   for _, w in ipairs((view and view.windows) or {}) do
-    local blocks, shown = {}, nil
+    local best
     for _, l in ipairs(w.layers or {}) do
       if l.kind == "tiled" then
         for _, b in ipairs(l.blocks or {}) do
-          blocks[#blocks + 1] = b.block_id
-          if hidden(b.label) then shown = b.block_id end
+          local st = rex.block.call(T, "program_status", { session_id = s.session_id, block_id = b.block_id })
+          for _, r in ipairs((st and st.records) or {}) do
+            if best == nil or (urgency[r.state] or 0) > (urgency[best.state] or 0) then best = r end
+          end
         end
       end
     end
-    if shown then add(shown, { shown }) else add(w.window_id, blocks) end
-  end
-  local all = rex.call("session.list_blocks", { session_id = s.session_id })
-  for _, b in ipairs((all and all.blocks) or {}) do
-    if b.placement == "detached" and hidden(b.label) then add(b.block_id, { b.block_id }) end
+    best = best or {}
+    lines[#lines + 1] = table.concat({ w.window_id, clean(best.state), clean(best.updated_at), clean(best.msg) }, "\t")
   end
 end
 return table.concat(lines, "\n")

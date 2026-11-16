@@ -71,9 +71,6 @@ end
 -- picker's tab can't be found or opened, show the task's tab instead.
 local function show_in_picker(ctx, host, session_id, window_id)
   local ok, tab = pcall(tab_picker.find_or_open, session_id, window_id)
-  -- A hidden task (see crates/core/src/hidden.rs) has no tab to show:
-  -- show its session instead.
-  if not ok and window_id and window_id:sub(1, 6) == "block:" then window_id = nil end
   if not ok then return show(ctx, host, session_id, window_id) end
   rex.client.queue("session.select", { session_id = tab.session_id, window_id = tab.window_id })
   drop_picker_session(ctx, tab.session_id)

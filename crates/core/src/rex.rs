@@ -226,20 +226,12 @@ pub fn host_home(host: &str) -> Result<String, String> {
 }
 
 /// Show a tab in its host's Rex app, as the config's jumps do; with no
-/// window, the session's own. A hidden task's block (see `hidden`) gets a
-/// tab of its own first.
+/// window, the session's own.
 ///
 /// # Errors
 ///
 /// Fails when rex can't run or exits unsuccessfully.
 pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
-    let shown;
-    let window = if crate::hidden::is_block(window) {
-        shown = crate::hidden::show(host, session, window)?;
-        shown.as_str()
-    } else {
-        window
-    };
     let mut cmd = Command::new("rex");
     if host != local_label() {
         cmd.args(["-S", host]);

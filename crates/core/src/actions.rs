@@ -60,10 +60,6 @@ use crate::tasks::{MERGED_SH, in_window, load_tasks, save_record, update_tasks};
 /// The tab's agent pane: the first pane of its tiled layer, which is where
 /// `--run` started the agent.
 fn agent_block(host: &str, session: &str, window: &str) -> Result<String, String> {
-    // A hidden task's key is its agent's block (see `hidden`).
-    if crate::hidden::is_block(window) {
-        return crate::hidden::window_of(host, session, window).map(|_| window.to_string());
-    }
     let list = rex_json(host, &["window", "ls", "-s", session, "--json"])?;
     list["windows"]
         .as_array()
@@ -151,25 +147,13 @@ enum Adopted {
     Folder(String),
 }
 
-/// Close a task's tab, or a hidden task's block wherever it is; a tab
-/// that is already gone is fine.
-fn close_tab(host: &str, session: &str, window: &str) {
-    let _ = if crate::hidden::is_block(window) {
-        crate::hidden::close(host, session, window)
-    } else {
-        rex(host, &["window", "close", "-s", session, window])
-    };
-}
-
-/// A session spawn created for the project goes when its last tab does,
-/// unless a hidden task's block, in no tab, still runs there.
+/// A session spawn created for the project goes when its last tab does.
 fn kill_if_empty(host: &str, session: &str) {
-    let empty = |method: &str, field: &str| {
-        let args = serde_json::json!({ "session_id": session }).to_string();
-        rex_json(host, &["api", "call", method, &args])
-            .is_ok_and(|v| v[field].as_array().is_some_and(std::vec::Vec::is_empty))
-    };
-    if empty("session.view", "windows") && empty("session.list_blocks", "blocks") {
+    if let Ok(list) = rex_json(host, &["window", "ls", "-s", session, "--json"])
+        && list["windows"]
+            .as_array()
+            .is_some_and(std::vec::Vec::is_empty)
+    {
         let _ = rex(host, &["kill", session]);
     }
 }
@@ -535,7 +519,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
     let i = match action_task(&mut tasks, archiving, host, session, window)? {
         Target::Task(i) => i,
         Target::Folder(cwd) => {
-            close_tab(host, session, window);
+            let _ = rex(host, &["window", "close", "-s", session, window]);
             kill_if_empty(host, session);
             return Ok(format!("closed the tab; {cwd} isn't a Git checkout"));
         }
@@ -564,7 +548,7 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 && worktree.trim_end_matches('/') == repo.trim_end_matches('/') =>
         {
             if !ended {
-                close_tab(host, session, window);
+                let _ = rex(host, &["window", "close", "-s", session, window]);
                 tasks[i]["ended_at"] = now().into();
             }
             kill_if_empty(host, session);
@@ -642,7 +626,7 @@ fn archive_worktree(
     // Close the tab first so the agent isn't left in a deleted
     // directory; a tab that is already gone is fine.
     if !ended {
-        close_tab(host, session, window);
+        let _ = rex(host, &["window", "close", "-s", session, window]);
     }
     let (note, failed) = if exists {
         remove_worktree(host, &repo, &branch, force)?

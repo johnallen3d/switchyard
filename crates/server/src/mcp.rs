@@ -430,7 +430,6 @@ fn tools() -> Value {
                     "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
                     "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set." },
                     "notify_parent": { "type": "boolean", "default": true, "description": "With parent_block known, type a short notice into your tab each time the task's agent stops working (idle, done, or waiting on a prompt), with its last message, so you needn't poll it or set a timer." },
-                    "hidden": { "type": "boolean", "default": true, "description": "Start the agent hidden, in no tab (the default); false gives it a tab of its own. ctrl-y in the tab picker (cmd+i) shows a hidden agent in a tab and hides it again." },
                 },
                 "required": ["project", "name", "prompt"],
             },
@@ -647,9 +646,7 @@ fn find_task(wanted: &str, open: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// Where a Rex block is: its host's Rex label, session and window. A
-/// hidden agent's block is in no window, and its task is keyed by the
-/// block (see core's `launch`), so the block stands in for it.
+/// Where a Rex block is: its host's Rex label, session and window.
 #[derive(Clone, Debug, PartialEq)]
 struct Tab {
     host: String,
@@ -675,8 +672,7 @@ fn block_window(hosts: &[String], block: &str) -> Option<Tab> {
         let info: Value = serde_json::from_slice(&out.stdout).ok()?;
         let window = info["block"]["window_id"]
             .as_str()
-            .filter(|w| !w.is_empty())
-            .unwrap_or(block);
+            .filter(|w| !w.is_empty())?;
         Some(Tab {
             host: if host == "local" {
                 local_label()
@@ -755,10 +751,7 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         harness,
         prompt,
         opt_arg(args, "work_item"),
-        Placement {
-            parent,
-            hidden: args["hidden"].as_bool().unwrap_or(true),
-        },
+        Placement { parent },
     )?;
     let _ = endpoint.refresh.send("mcp");
     // The registry has it now: name it as list_tasks will.

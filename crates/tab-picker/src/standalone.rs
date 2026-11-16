@@ -318,16 +318,6 @@ pub fn pin(p: &Pick) -> Result<String, String> {
     logged("pin", actions::act("pin", &p.host, &p.session, &p.window))
 }
 
-/// Show the pick's hidden task in a tab of its own, or hide it again; Ok
-/// says whether it is shown now.
-pub fn toggle_hidden(p: &Pick) -> Result<bool, String> {
-    let r = switchyard_core::hidden::toggle(&p.host, &p.session, &p.window);
-    if let Err(e) = &r {
-        log(&format!("toggle hidden {}: {e}", p.window));
-    }
-    r
-}
-
 /// Snooze the pick's task until `until` (Unix seconds), or wake it for 0.
 pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
     logged("snooze", actions::snooze(&p.window, until))

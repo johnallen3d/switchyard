@@ -75,8 +75,6 @@
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
 //! a new tab), and ctrl-t pins or unpins the highlighted open task (`pinned` in the registry),
-//! ctrl-y shows a hidden task's agent in a tab of its own or hides it
-//! again (see core's `hidden`),
 //! which puts it in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens
 //! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
@@ -1253,12 +1251,7 @@ impl App {
     /// says what an agent is.
     fn is_agent(&self, item: Item) -> bool {
         match item {
-            // A hidden task's block is listed whatever it reports: in no
-            // tab, the picker is the only place to find it.
-            Item::Tab(t) => {
-                let tab = &self.tabs[t];
-                tab.state != State::Idle || tab.task.is_some() || tab.hidden.is_some()
-            }
+            Item::Tab(t) => self.tabs[t].state != State::Idle || self.tabs[t].task.is_some(),
             Item::Task(k) => self.tasks[k].ended.is_none(),
             Item::Status(_) => false,
         }
@@ -4418,9 +4411,6 @@ impl App {
                 },
             ));
         }
-        if let Some(hidden) = self.selected_hidden() {
-            row.push(("⌃Y", if hidden { "show in a tab" } else { "hide" }));
-        }
         if self.can_snooze() {
             row.push((
                 "⌃S",
@@ -4974,11 +4964,6 @@ impl App {
             self.pin_selected();
             return true;
         }
-        // Show or hide a hidden task's agent.
-        if matches!(k.code, KeyCode::Char('y') if ctrl) {
-            self.toggle_hidden_selected();
-            return true;
-        }
         if !matches!(k.code, KeyCode::Enter) {
             return false;
         }
@@ -5270,38 +5255,6 @@ impl App {
                 }
             }
             _ => {}
-        }
-    }
-
-    /// ctrl-y: show the selected hidden task's agent in a tab of its own,
-    /// or hide it again; a note says what it did or why it can't.
-    fn toggle_hidden_selected(&mut self) {
-        let Some(hidden) = self.selected_hidden() else {
-            self.note = Some(("ctrl-y shows and hides hidden agents only".into(), true));
-            return;
-        };
-        let Some(pick) = standalone::parse_pick(&self.pick()) else {
-            return;
-        };
-        let label = self.selected_label();
-        self.note = Some(match standalone::toggle_hidden(&pick) {
-            Ok(true) => (format!("{label} is in a tab now; ctrl-y hides it"), false),
-            Ok(false) => (format!("{label} is hidden again"), false),
-            Err(e) => (e, true),
-        });
-        // Show the change now, rather than at the next poll.
-        if let Some(Item::Tab(t)) = self.selected_item() {
-            self.tabs[t].hidden = Some(!hidden);
-        }
-        self.refetch();
-    }
-
-    /// Whether the highlighted row is a hidden task's agent in no tab
-    /// (true) or shown in one (false); None for any other row.
-    fn selected_hidden(&self) -> Option<bool> {
-        match self.selected_item()? {
-            Item::Tab(t) => self.tabs[t].hidden,
-            _ => None,
         }
     }
 

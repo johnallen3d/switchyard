@@ -167,16 +167,13 @@ fn kept_prompt(prompt_ref: &str) -> String {
 }
 
 /// Where a launched agent goes besides its project's session. By default
-/// it starts hidden, with no parent.
-#[derive(Clone, Copy, Debug)]
+/// it has no parent.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Placement<'a> {
     /// The agent that spawned it, if known: the registry keeps it as
     /// `parent_window`, `parent_host` and `parent_session`, and the tab
     /// picker nests the task under that tab.
     pub parent: Option<Parent<'a>>,
-    /// Start it hidden, in a detached block rather than a tab (see
-    /// `hidden`); its block ID is then its window ID.
-    pub hidden: bool,
 }
 
 /// Where the agent that spawned a task is.
@@ -189,15 +186,6 @@ pub struct Parent<'a> {
     /// Tell it when the task settles (see switchyard-server's `notices`);
     /// kept as `notify_parent: false` when off.
     pub notify: bool,
-}
-
-impl Default for Placement<'_> {
-    fn default() -> Self {
-        Self {
-            parent: None,
-            hidden: true,
-        }
-    }
 }
 
 /// `launch` with the prompt's text itself rather than a prompt file, for
@@ -308,16 +296,6 @@ fn launch_with(
         run.push(&prompt);
     }
     let (session, window_id) = open_tab(host, existing, &project.name, &slug, &cwd, &run)?;
-    // A hidden task goes by its block from here on; failing to hide it
-    // leaves it in its tab, which is still a working task.
-    let window_id = if placement.hidden {
-        crate::hidden::hide_new(host, &session, &window_id, &slug).unwrap_or_else(|e| {
-            log(&format!("could not hide {}/{name}: {e}", project.name));
-            window_id
-        })
-    } else {
-        window_id
-    };
     // The tab holds the prompt now.
     if let Some(r) = prompt_ref {
         discard_prompt(r);
