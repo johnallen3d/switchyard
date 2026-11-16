@@ -4062,13 +4062,9 @@ impl App {
             ..area
         };
         let tick = tick(self.started);
-        // The free space goes above Snoozed, unless it leads the list.
+        // The free space goes above Snoozed, even when it leads the list.
         let slack = if overflow { 0 } else { h.saturating_sub(total) };
-        let snoozed = self
-            .rows
-            .iter()
-            .position(|r| *r == Item::Status("snoozed"))
-            .filter(|&i| i > 0);
+        let snoozed = self.rows.iter().position(|r| *r == Item::Status("snoozed"));
         let mut y = 0;
         for (i, row) in self.rows.iter().enumerate().skip(self.offset) {
             if Some(i) == snoozed {
