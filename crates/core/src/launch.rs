@@ -63,9 +63,8 @@ fn folder_script(path: &str) -> String {
 }
 
 /// The slash command a work project's agent starts a work item with; the
-/// item and these flags follow it.
+/// item follows it.
 pub const WORK_ITEM_COMMAND: &str = "/agent-kit:issue-implement";
-const WORK_ITEM_FLAGS: &str = "--create-pr --agent-author";
 
 /// The prompt that starts work on `item` ahead of the typed `prompt`: a
 /// work project hands it to `WORK_ITEM_COMMAND`, which knows its tracker;
@@ -75,7 +74,7 @@ const WORK_ITEM_FLAGS: &str = "--create-pr --agent-author";
 #[must_use]
 pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &str) -> String {
     let lead = if profile == "work" {
-        format!("{WORK_ITEM_COMMAND} {item} {WORK_ITEM_FLAGS}")
+        format!("{WORK_ITEM_COMMAND} {item}")
     } else {
         let url = parse_ref(item, tracker)
             .and_then(|l| l["url"].as_str().map(String::from))
@@ -642,11 +641,11 @@ mod tests {
         let fizzy = Tracker::new("fizzy:6284043/board", "");
         assert_eq!(
             work_item_prompt("work", "ENG-12", &fizzy, ""),
-            "/agent-kit:issue-implement ENG-12 --create-pr --agent-author",
+            "/agent-kit:issue-implement ENG-12",
         );
         assert_eq!(
             work_item_prompt("work", "#7", &fizzy, "keep it small"),
-            "/agent-kit:issue-implement #7 --create-pr --agent-author\n\nkeep it small",
+            "/agent-kit:issue-implement #7\n\nkeep it small",
         );
         let personal = work_item_prompt("personal", "#1045", &fizzy, "");
         assert_eq!(
