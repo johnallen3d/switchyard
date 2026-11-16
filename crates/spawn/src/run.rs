@@ -158,7 +158,9 @@ fn task_note(worktree: &Path, branch: &str) -> String {
          commits, pushes, pull requests, and `switchyard link`. Do not create another \
          worktree or branch for this task, even when a skill or instruction says to make \
          one: this worktree is the task worktree such a workflow asks for, so reuse it. \
-         Switchyard tracks the task's commits, issues and pull requests only on {branch}."
+         Keep the branch name too; if a required check insists on another, rename it \
+         in place with `git branch -m` rather than making a new branch. Switchyard \
+         tracks the task's commits, issues and pull requests only on this branch."
     )
 }
 

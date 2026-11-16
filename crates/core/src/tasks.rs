@@ -551,15 +551,23 @@ while IFS=$'\t' read -r repo branch want; do
     fi
   fi
   if [ "$list" = "?" ]; then echo "?"; continue; fi
-  path=- wt= wt_head= sha=
+  path=- wt= wt_head= sha= moved= moved_head= moved_branch=
   while IFS= read -r line; do
     case $line in
       "worktree "*) wt=${line#worktree } sha= ;;
       "HEAD "*) sha=${line#HEAD } ;;
       "branch refs/heads/$branch") path=$wt wt_head=$sha; break ;;
+      "branch refs/heads/"*)
+        # The recorded worktree on another branch: the agent renamed it.
+        if [ -n "$want" ] && [ "$wt" -ef "$want" ]; then
+          moved=$wt moved_head=$sha moved_branch=${line#branch refs/heads/}
+        fi ;;
       detached) if [ -n "$want" ] && [ "$wt" -ef "$want" ]; then path=$wt wt_head=$sha; fi ;;
     esac
   done <<<"$list"
+  if [ "$path" = "-" ] && [ -n "$moved" ]; then
+    path=$moved wt_head=$moved_head branch=$moved_branch
+  fi
   if [ "$path" = "-" ]; then printf -- '-\t%s\n' "${boards[$n]}"; continue; fi
   count=0 files=
   while IFS= read -r line; do
@@ -589,7 +597,7 @@ while IFS=$'\t' read -r repo branch want; do
     shopt -u nocasematch
     fixes=${fixes:0:4000}
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$count" "${head:0:12}" "$merged" "$origin" "$links" "$fixes" "${boards[$n]}" "$files"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$path" "$count" "${head:0:12}" "$merged" "$origin" "$links" "$fixes" "${boards[$n]}" "$branch" "$files"
 done <<'RSP_PAIRS'
 "#;
 
@@ -605,8 +613,10 @@ fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<
     // Pairs are REPO, BRANCH and the task's recorded worktree, which still
     // counts while detached from BRANCH, as a rebase leaves it until it
     // finishes: a check in that moment would otherwise end the task as
-    // "worktree removed". One line per pair:
-    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>FILE...,
+    // "worktree removed". With no worktree on BRANCH, the recorded one on
+    // another branch counts too, as that branch: the agent renamed it, and
+    // `git branch -m` took its link config along. One line per pair:
+    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>BRANCH<TAB>FILE...,
     // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
     // sets it; LINKS are the branch's `switchyard-link` git config values,
     // FIXES its commit message lines that may close issues, space separated;
@@ -663,6 +673,9 @@ struct Worktree {
     fixes: Vec<String>,
     /// The repo's `.fizzy.yaml` board, `ACCOUNT/BOARD`, or empty.
     fizzy: String,
+    /// The branch the worktree is on: the task's, or what it was renamed
+    /// to (see `host_worktrees`).
+    branch: String,
 }
 
 impl Worktree {
@@ -690,6 +703,7 @@ impl Worktree {
             .collect();
         let fixes = crate::links::fixed_refs(f.next().unwrap_or(""));
         let fizzy = f.next().unwrap_or("").to_string();
+        let branch = f.next().unwrap_or("").to_string();
         let changed = f.filter(|s| !s.is_empty()).map(String::from).collect();
         Worktree {
             path,
@@ -701,6 +715,7 @@ impl Worktree {
             links,
             fixes,
             fizzy,
+            branch,
         }
     }
 }
@@ -864,7 +879,7 @@ fn apply_checks(
                         task["ended_reason"] = "worktree removed".into();
                     }
                     Some(w) => {
-                        task["worktree"] = w.path.clone().into();
+                        follow_rename(task, &w);
                         dirty.insert(key, w);
                     }
                     None => {}
@@ -886,7 +901,7 @@ fn apply_checks(
                     task["ended_reason"] = "worktree removed".into();
                 }
                 Some(w) => {
-                    task["worktree"] = w.path.clone().into();
+                    follow_rename(task, &w);
                     dirty.insert(key, w);
                 }
                 None => {}
@@ -898,6 +913,15 @@ fn apply_checks(
         }
     }
     (live, dirty)
+}
+
+/// Record `w`, the worktree found for `task`, as its worktree, and the
+/// branch it is on as its branch when the agent renamed it.
+fn follow_rename(task: &mut serde_json::Value, w: &Worktree) {
+    task["worktree"] = w.path.clone().into();
+    if !w.branch.is_empty() && task["branch"].as_str() != Some(w.branch.as_str()) {
+        task["branch"] = w.branch.clone().into();
+    }
 }
 
 /// Tasks that ended on their own just now (at `stamp`) keep their newest
@@ -1672,6 +1696,32 @@ mod tests {
                 .chain(&w[4..6])
                 .all(|w| w.head.len() == 12 && w.origin == "git@github.com:o/r.git")
         );
+        assert_eq!(w[2].branch, "open");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn worktree_script_follows_a_renamed_task_branch() {
+        let (root, repo) = worktree_fixture();
+        let r = repo.to_str().unwrap().to_string();
+        let open = root.join("open");
+        // `git branch -m` takes the branch's link config along.
+        git(&open, &["branch", "-m", "feature/open"]);
+        let recorded = open.to_str().unwrap().to_string();
+        let pairs = [
+            (r.clone(), "open".to_string(), recorded),
+            (r.clone(), "open".to_string(), String::new()),
+        ];
+        let got = host_worktrees(&local_label(), &pairs).unwrap();
+        let w: Vec<Worktree> = got.into_iter().map(Option::unwrap).collect();
+        assert_eq!(w[0].branch, "feature/open");
+        assert_eq!(w[0].merged, "unmerged");
+        assert_eq!(w[0].links, ["fizzy:5", "https://github.com/o/r/issues/3"]);
+        // Without the recorded worktree, the old branch is just gone.
+        assert_eq!(w[1].path, "");
+        let mut task = serde_json::json!({"branch": "open"});
+        follow_rename(&mut task, &w[0]);
+        assert_eq!(task["branch"], "feature/open");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

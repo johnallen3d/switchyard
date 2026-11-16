@@ -127,6 +127,18 @@ fn task_branch(current: Option<&str>) -> Option<TaskBranch> {
     if branch.is_empty() || current == Some(branch.as_str()) {
         return None;
     }
+    // In the task's worktree, its branch is the current one, renamed since
+    // `task run` set the environment: Switchyard follows the rename.
+    let canon = |d: &str| std::fs::canonicalize(d.trim()).ok();
+    let top = git(&["rev-parse", "--show-toplevel"]).ok();
+    if current.is_some()
+        && top
+            .as_deref()
+            .and_then(canon)
+            .is_some_and(|t| Some(t) == canon(&worktree))
+    {
+        return None;
+    }
     let common = |dir: Option<&str>| {
         let mut args = vec![];
         if let Some(dir) = dir {
