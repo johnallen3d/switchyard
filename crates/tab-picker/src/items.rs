@@ -81,9 +81,6 @@ pub struct Items {
     pub entries: Vec<Entry>,
     pub selected: usize,
     pub mode: Mode,
-    /// Opened on one item to read it (the Work view's ctrl-v): leaving the
-    /// reader closes the float rather than showing its list.
-    pub reader_only: bool,
     /// The reader's last drawn height and furthest scroll, for its keys.
     page: Cell<(usize, usize)>,
     /// The comment being typed, kept while confirming or after a failed
@@ -428,7 +425,6 @@ impl Items {
             entries,
             selected: 0,
             mode: Mode::List,
-            reader_only: false,
             page: Cell::new((0, 0)),
             comment: comment_box(),
         })
@@ -444,15 +440,6 @@ impl Items {
     }
 
     pub fn key(&mut self, k: KeyEvent) -> Outcome {
-        let out = self.mode_key(k);
-        // Back from reading one item: nothing else to show.
-        if self.reader_only && self.mode == Mode::List && out == Outcome::Stay {
-            return Outcome::Close;
-        }
-        out
-    }
-
-    fn mode_key(&mut self, k: KeyEvent) -> Outcome {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         match std::mem::replace(&mut self.mode, Mode::List) {
@@ -885,7 +872,12 @@ fn when(at: &str) -> String {
 /// bodies drawn as the preview draws an agent's (see preview's `markdown`).
 /// Its state is coloured as the work-items rows colour it (see
 /// `reader_state`).
-fn reader_lines(thread: &Thread, link: &Link, width: usize, p: &Palette) -> Vec<Line<'static>> {
+pub(crate) fn reader_lines(
+    thread: &Thread,
+    link: &Link,
+    width: usize,
+    p: &Palette,
+) -> Vec<Line<'static>> {
     let wrap = |line: Line<'static>| crate::preview::wrap_line(line, width);
     let mut out: Vec<Line<'static>> = Vec::new();
     let title = if thread.title.is_empty() {

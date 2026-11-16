@@ -15,14 +15,21 @@
 //! `{base, branch, dirty, commits: [{sha, subject, at}], files: [{path,
 //! added, removed, binary, untracked}], patch, truncated}`, commits newest
 //! first and `dirty` the number of paths `git status` lists; or `{error}`.
+//!
+//! `pull_request` gives a GitHub pull request's changes in the same shape,
+//! from `gh` rather than a checkout: its base and head branches, its
+//! commits, files and patch (`dirty` 0), for the Work view's preview.
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::rex::{host_bash, local_label, sh_quote};
-use crate::tasks::{in_window, load_tasks};
+use crate::item_actions::run_bounded;
+use crate::rex::{home, host_bash, local_label, sh_quote};
+use crate::sessions::work_env;
+use crate::tasks::{in_window, load_tasks, rfc3339_secs};
 use crate::transcript::{agent_pane, unhex};
 
 /// The most patch text to return, so the picker's preview stays quick.
@@ -71,6 +78,105 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
         ));
     }
     serde_json::from_slice(&out.stdout).map_err(|_| format!("unreadable diff from {host}"))
+}
+
+/// How long one gh call for a pull request may take.
+const GH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The changes of the GitHub pull request `reference` names
+/// (`owner/repo#N`), as `gh` sees them under `profile` (see the module
+/// docs).
+#[must_use]
+pub fn pull_request(reference: &str, profile: &str) -> Value {
+    pr_inner(reference, profile).unwrap_or_else(|e| json!({ "error": e }))
+}
+
+fn pr_inner(reference: &str, profile: &str) -> Result<Value, String> {
+    let (repo, number) = reference
+        .split_once('#')
+        .filter(|(r, n)| r.contains('/') && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| format!("{reference}: not an owner/repo#N reference"))?;
+    let env = if profile == "work" {
+        work_env()?
+    } else {
+        Vec::new()
+    };
+    let gh = |args: &[&str]| {
+        let mut cmd = Command::new("gh");
+        cmd.args(args)
+            .env("GH_PROMPT_DISABLED", "1")
+            .envs(env.iter().cloned())
+            .current_dir(home());
+        run_bounded(&mut cmd, "gh", GH_TIMEOUT)
+    };
+    let view = gh(&[
+        "pr",
+        "view",
+        number,
+        "-R",
+        repo,
+        "--json",
+        "baseRefName,headRefName,commits,files",
+    ])?;
+    let patch = gh(&["pr", "diff", number, "-R", repo, "--color", "never"])?;
+    let v: Value = serde_json::from_str(view.trim()).map_err(|e| format!("gh pr view: {e}"))?;
+    Ok(pr_value(&v, patch))
+}
+
+/// A pull request's changes from `gh pr view`'s JSON and `gh pr diff`'s
+/// patch: commits newest first, as `log` gives a checkout's.
+fn pr_value(v: &Value, mut patch: String) -> Value {
+    let list = |k: &str| v[k].as_array().cloned().unwrap_or_default();
+    let mut commits: Vec<Value> = list("commits")
+        .iter()
+        .map(|c| {
+            let sha = c["oid"].as_str().unwrap_or("");
+            json!({
+                "sha": sha.get(..7).unwrap_or(sha),
+                "at": c["committedDate"].as_str().and_then(rfc3339_secs).unwrap_or(0),
+                "subject": c["messageHeadline"].as_str().unwrap_or(""),
+            })
+        })
+        .collect();
+    commits.reverse();
+    commits.truncate(COMMITS);
+    let files: Vec<Value> = list("files")
+        .iter()
+        .map(|f| {
+            json!({
+                "path": f["path"].as_str().unwrap_or(""),
+                "added": f["additions"].as_u64().unwrap_or(0),
+                "removed": f["deletions"].as_u64().unwrap_or(0),
+                "binary": false,
+                "untracked": false,
+            })
+        })
+        .collect();
+    let truncated = truncate(&mut patch);
+    json!({
+        "base": v["baseRefName"].as_str().unwrap_or(""),
+        "branch": v["headRefName"].as_str().unwrap_or(""),
+        "dirty": 0,
+        "commits": commits,
+        "files": files,
+        "patch": patch,
+        "truncated": truncated,
+    })
+}
+
+/// Cut `patch` to at most `PATCH` bytes, on a whole line; whether it was.
+fn truncate(patch: &mut String) -> bool {
+    if patch.len() <= PATCH {
+        return false;
+    }
+    let mut end = PATCH;
+    while !patch.is_char_boundary(end) {
+        end -= 1;
+    }
+    // End on a whole line.
+    end = patch[..end].rfind('\n').map_or(end, |i| i + 1);
+    patch.truncate(end);
+    true
 }
 
 /// The changes in the checkout at `dir` on this host (see the module docs).
@@ -170,16 +276,7 @@ fn read(dir: &Path) -> Result<Value, String> {
         }));
         patch.push_str(&text);
     }
-    let truncated = patch.len() > PATCH;
-    if truncated {
-        let mut end = PATCH;
-        while !patch.is_char_boundary(end) {
-            end -= 1;
-        }
-        // End on a whole line.
-        end = patch[..end].rfind('\n').map_or(end, |i| i + 1);
-        patch.truncate(end);
-    }
+    let truncated = truncate(&mut patch);
     Ok(json!({
         "base": base,
         "branch": branch,
@@ -326,6 +423,30 @@ mod tests {
         assert!(patch.contains("diff --git a/a.txt b/a.txt"), "{patch}");
         assert!(patch.contains("diff --git a/new.txt b/new.txt"), "{patch}");
         assert_eq!(v["truncated"], false);
+    }
+
+    #[test]
+    fn a_pull_request_reads_as_a_branch_does() {
+        let v = json!({
+            "baseRefName": "main",
+            "headRefName": "feature/x",
+            "commits": [
+                {"oid": "aaaaaaa1111", "committedDate": "2026-11-15T10:00:00Z", "messageHeadline": "first"},
+                {"oid": "bbbbbbb2222", "committedDate": "2026-11-16T10:00:00Z", "messageHeadline": "second"}
+            ],
+            "files": [{"path": "a.rs", "additions": 3, "deletions": 1}]
+        });
+        let out = pr_value(&v, "diff --git a/a.rs b/a.rs\n".into());
+        assert_eq!(
+            (out["base"].as_str(), out["branch"].as_str()),
+            (Some("main"), Some("feature/x"))
+        );
+        assert_eq!(out["commits"][0]["subject"], "second");
+        assert_eq!(out["commits"][0]["sha"], "bbbbbbb");
+        assert!(out["commits"][0]["at"].as_u64().unwrap() > 0);
+        assert_eq!(out["files"][0]["added"], 3);
+        assert_eq!(out["truncated"], false);
+        assert!(pull_request("not-a-ref", "")["error"].is_string());
     }
 
     #[test]

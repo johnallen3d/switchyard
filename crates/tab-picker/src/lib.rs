@@ -49,7 +49,9 @@
 //! - Work: one catalog project's open cards or issues, or with ctrl-f its
 //!   open pull requests, the ones an open task links to dimmed; Enter starts a session from the highlighted
 //!   item, switching to Inbox and highlighting the session once it lists,
-//!   or goes to its task (see work.rs).
+//!   or goes to its task (see work.rs). With the width, the highlighted
+//!   item shows on the right: its description and comments, and with
+//!   ctrl-d a pull request's diff and commits (see detail.rs).
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
@@ -103,6 +105,7 @@
 //! other (cmd+w).
 
 mod changes;
+mod detail;
 mod fed;
 mod help;
 mod history;
@@ -518,7 +521,7 @@ fn right_header(cols: RightCols) -> String {
 
 /// Lines drawn under scrollback's cursor, selection and search in `text`
 /// (within `screen`, which holds the scrollbar), moving it to suit them.
-fn draw_scrollback(
+pub(crate) fn draw_scrollback(
     f: &mut Frame,
     p: &Palette,
     screen: Rect,
@@ -601,6 +604,8 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⌃D ⌃U", "half a page"),
                 ("⌃F ⌃B PgDn PgUp", "a page"),
                 ("{ }", "previous, next blank line"),
+                ("[ ]", "previous, next file in a diff, or comment"),
+                ("⏎ on a listed file", "go to its patch"),
                 ("g G Home End", "top, bottom"),
                 ("/ ?", "search forward, back"),
                 ("n N", "next, previous match"),
@@ -1036,7 +1041,7 @@ impl App {
         if self
             .items
             .as_ref()
-            .is_some_and(|i| !i.reader_only && self.selected_key().as_ref() != Some(&i.key))
+            .is_some_and(|i| self.selected_key().as_ref() != Some(&i.key))
         {
             self.items = None;
         }
@@ -2584,10 +2589,15 @@ impl App {
         self.refilter();
     }
 
-    /// The highlighted agent's transcript (or the changes the lens shows)
-    /// as text, wrapped as last drawn.
-    fn transcript_text(&mut self) -> Option<Vec<String>> {
+    /// The highlighted agent's transcript (or the changes the lens shows),
+    /// or in Work the highlighted item's side, as text, wrapped as last
+    /// drawn, with its sections.
+    fn transcript_text(&mut self) -> Option<(Vec<String>, scrollback::Nav)> {
         let p = self.p;
+        if self.view == View::Work {
+            let link = self.work.selected_link()?;
+            return self.work.detail.text(&link, &p, self.now);
+        }
         let pane = self.preview_want()?;
         let width = self.transcript.width;
         if width == 0 {
@@ -2596,17 +2606,43 @@ impl App {
         if self.lens != changes::Lens::Transcript {
             let ch = self.changes.as_mut().filter(|c| c.pane == pane)?;
             let lines = ch.lines(self.lens, width, self.now, &p).ok()?;
-            return Some(lines.iter().map(scrollback::line_text).collect());
+            let text = lines.iter().map(scrollback::line_text).collect();
+            return Some((text, ch.nav()));
         }
         let pv = self.preview.as_mut().filter(|pv| pv.pane == pane)?;
         let lines = pv.lines(width, &p).ok()?;
-        Some(lines.iter().map(scrollback::line_text).collect())
+        let text = lines.iter().map(scrollback::line_text).collect();
+        Some((text, scrollback::Nav::default()))
+    }
+
+    /// Scrollback over the Work view's highlighted item, from the top of
+    /// what its side shows.
+    fn enter_work_scrollback(&mut self) {
+        let link = self.work.selected_link();
+        let (Some(link), Some((lines, nav))) = (link, self.transcript_text()) else {
+            self.note = Some(("nothing here to scroll through yet".into(), true));
+            return;
+        };
+        if lines.is_empty() {
+            return;
+        }
+        let h = self.work.detail.text_area().height as usize;
+        let top = self.work.detail.top();
+        let mut sb = scrollback::Scrollback::new(self.work.detail.pane(&link), lines.len(), h);
+        sb.cursor = top.min(lines.len() - 1);
+        sb.top = top;
+        sb.nav = nav;
+        sb.sync(lines.len(), h);
+        self.scrollback = Some(sb);
     }
 
     /// Scrollback over the transcript, from the bottom of what the preview
     /// shows, then `k` in it.
     fn enter_scrollback(&mut self, k: Option<KeyEvent>) {
-        let (Some(pane), Some(lines)) = (self.preview_want(), self.transcript_text()) else {
+        if self.view == View::Work {
+            return self.enter_work_scrollback();
+        }
+        let (Some(pane), Some((lines, nav))) = (self.preview_want(), self.transcript_text()) else {
             self.note = Some(("nothing here to scroll through".into(), true));
             return;
         };
@@ -2625,6 +2661,7 @@ impl App {
             0
         };
         let mut sb = scrollback::Scrollback::new(pane, lines.len(), h);
+        sb.nav = nav;
         sb.cursor = sb.cursor.saturating_sub(back);
         sb.sync(lines.len(), h);
         if let Some(k) = k {
@@ -2635,18 +2672,24 @@ impl App {
     }
 
     fn scrollback_key(&mut self, k: KeyEvent) {
-        let Some(lines) = self.transcript_text() else {
+        let Some((lines, nav)) = self.transcript_text() else {
             return self.leave_scrollback();
         };
-        let height = self.transcript.height as usize;
+        let in_work = self.view == View::Work;
+        let height = if in_work {
+            self.work.detail.text_area().height
+        } else {
+            self.transcript.height
+        } as usize;
         let Some(sb) = &mut self.scrollback else {
             return;
         };
+        sb.nav = nav;
         match sb.key(k, &lines, height) {
             scrollback::Outcome::Stay => sb.sync(lines.len(), height),
             scrollback::Outcome::Exit => self.leave_scrollback(),
             scrollback::Outcome::Copy(from, to) => {
-                let text = if self.lens == changes::Lens::Transcript {
+                let text = if !in_work && self.lens == changes::Lens::Transcript {
                     self.preview.as_ref().and_then(|pv| pv.source(from, to))
                 } else {
                     lines.get(from..=to).map(|l| l.join("\n"))
@@ -2669,10 +2712,10 @@ impl App {
     /// Leave scrollback: the transcript back at its end, the changes where
     /// scrollback left them.
     fn leave_scrollback(&mut self) {
-        if let Some(sb) = self.scrollback.take()
-            && self.lens != changes::Lens::Transcript
-        {
-            self.changes_top.0 = sb.top;
+        match self.scrollback.take() {
+            Some(sb) if sb.pane.target == "work" => self.work.detail.set_top(sb.top),
+            Some(sb) if self.lens != changes::Lens::Transcript => self.changes_top.0 = sb.top,
+            _ => {}
         }
         self.scroll.0 = 0;
     }
@@ -2932,7 +2975,12 @@ impl App {
         if self.view == View::Work {
             self.list_area = body;
             let p = self.p;
-            self.work.draw(f, body, &p, tick(self.started));
+            let split = !self.quick && body.width >= SIDEBAR_MIN_WIDTH;
+            let sb = self
+                .scrollback
+                .as_mut()
+                .filter(|sb| sb.pane.target == "work");
+            self.work.draw(f, body, &p, tick(self.started), split, sb);
         } else if self.view == View::Usage {
             self.list_area = body;
             let profile = match self.profile {
@@ -4377,10 +4425,13 @@ impl App {
                         "⏎",
                         "start a session from it (auto host, claude), or go to its task",
                     ),
-                    ("⌃V", "read its description and comments"),
+                    ("⌃V", "scroll through it: search, copy, jump between files"),
                     ("⌃B", "open it in the browser"),
                     ("⇥", "choose the project"),
                     ("⌃F", "switch between work items and pull requests"),
+                    ("⌃D", "show a pull request's description, diff or commits"),
+                    ("⌃E", "give the highlighted item the whole view"),
+                    ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "list the project again"),
                 ],
             ));
@@ -4606,16 +4657,12 @@ impl App {
             } else {
                 "copy line"
             };
-            draw::hints(
-                p,
-                &[
-                    ("y", select, p.subtle),
-                    ("q", "done", p.subtle),
-                    ("F1", "keys", p.subtle),
-                ],
-                room,
-            )
-            .0
+            let mut keys = vec![("y", select, p.subtle)];
+            if !sb.nav.marks.is_empty() {
+                keys.push(("[ ]", sb.nav.what, p.subtle));
+            }
+            keys.extend([("q", "done", p.subtle), ("F1", "keys", p.subtle)]);
+            draw::hints(p, &keys, room).0
         };
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
         spans.push(Span::raw(
@@ -5011,7 +5058,7 @@ impl App {
         // The Work view's own keys (see work.rs); the rest search and
         // switch views as in the others.
         if self.view == View::Work {
-            return self.run_work_key(k, term);
+            return self.run_work_key(k);
         }
         // The Archive's project chooser has every key, Enter included.
         if self.projects.is_some() {
@@ -5130,7 +5177,9 @@ impl App {
     /// Run what a key in the Work view asks for: start a session from the
     /// highlighted item, show its task, read it or open it; false for the
     /// keys it leaves to the list.
-    fn run_work_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+    fn run_work_key(&mut self, k: KeyEvent) -> bool {
+        // Any other key drops a ctrl-v waiting on the item.
+        self.work.detail.want_scroll = false;
         let page = usize::try_from(self.page()).unwrap_or(1);
         let shown = (self.work.project, self.work.kind);
         let outcome = self.work.key(k, page);
@@ -5161,31 +5210,16 @@ impl App {
                     Err(e) => (e, true),
                 });
             }
-            work::Outcome::Read(link) => {
-                let profile = self
-                    .work
-                    .current()
-                    .map(|p| p.profile.clone())
-                    .unwrap_or_default();
-                let label = self
-                    .work
-                    .current()
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default();
-                self.busy(term, format!("Reading {}…", link.short()));
-                let thread = standalone::item_thread(&link, &profile);
-                match (
-                    thread,
-                    items::Items::new(Default::default(), label, profile, vec![link]),
-                ) {
-                    (Ok(thread), Some(mut i)) => {
-                        self.note = None;
-                        i.reader_only = true;
-                        i.show(thread);
-                        self.items = Some(i);
-                    }
-                    (Err(e), _) => self.note = Some((e, true)),
-                    (Ok(_), None) => {}
+            work::Outcome::Scroll => {
+                let link = self.work.selected_link();
+                if self.work.detail.visible && !self.work.detail.busy(link.as_ref()) {
+                    self.enter_scrollback(None);
+                } else {
+                    // No room beside the list, or still reading: give it
+                    // the view, then scroll once it is drawn and has come
+                    // (see `take_work`).
+                    self.work.detail.expanded |= !self.work.detail.visible;
+                    self.work.detail.want_scroll = true;
                 }
             }
             work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
@@ -5219,6 +5253,26 @@ impl App {
     fn take_work(&mut self) {
         if self.work.receive() && self.view == View::Work {
             self.refilter();
+        }
+        if self.view == View::Work {
+            self.work.poll_detail();
+            // Scrollback is for one item and lens.
+            let want = self.work.selected_link().map(|l| self.work.detail.pane(&l));
+            if self
+                .scrollback
+                .as_ref()
+                .is_some_and(|sb| sb.pane.target == "work" && Some(&sb.pane) != want.as_ref())
+            {
+                self.leave_scrollback();
+            }
+            // Once its side is drawn and has come, if ctrl-v asked first.
+            if self.work.detail.want_scroll
+                && self.work.detail.visible
+                && !self.work.detail.busy(self.work.selected_link().as_ref())
+            {
+                self.work.detail.want_scroll = false;
+                self.enter_scrollback(None);
+            }
         }
         let mut done = Vec::new();
         self.launching.retain(|l| match l.rx.try_recv() {

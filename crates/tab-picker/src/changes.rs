@@ -20,6 +20,7 @@ use switchyard_ui::draw::str_width;
 
 use crate::model::age;
 use crate::preview::{self, Pane};
+use crate::scrollback::Nav;
 
 /// How often the shown changes are fetched again: Git over SSH is slower
 /// than a log read, and a diff changes less often than a transcript.
@@ -83,7 +84,7 @@ struct Data {
 pub struct Changes {
     pub pane: Pane,
     data: Result<Data, String>,
-    drawn: Option<(Lens, u16, Vec<Line<'static>>)>,
+    drawn: Option<(Lens, u16, Vec<Line<'static>>, Nav)>,
 }
 
 /// A `changes` paste's body: the tab's header line, then core's JSON.
@@ -107,6 +108,23 @@ pub fn parse(body: &str) -> Option<Changes> {
         data,
         drawn: None,
     })
+}
+
+/// Changes from core's JSON with no tab: a pull request's, for the Work
+/// view.
+pub fn from_value(v: &Value) -> Changes {
+    Changes {
+        pane: Pane {
+            target: String::new(),
+            session: String::new(),
+            window: String::new(),
+        },
+        data: match v["error"].as_str() {
+            Some(e) => Err(e.to_string()),
+            None => Ok(data(v)),
+        },
+        drawn: None,
+    }
 }
 
 fn data(v: &Value) -> Data {
@@ -152,20 +170,29 @@ impl Changes {
         if self
             .drawn
             .as_ref()
-            .is_none_or(|(l, w, _)| *l != lens || *w != width)
+            .is_none_or(|(l, w, _, _)| *l != lens || *w != width)
         {
             let w = usize::from(width).max(1);
-            let lines = match lens {
-                Lens::Commits => commit_lines(data, w, now, p),
+            let (lines, nav) = match lens {
+                Lens::Commits => (commit_lines(data, w, now, p), Nav::default()),
                 _ => diff_lines(data, w, p),
             };
-            self.drawn = Some((lens, width, lines));
+            self.drawn = Some((lens, width, lines, nav));
         }
         Ok(self
             .drawn
             .as_ref()
-            .map(|(_, _, l)| l.as_slice())
+            .map(|(_, _, l, _)| l.as_slice())
             .unwrap_or_default())
+    }
+
+    /// Where the lines last drawn by `lines` jump to: in the diff, each
+    /// file's patch, from its row in the list too (see scrollback's `Nav`).
+    pub fn nav(&self) -> Nav {
+        self.drawn
+            .as_ref()
+            .map(|(_, _, _, n)| n.clone())
+            .unwrap_or_default()
     }
 
     /// What the lens shows, in brief, for the line over it: the branch
@@ -202,9 +229,14 @@ fn plural(n: u64, what: &str) -> String {
 }
 
 /// The changed files with their line counts, then the patch: a band per
-/// file, hunk headers, and added and removed lines in their colors.
-fn diff_lines(d: &Data, width: usize, p: &Palette) -> Vec<Line<'static>> {
+/// file, hunk headers, and added and removed lines in their colors; with
+/// each band's line as a section, which the file's row jumps to.
+fn diff_lines(d: &Data, width: usize, p: &Palette) -> (Vec<Line<'static>>, Nav) {
     let mut out: Vec<Line<'static>> = Vec::new();
+    let mut nav = Nav {
+        what: "files",
+        ..Nav::default()
+    };
     if d.files.is_empty() {
         let what = if d.branch.is_empty() {
             "HEAD".to_string()
@@ -215,7 +247,7 @@ fn diff_lines(d: &Data, width: usize, p: &Palette) -> Vec<Line<'static>> {
             format!("No changes on {what} since {}", d.base),
             Style::new().fg(p.muted),
         ));
-        return out;
+        return (out, nav);
     }
     let num = |n: u64, sign: char| format!("{sign}{n}");
     let wa = d
@@ -263,6 +295,10 @@ fn diff_lines(d: &Data, width: usize, p: &Palette) -> Vec<Line<'static>> {
         if let Some(rest) = line.strip_prefix("diff --git ") {
             out.push(Line::default());
             let path = rest.rsplit_once(" b/").map_or(rest, |(_, b)| b);
+            nav.marks.push(out.len());
+            if let Some(row) = d.files.iter().position(|f| f.path == path) {
+                nav.jumps.push((row, out.len()));
+            }
             let pad = width.saturating_sub(str_width(path) + 1);
             out.push(Line::styled(format!(" {path}{}", " ".repeat(pad)), band));
             continue;
@@ -289,11 +325,11 @@ fn diff_lines(d: &Data, width: usize, p: &Palette) -> Vec<Line<'static>> {
     if d.truncated {
         out.push(Line::default());
         out.push(Line::styled(
-            "… the diff goes on; open the task to see the rest",
+            "… the diff goes on past what is shown",
             Style::new().fg(p.muted),
         ));
     }
-    out
+    (out, nav)
 }
 
 /// The uncommitted changes, when there are any, then the commits on the
@@ -400,6 +436,10 @@ mod tests {
             c.summary(Lens::Diff).unwrap(),
             "main…feature/x · 2 files +3 −1"
         );
+        // a.txt's band is a section, and its row in the list jumps there;
+        // new.txt has no patch here.
+        let nav = c.nav();
+        assert_eq!((nav.marks, nav.jumps), (vec![3], vec![(0, 3)]));
     }
 
     #[test]

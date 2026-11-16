@@ -19,9 +19,15 @@
 //! On the highlighted item: Enter starts a session from it (auto host,
 //! claude, named from the item; see core's `launch`), in the background,
 //! switching to Inbox, which highlights the session once it lists, or on
-//! a dimmed item jumps to its task; ctrl-v reads it in place (the
-//! work items float's reader, see items.rs); ctrl-b opens it in the
-//! browser. This holds the view's state and keys; `standalone_key` runs
+//! a dimmed item jumps to its task; ctrl-b opens it in the browser.
+//!
+//! With room, the view splits: the list on the left and the highlighted
+//! item on the right, its description and comments, and for a pull
+//! request its diff and commits with ctrl-d (see detail.rs). ctrl-e gives
+//! the right side the whole view, where the arrows scroll it; shift and
+//! the arrows scroll it beside the list. ctrl-v moves the keys into it as
+//! scrollback, giving it the whole view first when there is no room
+//! beside the list. This holds the view's state and keys; `standalone_key` runs
 //! what they ask for (see `Outcome`).
 
 use std::collections::{HashMap, HashSet};
@@ -43,7 +49,9 @@ use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::SPINNER;
 use switchyard_ui::popup;
 
+use crate::detail::Detail;
 use crate::model::{Link, Task, age, now};
+use crate::scrollback::Scrollback;
 
 /// Marks an item an open task links to, on its row and the head line's
 /// count.
@@ -57,6 +65,9 @@ const MAX_LABEL: usize = 16;
 const MIN_TITLE: usize = 32;
 /// The narrowest labels are cut to before a row drops them.
 const MIN_LABELS: usize = 6;
+/// The list's width range when the view splits (two fifths of it).
+const LIST_MIN: u16 = 40;
+const LIST_MAX: u16 = 72;
 
 /// What the view lists for a project: its work items, or its pull
 /// requests.
@@ -135,8 +146,8 @@ pub enum Outcome {
     },
     /// Show the linked task's tab.
     Go(Linked),
-    /// Read the item in place.
-    Read(Link),
+    /// Move the keys into the highlighted item's side, as scrollback.
+    Scroll,
     /// Open the URL in the browser here.
     Open(String),
     /// Why the key does nothing here, for the footer.
@@ -162,6 +173,8 @@ pub struct Work {
     pub chooser: Option<Chooser>,
     /// Items a launch is starting from, by URL, until a task links them.
     pub starting: HashSet<String>,
+    /// The highlighted item's side (see detail.rs).
+    pub detail: Detail,
 }
 
 impl Default for Work {
@@ -181,6 +194,7 @@ impl Default for Work {
             offset: 0,
             chooser: None,
             starting: HashSet::new(),
+            detail: Detail::default(),
         }
     }
 }
@@ -322,9 +336,27 @@ impl Work {
         any
     }
 
-    /// Whether a listing is under way, for the spinner.
+    /// Whether a listing or the highlighted item's fetch is under way,
+    /// for the spinner.
     pub fn loading(&self) -> bool {
         matches!(self.listing(), Some(Listing::Loading))
+            || self.detail.busy(self.selected_link().as_ref())
+    }
+
+    /// Take the right side's fetches and start what the highlighted item
+    /// needs (see detail.rs).
+    pub fn poll_detail(&mut self) {
+        let link = self.selected_link();
+        let profile = self
+            .current()
+            .map(|p| p.profile.clone())
+            .unwrap_or_default();
+        self.detail.poll(link.as_ref(), &profile);
+    }
+
+    /// The highlighted item as a link.
+    pub fn selected_link(&self) -> Option<Link> {
+        self.selected_item().map(item_link)
     }
 
     /// Rebuild the rows for the search and the open tasks' links, keeping
@@ -440,6 +472,7 @@ impl Work {
             return self.chooser_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let last = self.rows.len().saturating_sub(1);
         let page = page.max(1);
         match k.code {
@@ -460,6 +493,34 @@ impl Work {
             }
             KeyCode::Char('r') if ctrl => {
                 self.load(true);
+                self.detail.forget();
+                Outcome::Stay
+            }
+            KeyCode::Char('d') if ctrl => match self.selected_link() {
+                Some(l) => match self.detail.cycle(&l) {
+                    Ok(_) => Outcome::Stay,
+                    Err(why) => Outcome::Refuse(why),
+                },
+                None => Outcome::Stay,
+            },
+            KeyCode::Char('e') if ctrl => {
+                self.detail.expanded = !self.detail.expanded;
+                Outcome::Stay
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+                if shift || self.detail.expanded =>
+            {
+                let page = self.detail.page();
+                self.detail.scroll(match k.code {
+                    KeyCode::Up => -1,
+                    KeyCode::Down => 1,
+                    KeyCode::PageUp => -page,
+                    _ => page,
+                });
+                Outcome::Stay
+            }
+            KeyCode::Home | KeyCode::End if self.detail.expanded => {
+                self.detail.edge(k.code == KeyCode::End);
                 Outcome::Stay
             }
             KeyCode::Char('f') if ctrl => {
@@ -476,13 +537,18 @@ impl Work {
             KeyCode::End => self.step(last),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('v') if ctrl => match self.selected_item() {
-                Some(item) => Outcome::Read(item_link(item)),
+                Some(_) => Outcome::Scroll,
                 None => Outcome::Stay,
             },
             KeyCode::Char('b') if ctrl => match self.selected_item() {
                 Some(item) => Outcome::Open(item.url.clone()),
                 None => Outcome::Stay,
             },
+            // Searching brings back the list it searches.
+            KeyCode::Char(_) if !ctrl => {
+                self.detail.expanded = false;
+                Outcome::Pass
+            }
             _ => Outcome::Pass,
         }
     }
@@ -585,8 +651,19 @@ impl Work {
             None => {}
         }
         if self.selected_row().is_some() {
-            h.extend([("⌃V", "read"), ("⌃B", "open")]);
+            h.extend([("⌃V", "scroll"), ("⌃B", "open")]);
         }
+        if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
+            h.push(("⌃D", self.detail.lens_for(&l).next().name()));
+        }
+        h.push((
+            "⌃E",
+            if self.detail.expanded {
+                "list"
+            } else {
+                "expand"
+            },
+        ));
         h.push(match self.kind {
             Kind::Items => ("⌃F", "PRs"),
             Kind::Prs => ("⌃F", "work items"),
@@ -595,14 +672,64 @@ impl Work {
         h
     }
 
-    /// The view: a line naming the project and what it lists, then the
-    /// rows, free items first and those with a task dimmed under a
-    /// heading, and a blank line above the footer; the project chooser
-    /// over them while it's open.
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, p: &Palette, tick: usize) {
+    /// The view: the list, with the highlighted item beside it when
+    /// `split` (there is room) or over it when expanded (see detail.rs);
+    /// the project chooser over them while it's open.
+    pub fn draw(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        p: &Palette,
+        tick: usize,
+        split: bool,
+        sb: Option<&mut Scrollback>,
+    ) {
+        self.detail.visible = false;
         if area.height < 4 {
             return;
         }
+        let link = self.selected_link();
+        let body = Rect {
+            height: area.height - 1,
+            ..area
+        };
+        // Expanded, with nothing highlighted (listing, or no match), the
+        // list says why.
+        if self.detail.expanded && link.is_some() {
+            self.detail.draw(f, body, p, link.as_ref(), now(), sb);
+        } else if split {
+            let w = (area.width * 2 / 5).clamp(LIST_MIN, LIST_MAX);
+            let list = Rect { width: w, ..area };
+            let gap = Rect {
+                x: area.x + w,
+                width: 3,
+                ..body
+            };
+            let side = Rect {
+                x: gap.x + gap.width,
+                width: area.width.saturating_sub(w + gap.width),
+                ..body
+            };
+            self.draw_list(f, list, p, tick);
+            let buf = f.buffer_mut();
+            for y in gap.y..gap.y + gap.height {
+                buf[(gap.x + 1, y)]
+                    .set_symbol("│")
+                    .set_style(Style::new().fg(p.hl_med));
+            }
+            self.detail.draw(f, side, p, link.as_ref(), now(), sb);
+        } else {
+            self.draw_list(f, area, p, tick);
+        }
+        if self.chooser.is_some() {
+            self.draw_chooser(f, area, p);
+        }
+    }
+
+    /// The list: a line naming the project and what it lists, then the
+    /// rows, free items first and those with a task dimmed under a
+    /// heading, and a blank line above the footer.
+    fn draw_list(&mut self, f: &mut Frame, area: Rect, p: &Palette, tick: usize) {
         let head = Rect { height: 1, ..area };
         let list = Rect {
             y: area.y + 2,
@@ -611,9 +738,6 @@ impl Work {
         };
         f.render_widget(self.head_line(p, tick), head);
         self.draw_rows(f, list, p, tick);
-        if self.chooser.is_some() {
-            self.draw_chooser(f, area, p);
-        }
     }
 
     fn head_line(&self, p: &Palette, tick: usize) -> Line<'static> {
@@ -1016,6 +1140,88 @@ mod tests {
         w
     }
 
+    #[test]
+    fn a_pull_requests_diff_shows_beside_the_list_and_scrollback_jumps_between_files() {
+        use ratatui::{Terminal, backend::TestBackend};
+        use std::fmt::Write as _;
+        let url = "https://github.com/o/r/pull/5";
+        let mut w = work();
+        w.kind = Kind::Prs;
+        w.lists.insert(
+            ("sy".into(), Kind::Prs),
+            Listing::Ready(OpenItems {
+                noun: "pull requests",
+                items: vec![OpenItem {
+                    number: 5,
+                    title: "Five".into(),
+                    url: url.into(),
+                    ..OpenItem::default()
+                }],
+            }),
+        );
+        w.refilter("", &[]);
+        let mut patch = String::new();
+        for f in ["one.rs", "two.rs"] {
+            let _ = write!(patch, "diff --git a/{f} b/{f}\n@@ -1 +1,30 @@\n");
+            for i in 0..30 {
+                let _ = writeln!(patch, "+{f} line {i}");
+            }
+        }
+        w.detail.put_changes(
+            url,
+            &serde_json::json!({
+                "base": "main", "branch": "feature/x", "dirty": 0, "commits": [],
+                "files": [
+                    {"path": "one.rs", "added": 30, "removed": 0},
+                    {"path": "two.rs", "added": 30, "removed": 0}
+                ],
+                "patch": patch, "truncated": false,
+            }),
+        );
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_d, 10), Outcome::Stay);
+        let p = Palette::load();
+        let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
+        let mut screen = |w: &mut Work, sb: Option<&mut Scrollback>| {
+            terminal
+                .draw(|f| w.draw(f, f.area(), &p, 0, true, sb))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let rows = screen(&mut w, None);
+        assert!(rows[0].contains("Description  Diff  Commits"), "{rows:#?}");
+        assert!(
+            rows.iter().any(|r| r.contains("#5") && r.contains("+30")),
+            "{rows:#?}"
+        );
+        let link = w.selected_link().unwrap();
+        let (lines, nav) = w.detail.text(&link, &p, 0).unwrap();
+        assert_eq!(nav.marks.len(), 2);
+        let mut sb = Scrollback::new(w.detail.pane(&link), lines.len(), 10);
+        sb.cursor = 0;
+        sb.nav = nav;
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        // Enter on two.rs in the file list goes to its patch.
+        sb.key(key(KeyCode::Down), &lines, 10);
+        assert_eq!(sb.key(enter, &lines, 10), crate::scrollback::Outcome::Stay);
+        let rows = screen(&mut w, Some(&mut sb));
+        assert!(rows[2].contains("two.rs"), "{rows:#?}");
+        // And `[` back to one.rs's.
+        sb.key(key(KeyCode::Char('[')), &lines, 10);
+        let rows = screen(&mut w, Some(&mut sb));
+        assert!(
+            rows[2].contains("one.rs") && !rows[2].contains('+'),
+            "{rows:#?}"
+        );
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -1135,13 +1341,7 @@ mod tests {
         let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
         assert_eq!(w.key(ctrl_l, 10), Outcome::Pass);
         let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
-        match w.key(ctrl_v, 10) {
-            Outcome::Read(l) => assert_eq!(
-                (l.kind.as_str(), l.system.as_str(), l.reference.as_str()),
-                ("card", "fizzy", "3")
-            ),
-            o => panic!("{o:?}"),
-        }
+        assert_eq!(w.key(ctrl_v, 10), Outcome::Scroll);
     }
 
     #[test]

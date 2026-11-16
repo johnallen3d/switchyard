@@ -9,11 +9,14 @@
 //! - `j`/`k` or the arrows move a line; `ctrl-d`/`ctrl-u` half a page;
 //!   `ctrl-f`/`ctrl-b` or the page keys a page; `{`/`}` to the blank line
 //!   before or after (between turns); `g`/`G` or Home/End to the ends.
+//! - `]`/`[` jump to the next or previous section the text marks (see
+//!   `Nav`): a diff's files, a work item's comments. Enter on a row that
+//!   names one, such as a file in a diff's list, jumps to it.
 //! - `/` searches forward and `?` back, ignoring case unless the query has
 //!   a capital; `n` repeats it, `N` the other way.
 //! - `v`, `V` or Space starts a selection at the cursor (again: drops it);
-//!   `y` or Enter copies the markdown it was drawn from (or the cursor
-//!   line's) and leaves.
+//!   `y` or Enter (elsewhere than on a jump) copies the markdown it was
+//!   drawn from (or the cursor line's) and leaves.
 //! - Escape drops the selection, then the search, then leaves; `q`, ctrl-c
 //!   and ctrl-v again leave.
 
@@ -33,6 +36,16 @@ pub enum Outcome {
     /// Copy these lines (an inclusive range) and leave; the picker copies
     /// the markdown they were drawn from (see `Preview::source`).
     Copy(usize, usize),
+}
+
+/// Where the text's sections start, for `]` and `[`, and the rows that
+/// name a section, for Enter: (row, the line it jumps to). `what` names the
+/// sections for the footer (`files`, `comments`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Nav {
+    pub marks: Vec<usize>,
+    pub jumps: Vec<(usize, usize)>,
+    pub what: &'static str,
 }
 
 /// A search query being typed after `/` or `?`.
@@ -56,6 +69,8 @@ pub struct Scrollback {
     len: usize,
     /// Why the last search or copy came to nothing, for the footer.
     pub note: Option<String>,
+    /// The text's sections, as the picker last gave them.
+    pub nav: Nav,
 }
 
 impl Scrollback {
@@ -70,6 +85,7 @@ impl Scrollback {
             found: None,
             len,
             note: None,
+            nav: Nav::default(),
         };
         s.sync(len, height);
         s
@@ -163,6 +179,13 @@ impl Scrollback {
                     query: String::new(),
                 });
             }
+            KeyCode::Char(']') => self.jump(true),
+            KeyCode::Char('[') => self.jump(false),
+            KeyCode::Enter if self.anchor.is_none() && self.jump_at().is_some() => {
+                if let Some(to) = self.jump_at() {
+                    self.land(to);
+                }
+            }
             KeyCode::Char('n') => self.repeat(lines, false),
             KeyCode::Char('N') => self.repeat(lines, true),
             KeyCode::Char('v' | 'V' | ' ') => {
@@ -187,6 +210,51 @@ impl Scrollback {
             _ => {}
         }
         Outcome::Stay
+    }
+
+    /// The line the cursor's row jumps to, if it names a section.
+    fn jump_at(&self) -> Option<usize> {
+        self.nav
+            .jumps
+            .iter()
+            .find(|(row, _)| *row == self.cursor)
+            .map(|&(_, to)| to)
+    }
+
+    /// To the next (or previous) section's start, or say there is none.
+    fn jump(&mut self, forward: bool) {
+        let to = if forward {
+            self.nav.marks.iter().copied().find(|&m| m > self.cursor)
+        } else {
+            self.nav
+                .marks
+                .iter()
+                .copied()
+                .rev()
+                .find(|&m| m < self.cursor)
+        };
+        match to {
+            Some(m) => self.land(m),
+            None if self.nav.marks.is_empty() => {
+                self.note = Some("nothing here to jump between".into());
+            }
+            None => {
+                let what = if self.nav.what.is_empty() {
+                    "sections"
+                } else {
+                    self.nav.what
+                };
+                let edge = if forward { "after" } else { "before" };
+                self.note = Some(format!("no {what} {edge} this"));
+            }
+        }
+    }
+
+    /// The cursor on `line`, shown at the top of the view; sync keeps it
+    /// within the text.
+    fn land(&mut self, line: usize) {
+        self.cursor = line;
+        self.top = line;
     }
 
     fn go(&mut self, delta: isize, last: usize) {
@@ -472,6 +540,34 @@ mod tests {
                 ("d".into(), false)
             ]
         );
+    }
+
+    #[test]
+    fn brackets_jump_between_sections_and_enter_follows_a_row() {
+        let lines: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        let mut sb = Scrollback::new(pane(), lines.len(), 10);
+        sb.cursor = 0;
+        sb.sync(lines.len(), 10);
+        sb.nav = Nav {
+            marks: vec![5, 20],
+            jumps: vec![(1, 20)],
+            what: "files",
+        };
+        sb.key(key(']'), &lines, 10);
+        assert_eq!((sb.cursor, sb.top), (5, 5));
+        sb.key(key(']'), &lines, 10);
+        sb.sync(lines.len(), 10);
+        assert_eq!((sb.cursor, sb.top), (20, 20));
+        sb.key(key(']'), &lines, 10);
+        assert_eq!(sb.note.as_deref(), Some("no files after this"));
+        sb.key(key('['), &lines, 10);
+        assert_eq!(sb.cursor, 5);
+        sb.cursor = 1;
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(sb.key(enter, &lines, 10), Outcome::Stay);
+        assert_eq!(sb.cursor, 20);
+        // Elsewhere, Enter still copies.
+        assert_eq!(sb.key(enter, &lines, 10), Outcome::Copy(20, 20));
     }
 
     #[test]
