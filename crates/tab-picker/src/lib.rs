@@ -461,6 +461,9 @@ struct Reply {
     prompt: PromptBox,
     /// Where Up and Down have stepped to in the session's earlier messages.
     history: history::History,
+    /// The suggestion Tab or Right took into the box, which Tab may leave
+    /// while the box still holds it unedited: it shows again as ghost text.
+    taken: Option<String>,
 }
 
 /// Text rows the reply box grows between; longer messages scroll.
@@ -2141,6 +2144,7 @@ impl App {
             label,
             prompt: PromptBox::new(),
             history: history::History::default(),
+            taken: None,
         });
     }
 
@@ -2203,7 +2207,8 @@ impl App {
     /// Keys while the reply box has focus: edit it (alt- or shift-Enter for
     /// a newline), scroll the preview with the page keys or shift and the
     /// arrows, Enter (see `finish_reply`), or Escape to leave it (Tab too,
-    /// while it's empty and shows no suggestion; see `reply_suggestion`).
+    /// while it's empty and shows no suggestion, or holds only the one Tab
+    /// took; see `reply_suggestion`).
     /// ctrl-c clears the message, then leaves the box;
     /// ctrl-g edits it in the editor (see `edit_reply`).
     fn reply_key(&mut self, k: KeyEvent) {
@@ -2248,11 +2253,13 @@ impl App {
             .filter(|_| k.modifiers.is_empty() && matches!(k.code, KeyCode::Tab | KeyCode::Right))
         {
             r.prompt.set_text(&g);
+            r.taken = Some(g);
             return;
         }
+        let untouched = r.prompt.is_empty() || r.taken.as_deref() == Some(&*r.prompt.text());
         match k.code {
             KeyCode::Esc => self.close_reply(),
-            KeyCode::Tab | KeyCode::BackTab if r.prompt.is_empty() => self.close_reply(),
+            KeyCode::Tab | KeyCode::BackTab if untouched => self.close_reply(),
             KeyCode::Tab | KeyCode::BackTab => {}
             KeyCode::Enter if newline => r.prompt.field.insert_newline(),
             KeyCode::Enter => self.finish_reply(),
@@ -6436,6 +6443,27 @@ mod tests {
         app.set_view(View::Archive);
         app.key(ctrl('s'));
         assert!(app.snooze.is_none());
+    }
+
+    #[test]
+    fn tab_leaves_a_box_holding_only_the_suggestion_it_took() {
+        let mut app = inbox_with_lifecycle();
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // Tab 3 is idle, so the box shows its suggestion.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(3));
+        app.preview = preview::parse("local/s/d\n{\"entries\":[],\"suggestion\":\"run it\"}");
+        app.key(plain(KeyCode::Tab));
+        app.key(plain(KeyCode::Tab));
+        assert_eq!(app.reply.as_ref().unwrap().prompt.text(), "run it");
+        // Tab leaves the box while it holds the suggestion unedited.
+        app.key(plain(KeyCode::Tab));
+        assert!(app.reply.is_none());
+        // Once edited, it keeps the message.
+        app.key(plain(KeyCode::Tab));
+        app.key(plain(KeyCode::Tab));
+        app.key(plain(KeyCode::Char('!')));
+        app.key(plain(KeyCode::Tab));
+        assert_eq!(app.reply.as_ref().unwrap().prompt.text(), "run it!");
     }
 
     #[test]
