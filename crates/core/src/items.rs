@@ -2,7 +2,8 @@
 //! from: the open cards on its Fizzy board (`fizzy card list`) or the open
 //! issues in its GitHub repo (`gh issue list` under the project's profile),
 //! whichever its tracker says a bare `#42` is (see links' `Tracker` and
-//! `tracker_or_fizzy`).
+//! `tracker_or_fizzy`); or its GitHub repo's open pull requests
+//! (`gh pr list`, see `list_prs`).
 //!
 //! Listing runs where the picker does, so its checkout's `.fizzy.yaml` is
 //! read there. Each CLI call is bounded; a missing, unauthenticated or slow
@@ -38,6 +39,13 @@ pub struct OpenItem {
     pub labels: Vec<String>,
     /// Who it's assigned to: names (Fizzy) or logins (GitHub).
     pub assignees: Vec<String>,
+    /// A pull request's author's login; empty for cards and issues.
+    pub author: String,
+    /// A pull request is a draft.
+    pub draft: bool,
+    /// A pull request's review decision as GitHub gives it (`APPROVED`,
+    /// `CHANGES_REQUESTED`, `REVIEW_REQUIRED`), or empty.
+    pub review: String,
 }
 
 /// A project's open items and what they are (`cards` or `issues`).
@@ -114,6 +122,42 @@ pub fn list_open(project: &Project) -> Result<OpenItems, String> {
     })
 }
 
+/// The open pull requests of `project`'s GitHub repo (its tracker's, else
+/// its clone URL's), as this host's `gh` sees them under its profile.
+///
+/// # Errors
+///
+/// Fails when the project names no GitHub repo, or `gh` fails or gives
+/// output that can't be parsed.
+pub fn list_prs(project: &Project) -> Result<OpenItems, String> {
+    let tracker = Tracker::new(&project.tracker, &project.clone_url);
+    let repo = tracker
+        .github
+        .as_deref()
+        .ok_or("the project names no GitHub repo")?;
+    let limit = LIST_LIMIT.to_string();
+    let out = gh(
+        &project.profile,
+        &[
+            "pr",
+            "list",
+            "-R",
+            repo,
+            "--state",
+            "open",
+            "--limit",
+            &limit,
+            "--json",
+            "number,title,url,createdAt,labels,assignees,author,isDraft,reviewDecision",
+        ],
+    )
+    .ok_or("gh pr list failed")?;
+    Ok(OpenItems {
+        noun: "pull requests",
+        items: parse(&out)?,
+    })
+}
+
 /// The board the checkout at `path` (here) names in its `.fizzy.yaml`, as
 /// `ACCOUNT/BOARD`, or empty.
 fn local_board(path: &str) -> String {
@@ -170,6 +214,9 @@ fn parse(json: &str) -> Result<Vec<OpenItem>, String> {
                     &i["tags"]
                 }),
                 assignees: names(&i["assignees"]),
+                author: i["author"]["login"].as_str().unwrap_or("").to_string(),
+                draft: i["isDraft"].as_bool().unwrap_or(false),
+                review: i["reviewDecision"].as_str().unwrap_or("").to_string(),
             })
         })
         .take(LIST_LIMIT)
@@ -208,6 +255,7 @@ mod tests {
                     created: rfc3339_secs("2026-11-07T15:40:18Z"),
                     labels: vec!["bug".into()],
                     assignees: vec!["octo".into()],
+                    ..OpenItem::default()
                 },
             ]
         );
@@ -220,6 +268,17 @@ mod tests {
         assert_eq!(card[0].labels, ["feature"]);
         assert_eq!(card[0].assignees, ["John Allen"]);
         assert!(card[0].created.is_some());
+        // GitHub's pull request shape.
+        let pr = parse(
+            r#"[{"number": 5, "title": "t", "url": "https://github.com/o/r/pull/5",
+                 "author": {"login": "octo", "name": "Octo"}, "isDraft": true,
+                 "reviewDecision": "APPROVED", "labels": [], "assignees": []}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (pr[0].author.as_str(), pr[0].draft, pr[0].review.as_str()),
+            ("octo", true, "APPROVED")
+        );
         assert_eq!(parse("[]").unwrap(), [] as [OpenItem; 0]);
         assert!(parse("{\"ok\": false}").is_err());
         assert!(parse("not json").is_err());

@@ -5,7 +5,10 @@
 //! It opens on the highlighted task's project, when that is a catalog
 //! project, else on the last one shown. Tab opens a chooser over the
 //! catalog (type to filter, Enter to switch); ctrl-r lists the project
-//! again. Each project is listed once, in the background, and kept.
+//! again. ctrl-f switches between the work items and the project's GitHub
+//! repo's open pull requests, whose rows show their author, draft and review
+//! state (see `Kind`). Each project's list of each is fetched once, in the
+//! background, and kept.
 //!
 //! Items no open task links to come first. Those an open task links to
 //! follow, dimmed and marked (`TASK_MARK`), under "With a task", each
@@ -54,6 +57,27 @@ const MAX_LABEL: usize = 16;
 const MIN_TITLE: usize = 32;
 /// The narrowest labels are cut to before a row drops them.
 const MIN_LABELS: usize = 6;
+
+/// What the view lists for a project: its work items, or its pull
+/// requests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Kind {
+    #[default]
+    Items,
+    Prs,
+}
+
+impl Kind {
+    fn other(self) -> Self {
+        match self {
+            Kind::Items => Kind::Prs,
+            Kind::Prs => Kind::Items,
+        }
+    }
+}
+
+/// A listing's key: the project's name and what it lists.
+type Key = (String, Kind);
 
 /// A project's listing.
 #[derive(Clone, Debug, PartialEq)]
@@ -127,9 +151,11 @@ pub struct Work {
     catalog_read: bool,
     /// The shown project, an index into `projects`.
     pub project: usize,
-    lists: HashMap<String, Listing>,
-    tx: Sender<(String, Result<OpenItems, String>)>,
-    rx: Receiver<(String, Result<OpenItems, String>)>,
+    /// Whether the view lists work items or pull requests.
+    pub kind: Kind,
+    lists: HashMap<Key, Listing>,
+    tx: Sender<(Key, Result<OpenItems, String>)>,
+    rx: Receiver<(Key, Result<OpenItems, String>)>,
     pub rows: Vec<Row>,
     pub selected: usize,
     offset: usize,
@@ -146,6 +172,7 @@ impl Default for Work {
             catalog_error: None,
             catalog_read: false,
             project: 0,
+            kind: Kind::Items,
             lists: HashMap::new(),
             tx,
             rx,
@@ -209,11 +236,27 @@ impl Work {
     fn show(&mut self, i: usize) {
         if i != self.project {
             self.project = i;
-            // The rows index the last project's items.
-            self.rows.clear();
-            self.selected = 0;
-            self.offset = 0;
+            self.reset();
         }
+    }
+
+    /// Forget the rows, which index the last listing's items.
+    fn reset(&mut self) {
+        self.rows.clear();
+        self.selected = 0;
+        self.offset = 0;
+    }
+
+    /// Switch between work items and pull requests, listing the other when
+    /// it hasn't been.
+    fn switch_kind(&mut self) {
+        self.kind = self.kind.other();
+        self.reset();
+        self.load(false);
+    }
+
+    fn key_of(&self, project: &Project) -> Key {
+        (project.name.clone(), self.kind)
     }
 
     pub fn current(&self) -> Option<&Project> {
@@ -222,7 +265,7 @@ impl Work {
 
     /// The shown project's listing.
     pub fn listing(&self) -> Option<&Listing> {
-        self.lists.get(&self.current()?.name)
+        self.lists.get(&self.key_of(self.current()?))
     }
 
     fn items(&self) -> &[OpenItem] {
@@ -238,29 +281,37 @@ impl Work {
         let Some(project) = self.current().cloned() else {
             return;
         };
-        if !again && self.lists.contains_key(&project.name) {
+        let key = self.key_of(&project);
+        if !again && self.lists.contains_key(&key) {
             return;
         }
-        if matches!(self.lists.get(&project.name), Some(Listing::Loading)) {
+        if matches!(self.lists.get(&key), Some(Listing::Loading)) {
             return;
         }
-        self.lists.insert(project.name.clone(), Listing::Loading);
+        self.lists.insert(key.clone(), Listing::Loading);
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let got = switchyard_core::items::list_open(&project);
-            let _ = tx.send((project.name, got));
+            let got = match key.1 {
+                Kind::Items => switchyard_core::items::list_open(&project),
+                Kind::Prs => switchyard_core::items::list_prs(&project),
+            };
+            let _ = tx.send((key, got));
         });
     }
 
     /// Take finished listings; whether any came.
     pub fn receive(&mut self) -> bool {
         let mut any = false;
-        while let Ok((name, got)) = self.rx.try_recv() {
+        while let Ok((key, got)) = self.rx.try_recv() {
             if let Err(e) = &got {
-                switchyard_core::rex::log(&format!("work items for {name}: {e}"));
+                let what = match key.1 {
+                    Kind::Items => "work items",
+                    Kind::Prs => "pull requests",
+                };
+                switchyard_core::rex::log(&format!("{what} for {}: {e}", key.0));
             }
             self.lists.insert(
-                name,
+                key,
                 match got {
                     Ok(items) => Listing::Ready(items),
                     Err(e) => Listing::Failed(e),
@@ -411,6 +462,10 @@ impl Work {
                 self.load(true);
                 Outcome::Stay
             }
+            KeyCode::Char('f') if ctrl => {
+                self.switch_kind();
+                Outcome::Stay
+            }
             KeyCode::Up => self.step(self.selected.saturating_sub(1)),
             KeyCode::Char('p' | 'k') if ctrl => self.step(self.selected.saturating_sub(1)),
             KeyCode::Down => self.step((self.selected + 1).min(last)),
@@ -532,6 +587,10 @@ impl Work {
         if self.selected_row().is_some() {
             h.extend([("⌃V", "read"), ("⌃B", "open")]);
         }
+        h.push(match self.kind {
+            Kind::Items => ("⌃F", "PRs"),
+            Kind::Prs => ("⌃F", "work items"),
+        });
         h.extend([("⇥", "project"), ("?", "keys")]);
         h
     }
@@ -577,8 +636,12 @@ impl Work {
         match self.listing() {
             None | Some(Listing::Loading) => spans.push(Span::styled(
                 format!(
-                    "   {} listing open work items",
-                    SPINNER[tick % SPINNER.len()]
+                    "   {} listing open {}",
+                    SPINNER[tick % SPINNER.len()],
+                    match self.kind {
+                        Kind::Items => "work items",
+                        Kind::Prs => "pull requests",
+                    }
                 ),
                 muted,
             )),
@@ -668,12 +731,12 @@ impl Work {
         }
     }
 
-    /// How wide the assignee column is: the widest shown assignee, so
-    /// ages line up.
+    /// How wide the people column is: the widest shown author or
+    /// assignee, so ages line up.
     fn name_width(&self) -> usize {
         self.items()
             .iter()
-            .map(|i| str_width(&assignee(i)))
+            .map(|i| str_width(&person(i)))
             .max()
             .unwrap_or(0)
     }
@@ -721,8 +784,9 @@ impl Work {
             )),
             (None, false) => None,
         };
+        let state = pr_state(item, p);
         let labels = labels(item);
-        let who = format!("{:>names$}", assignee(item));
+        let who = format!("{:>names$}", person(item));
         let when = item
             .created
             .map(|c| age(now().saturating_sub(c)))
@@ -730,6 +794,9 @@ impl Work {
         // Each part takes its width and a two-cell gap (between parts, or
         // from the title); the line ends one cell in.
         let mut parts: Vec<Span<'static>> = task.into_iter().collect();
+        if let Some((text, fg)) = state {
+            parts.push(Span::styled(text, on(fg)));
+        }
         let mut used = 1 + parts
             .iter()
             .map(|s| str_width(&s.content) + 2)
@@ -844,6 +911,29 @@ fn labels(item: &OpenItem) -> String {
     shown.join(" ")
 }
 
+/// Who a row names: a pull request's author, else whom the item is
+/// assigned to.
+fn person(item: &OpenItem) -> String {
+    if item.author.is_empty() {
+        assignee(item)
+    } else {
+        clip(&item.author, MAX_NAME)
+    }
+}
+
+/// A pull request's state worth a word on its row, and its colour: draft,
+/// or a review decision other than none yet.
+fn pr_state(item: &OpenItem, p: &Palette) -> Option<(String, ratatui::style::Color)> {
+    if item.draft {
+        return Some(("draft".into(), p.muted));
+    }
+    match item.review.as_str() {
+        "APPROVED" => Some(("approved".into(), p.foam)),
+        "CHANGES_REQUESTED" => Some(("changes requested".into(), p.love)),
+        _ => None,
+    }
+}
+
 /// Whom an item is assigned to, briefly: the first assignee's first name
 /// (or login), cut to `MAX_NAME`, and how many more.
 fn assignee(item: &OpenItem) -> String {
@@ -917,7 +1007,7 @@ mod tests {
             ..Work::default()
         };
         w.lists.insert(
-            "sy".into(),
+            ("sy".into(), Kind::Items),
             Listing::Ready(OpenItems {
                 noun: "cards",
                 items: vec![card(3, "Third"), card(2, "Second"), card(1, "First")],
@@ -996,8 +1086,45 @@ mod tests {
         assert!(w.chooser.is_none());
         assert_eq!(w.current().unwrap().name, "other");
         // Listing it has started, and the last project's rows are gone.
-        assert!(w.lists.contains_key("other"));
+        assert!(w.lists.contains_key(&("other".into(), Kind::Items)));
         assert!(w.rows.is_empty() && w.selected_item().is_none());
+    }
+
+    #[test]
+    fn ctrl_f_switches_to_pull_requests_and_back() {
+        let mut w = work();
+        w.lists.insert(
+            ("sy".into(), Kind::Prs),
+            Listing::Ready(OpenItems {
+                noun: "pull requests",
+                items: vec![OpenItem {
+                    number: 8,
+                    title: "A PR".into(),
+                    url: "https://github.com/o/r/pull/8".into(),
+                    author: "octo".into(),
+                    ..OpenItem::default()
+                }],
+            }),
+        );
+        w.refilter("", &[]);
+        let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_f, 10), Outcome::Stay);
+        assert_eq!(w.kind, Kind::Prs);
+        w.refilter("", &[]);
+        let item = w.selected_item().unwrap();
+        assert_eq!((item.number, person(item).as_str()), (8, "octo"));
+        // A task the PR is linked to (as its derived link) takes it.
+        let json = serde_json::json!([{
+            "host": "mac", "session_id": "s", "window_id": "w", "project": "sy",
+            "name": "t", "profile": "personal",
+            "links": [{"kind": "pr", "system": "github", "ref": "o/r#8", "url": ""}],
+        }]);
+        let tasks = crate::model::parse_tasks(&json.to_string()).unwrap();
+        w.refilter("", &tasks);
+        assert!(matches!(w.key(key(KeyCode::Enter), 10), Outcome::Go(_)));
+        w.key(ctrl_f, 10);
+        w.refilter("", &[]);
+        assert_eq!(w.selected_item().unwrap().number, 3);
     }
 
     #[test]

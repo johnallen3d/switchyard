@@ -46,8 +46,8 @@
 //!   shows the transcript, and ctrl-e expands it over the list. ctrl-d
 //!   turns the transcript into the task's diff against its base branch,
 //!   then its commits, then back (see changes.rs).
-//! - Work: one catalog project's open cards or issues, the ones an open
-//!   task links to dimmed; Enter starts a session from the highlighted
+//! - Work: one catalog project's open cards or issues, or with ctrl-f its
+//!   open pull requests, the ones an open task links to dimmed; Enter starts a session from the highlighted
 //!   item, switching to Inbox and highlighting the session once it lists,
 //!   or goes to its task (see work.rs).
 //! - Usage: read-only accounting (see usage.rs).
@@ -3516,6 +3516,7 @@ impl App {
             View::Inbox => "Search tabs, agents, and work items",
             View::Archive => "Search ended tasks",
             View::Usage => "Search accounts, harnesses, models, and hosts",
+            View::Work if self.work.kind == work::Kind::Prs => "Search open pull requests",
             View::Work => "Search open work items",
         };
         if matches!(self.view, View::Usage | View::Work) {
@@ -4379,6 +4380,7 @@ impl App {
                     ("⌃V", "read its description and comments"),
                     ("⌃B", "open it in the browser"),
                     ("⇥", "choose the project"),
+                    ("⌃F", "switch between work items and pull requests"),
                     ("⌃R", "list the project again"),
                 ],
             ));
@@ -5130,7 +5132,14 @@ impl App {
     /// keys it leaves to the list.
     fn run_work_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         let page = usize::try_from(self.page()).unwrap_or(1);
-        match self.work.key(k, page) {
+        let shown = (self.work.project, self.work.kind);
+        let outcome = self.work.key(k, page);
+        // Another project or kind: its listing may already be kept, and no
+        // fetch will come to build its rows.
+        if (self.work.project, self.work.kind) != shown {
+            self.refilter();
+        }
+        match outcome {
             work::Outcome::Pass => return false,
             work::Outcome::Stay => {}
             work::Outcome::Refuse(why) => self.note = Some((why, true)),
