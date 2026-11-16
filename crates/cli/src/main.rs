@@ -37,10 +37,9 @@ const USAGE: &str =
 
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
-ctrl-b (open the task's work item), ctrl-r (work item actions: open,
-comment on or close a Fizzy card, mark a draft PR ready, each confirmed
-first), ctrl-t (pin) and ctrl-s (snooze), staying open until its tab
-is closed. ctrl-h and ctrl-l cycle the views: Inbox, Work (one
+ctrl-b (work item actions: open, read, comment on or close a card
+or issue, mark a draft PR ready, each mutation confirmed first), ctrl-t
+(pin) and ctrl-s (snooze), staying open until its tab is closed. ctrl-h and ctrl-l cycle the views: Inbox, Work (one
 project's open cards or issues, or with ctrl-f its open pull requests,
 to start a session from), Usage, Archive.
 --current highlights that tab (cmd+i and cmd+k pass the tab they were

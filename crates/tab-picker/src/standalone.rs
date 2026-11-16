@@ -6,8 +6,8 @@
 //! host that runs `host_rows.lua` on every server,
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
-//! for the preview (see preview.rs), or its changes (see changes.rs). It acts on Enter, ctrl-b (open the
-//! task's work item), ctrl-r's work item actions (see items.rs), ctrl-t
+//! for the preview (see preview.rs), or its changes (see changes.rs). It acts on Enter, ctrl-b's work
+//! item actions (see items.rs), ctrl-t
 //! (pin), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
 //! stays open, showing the outcome and the data after
@@ -289,7 +289,6 @@ pub struct Pick {
 
 pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (action, target) = pick.split_once(':')?;
-    // A fourth field counts the links ctrl-b chooses from.
     let mut parts = target.split('/');
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Pick {
@@ -365,16 +364,6 @@ pub fn launch(path: &str, url: &str) -> Result<(String, String, String), String>
     r
 }
 
-/// Open the pick's task's main work item in the browser here (the
-/// standalone picker runs where John is); Ok is the URL.
-pub fn open_link(p: &Pick) -> Result<String, String> {
-    let url = actions::act("link", &p.host, &p.session, &p.window)?
-        .trim()
-        .to_string();
-    open_url(&url)?;
-    Ok(url)
-}
-
 /// Open `url` in the browser here.
 pub fn open_url(url: &str) -> Result<(), String> {
     let opener = if cfg!(target_os = "macos") {
@@ -414,7 +403,7 @@ pub fn item_thread(
     r
 }
 
-/// Run a work item action from the ctrl-r float (see core's
+/// Run a work item action from the ctrl-b float (see core's
 /// `item_actions`); after it, forget the item's cached state (a marked PR,
 /// a closed card) and have switchyard-server check again.
 pub fn item_action(

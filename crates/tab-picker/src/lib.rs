@@ -78,11 +78,9 @@
 //! which puts it in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens
 //! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
-//! empty prompt wakes a snoozed one. ctrl-b opens the highlighted task's
-//! work item; task rows show their links as badges grouped by kind. With
-//! several it opens a chooser over them (PRs, cards, then issues).
-//! ctrl-r opens the work items float on the highlighted task's links, even
-//! one: open each, read its description and comments in place, comment
+//! empty prompt wakes a snoozed one. Task rows show their links as badges
+//! grouped by kind. ctrl-b opens the work items float on the highlighted
+//! task's links (PRs, cards, then issues), even one: open each, read its description and comments in place, comment
 //! on a card, issue or PR, close a card or issue, mark a draft PR ready, each
 //! mutation behind its own key and a confirmation naming the item (see
 //! items.rs).
@@ -416,19 +414,6 @@ impl Guide {
     }
 }
 
-/// The ctrl-b chooser over a task's links (see model's `chooser_links`),
-/// open while the task has several.
-struct Chooser {
-    links: Vec<Link>,
-    selected: usize,
-}
-
-impl Chooser {
-    fn url(&self) -> &str {
-        &self.links[self.selected].url
-    }
-}
-
 /// The ctrl-s prompt: when to wake the highlighted task, typed (see
 /// snooze.rs). Empty, it wakes a snoozed task.
 struct Snooze {
@@ -484,12 +469,6 @@ const DETAIL_MSG_ROWS: usize = 3;
 
 /// Work item titles the right side's header shows at most, one a line.
 const DETAIL_LINK_ROWS: usize = 3;
-
-/// The widest a work item's title goes in the ctrl-b chooser.
-const CHOOSER_TITLE_MAX: usize = 60;
-
-/// The least room the chooser shows a link's URL in, after its title.
-const CHOOSER_URL_MIN: usize = 16;
 
 /// A task's links whose titles the right side's header shows.
 fn titled(links: &[Link]) -> impl Iterator<Item = &Link> {
@@ -648,10 +627,6 @@ fn help_float_sections() -> Vec<help::Section> {
             ],
         ),
         Section::new(
-            "Link chooser",
-            &[("⏎", "open"), ("↑↓ j k", "move"), ("esc", "cancel")],
-        ),
-        Section::new(
             "Work items",
             &[
                 ("⏎ o", "open in the browser"),
@@ -663,7 +638,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("r", "mark a draft PR ready (asks first)"),
                 ("⏎ y", "confirm; other keys go back"),
                 ("↑↓ j k", "move"),
-                ("esc ⌃R", "dismiss"),
+                ("esc ⌃B", "dismiss"),
             ],
         ),
         Section::new(
@@ -713,9 +688,7 @@ struct App {
     offset: usize,
     /// What ctrl-x has armed for the selected task; Enter confirms it.
     armed: Armed,
-    /// The open ctrl-b link chooser; Enter opens its pick, Escape closes it.
-    chooser: Option<Chooser>,
-    /// The open ctrl-r work items float (see items.rs).
+    /// The open ctrl-b work items float (see items.rs).
     items: Option<items::Items>,
     /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
@@ -843,7 +816,6 @@ impl App {
             selected: None,
             offset: 0,
             armed: Armed::No,
-            chooser: None,
             items: None,
             snooze: None,
             reply: None,
@@ -972,8 +944,7 @@ impl App {
     fn set_current(&mut self, current: &str) {
         let current = current.trim();
         if current.is_empty() {
-            if self.chooser.is_none()
-                && self.projects.is_none()
+            if self.projects.is_none()
                 && self.items.is_none()
                 && self.snooze.is_none()
                 && self.reply.is_none()
@@ -984,8 +955,7 @@ impl App {
         }
         let (s, w) = current.split_once('/').unwrap_or((current, ""));
         self.current = (s.to_string(), w.to_string());
-        if self.chooser.is_some()
-            || self.projects.is_some()
+        if self.projects.is_some()
             || self.items.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
@@ -1078,8 +1048,7 @@ impl App {
             self.launched = None;
             return;
         }
-        if self.chooser.is_some()
-            || self.projects.is_some()
+        if self.projects.is_some()
             || self.items.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
@@ -1875,7 +1844,6 @@ impl App {
             self.work.open(project.as_deref());
         }
         self.armed = Armed::No;
-        self.chooser = None;
         self.projects = None;
         self.items = None;
         self.snooze = None;
@@ -1906,48 +1874,21 @@ impl App {
                 None => "go",
             },
         };
-        // Several links: ctrl-b opens the chooser rather than the main one.
-        let links = task.map_or(0, |t| chooser_links(&t.links).len());
-        let more = if links > 1 {
-            format!("/{links}")
-        } else {
-            String::new()
-        };
         match item {
             Item::Status(_) => String::new(),
             Item::Tab(t) => {
                 let tab = &self.tabs[t];
                 let s = &self.sessions[tab.session];
-                format!("{action}:{}/{}/{}{more}", s.target, s.id, tab.window_id)
+                format!("{action}:{}/{}/{}", s.target, s.id, tab.window_id)
             }
             Item::Task(k) => {
                 let t = &self.tasks[k];
-                format!(
-                    "{action}:{}/{}/{}{more}",
-                    hex(&t.host),
-                    t.session_id,
-                    t.window_id
-                )
+                format!("{action}:{}/{}/{}", hex(&t.host), t.session_id, t.window_id)
             }
         }
     }
 
-    /// Open the chooser on the selected task's links when it has several;
-    /// whether it opened.
-    fn open_chooser(&mut self) -> bool {
-        let links = self
-            .selected_task()
-            .map(|t| chooser_links(&t.links))
-            .unwrap_or_default();
-        if links.len() < 2 {
-            return false;
-        }
-        self.armed = Armed::No;
-        self.chooser = Some(Chooser { links, selected: 0 });
-        true
-    }
-
-    /// Open the work items float (ctrl-r) on the highlighted task's links,
+    /// Open the work items float (ctrl-b) on the highlighted task's links,
     /// even just one; the footer says why when there are none.
     fn open_items(&mut self) {
         if self.view == View::Usage {
@@ -2094,26 +2035,6 @@ impl App {
         }
         if let Some(z) = &mut self.snooze {
             z.update(now);
-        }
-    }
-
-    /// Keys while the chooser is open: move, or Escape or ctrl-c to close
-    /// it. Enter never gets here (`standalone_key` opens the pick).
-    fn chooser_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(c) = &mut self.chooser else { return };
-        let last = c.links.len() - 1;
-        match k.code {
-            KeyCode::Esc => self.chooser = None,
-            KeyCode::Char('c') if ctrl => self.chooser = None,
-            KeyCode::Char('?') => self.help = Some(help::Help::default()),
-            KeyCode::Up | KeyCode::Char('k') => c.selected = c.selected.saturating_sub(1),
-            KeyCode::Char('p') if ctrl => c.selected = c.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => c.selected = (c.selected + 1).min(last),
-            KeyCode::Char('n') if ctrl => c.selected = (c.selected + 1).min(last),
-            KeyCode::Home => c.selected = 0,
-            KeyCode::End => c.selected = last,
-            _ => {}
         }
     }
 
@@ -2366,9 +2287,6 @@ impl App {
             self.help = Some(help::Help::default());
             return;
         }
-        if self.chooser.is_some() {
-            return self.chooser_key(k);
-        }
         if self.projects.is_some() {
             return self.projects_key(k);
         }
@@ -2505,9 +2423,9 @@ impl App {
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let page = self.page();
         match k.code {
-            // standalone_key acts on ctrl-b and ctrl-t.
+            // standalone_key acts on ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
-            KeyCode::Char('r') if ctrl => self.open_items(),
+            KeyCode::Char('b') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
                 self.expanded = !self.expanded;
@@ -2866,7 +2784,6 @@ impl App {
         if card_h > prompt_box::CHROME_ROWS {
             self.draw_reply(f, card, card_h - prompt_box::CHROME_ROWS);
         }
-        self.draw_chooser(f, main);
         self.draw_projects(f, main);
         self.draw_items(f, main);
         self.draw_snooze(f, main);
@@ -3042,7 +2959,6 @@ impl App {
             self.draw_reply(f, card, rows);
         }
         // Over the reply box, so their backdrop dims it too.
-        self.draw_chooser(f, body);
         self.draw_projects(f, body);
         self.draw_items(f, body);
         self.draw_snooze(f, body);
@@ -3413,69 +3329,13 @@ impl App {
         f.render_widget(line, row);
     }
 
-    /// The ctrl-b chooser, when open: a small box over the list, one link a
-    /// line with its state, title and URL.
     fn draw_projects(&self, f: &mut Frame, area: Rect) {
         if let Some(c) = &self.projects {
             c.draw(f, area, &self.p);
         }
     }
 
-    fn draw_chooser(&self, f: &mut Frame, area: Rect) {
-        let Some(c) = &self.chooser else { return };
-        let p = &self.p;
-        backdrop(f, p);
-        let height = cells(c.links.len()).saturating_add(2);
-        let r = popup::list_rect(area, height);
-        let inner = popup::open(f, r, popup::block(p, "Open link"));
-        for (i, l) in c.links.iter().enumerate().take(inner.height as usize) {
-            let (short, state, url) = (l.name(home_repo(&c.links)), l.badge_state(), &l.url);
-            let selected = i == c.selected;
-            let row = Rect {
-                y: inner.y + cells(i),
-                height: 1,
-                ..inner
-            };
-            if selected {
-                popup::select(f, p, inner, row);
-            }
-            let bg = if selected { p.overlay } else { p.base };
-            let mut style = Style::new().fg(p.text).bg(bg);
-            if selected {
-                style = style.add_modifier(Modifier::BOLD);
-            }
-            let mut spans = vec![Span::styled(short, style)];
-            if let Some((text, tone)) = state {
-                let fg = match tone {
-                    Tone::Merged => p.iris,
-                    Tone::Pass => p.pine,
-                    Tone::Fail => p.love,
-                    Tone::Pending => p.gold,
-                    Tone::Ref | Tone::Muted => p.muted,
-                };
-                spans.push(Span::styled(format!(" {text}"), Style::new().fg(fg).bg(bg)));
-            }
-            if !l.title.is_empty() {
-                let title = preview::clip_width(&l.title, CHOOSER_TITLE_MAX);
-                spans.push(Span::styled(
-                    format!("  {title}"),
-                    Style::new().fg(p.subtle).bg(bg),
-                ));
-            }
-            // The URL in what room the title leaves, unless that is too
-            // little to tell one from another.
-            let room = usize::from(row.width).saturating_sub(Line::from(spans.clone()).width());
-            if room >= CHOOSER_URL_MIN {
-                spans.push(Span::styled(
-                    preview::clip_width(&format!("  {url}"), room),
-                    Style::new().fg(p.muted).bg(bg),
-                ));
-            }
-            f.render_widget(Line::from(spans), row);
-        }
-    }
-
-    /// The ctrl-r work items float, when open (see items.rs).
+    /// The ctrl-b work items float, when open (see items.rs).
     fn draw_items(&mut self, f: &mut Frame, area: Rect) {
         if let Some(i) = &mut self.items {
             i.draw(f, area, &self.p);
@@ -4509,8 +4369,6 @@ impl App {
             Some("Reply box")
         } else if self.snooze.is_some() {
             Some("Snooze prompt")
-        } else if self.chooser.is_some() {
-            Some("Link chooser")
         } else if self.items.is_some() {
             Some("Work items")
         } else {
@@ -4540,22 +4398,8 @@ impl App {
             None if self.selected_item().is_some() => vec![("⏎", "go")],
             None => vec![],
         };
-        // ⌃B opens the task's only work item, or a chooser over several.
-        let links = task.map(|t| chooser_links(&t.links)).unwrap_or_default();
-        match links.as_slice() {
-            [] => {}
-            [link] => row.push((
-                "⌃B",
-                if link.kind == "pr" {
-                    "open PR"
-                } else {
-                    "open link"
-                },
-            )),
-            _ => row.push(("⌃B", "choose a link to open")),
-        }
-        if !links.is_empty() {
-            row.push(("⌃R", "work items: open, read, comment, close, mark ready"));
+        if task.is_some_and(|t| !chooser_links(&t.links).is_empty()) {
+            row.push(("⌃B", "work items: open, read, comment, close, mark ready"));
         }
         if self.view == View::Inbox && self.interruptible() {
             row.push(("⌃C", "interrupt the agent (asks first)"));
@@ -4848,7 +4692,7 @@ impl App {
         f.render_widget(Line::from(spans), area);
     }
 
-    /// The footer's hints for the snooze prompt, work items or link
+    /// The footer's hints for the snooze prompt, work items or project
     /// chooser, when one is open: the one place their keys are shown.
     fn popup_hints(&self) -> Option<Vec<(&'static str, &'static str)>> {
         if let Some(z) = &self.snooze {
@@ -4861,12 +4705,7 @@ impl App {
         if let Some(i) = &self.items {
             return Some(i.hints());
         }
-        if self.projects.is_some() {
-            return Some(projects::Chooser::hints());
-        }
-        self.chooser
-            .as_ref()
-            .map(|_| vec![("⏎", "open"), ("esc", "close"), ("?", "keys")])
+        self.projects.as_ref().map(|_| projects::Chooser::hints())
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
@@ -5080,7 +4919,7 @@ impl App {
         }
     }
 
-    /// The keys that act: Enter, ctrl-b, ctrl-t, and Enter in the
+    /// The keys that act: Enter, ctrl-t, and Enter in the
     /// snooze prompt and reply box; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         // The keys float and scrollback have every key while they last.
@@ -5103,7 +4942,6 @@ impl App {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let open = matches!(k.code, KeyCode::Char('b') if ctrl);
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
         if self.reply.is_some() {
@@ -5118,21 +4956,7 @@ impl App {
             self.pin_selected();
             return true;
         }
-        // The chooser's pick opens on Enter (or ctrl-b again); other keys
-        // move in it.
-        if let Some(c) = &self.chooser {
-            if !open && !matches!(k.code, KeyCode::Enter) {
-                return false;
-            }
-            let url = c.url().to_string();
-            self.chooser = None;
-            self.note = Some(match standalone::open_url(&url) {
-                Ok(()) => (format!("opened {url}"), false),
-                Err(e) => (e, true),
-            });
-            return true;
-        }
-        if !open && !matches!(k.code, KeyCode::Enter) {
+        if !matches!(k.code, KeyCode::Enter) {
             return false;
         }
         self.note = None;
@@ -5140,20 +4964,6 @@ impl App {
             return true;
         };
         let label = self.selected_label();
-        // Open the task's only work item, or the chooser over several;
-        // nothing to refresh after.
-        if open {
-            if self.open_chooser() {
-                return true;
-            }
-            if self.selected_task().is_some() {
-                self.note = Some(match standalone::open_link(&pick) {
-                    Ok(url) => (format!("opened {url}"), false),
-                    Err(e) => (e, true),
-                });
-            }
-            return true;
-        }
         let done = |r: Result<(), String>, msg: String| match r {
             Ok(()) => (msg, false),
             Err(e) => (e, true),
@@ -6652,11 +6462,11 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect();
         assert!(text.contains("? keys"), "{text}");
-        assert!(help_text(&app).contains("⌃B choose a link to open"));
+        assert!(help_text(&app).contains("⌃B work items"));
     }
 
     #[test]
-    fn ctrl_l_chooses_among_several_links_prs_first() {
+    fn picks_carry_no_link_count_and_the_header_shows_titled_items() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
@@ -6664,58 +6474,13 @@ mod tests {
                 {"session_id":"s", "window_id":"a", "name":"many", "status":"done", "links":[
                     {"kind":"issue","system":"github","ref":"o/r#42","url":"https://i"},
                     {"kind":"card","system":"fizzy","ref":"1041","url":"https://c","title":"Work item titles"},
-                    {"kind":"pr","system":"github","ref":"o/r#57","url":"https://p"}]},
-                {"session_id":"s", "window_id":"b", "name":"one", "status":"idle", "links":[
-                    {"kind":"card","system":"fizzy","ref":"1042","url":"https://c2"}]}
+                    {"kind":"pr","system":"github","ref":"o/r#57","url":"https://p"}]}
             ]).to_string()).unwrap();
             app.tasks_load = Tasks::Ready;
         });
-        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        let url = |app: &App| app.chooser.as_ref().map(|c| c.url().to_string());
-        app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
-        // One link: no chooser (standalone_key opens it), and the pick
-        // carries no count.
-        assert_eq!(app.pick(), format!("task:{}/s/b", hex("")));
-        assert!(!app.open_chooser());
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
-        assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
+        assert_eq!(app.pick(), format!("task:{}/s/a", hex("")));
         assert_eq!(standalone::parse_pick(&app.pick()).unwrap().window, "a");
-        assert!(app.open_chooser());
-        // The PR first and selected, so ctrl-b then Enter opens it.
-        assert_eq!(url(&app).as_deref(), Some("https://p"));
-        app.key(plain(KeyCode::Char('j')));
-        assert_eq!(url(&app).as_deref(), Some("https://c"));
-        app.key(plain(KeyCode::Down));
-        app.key(plain(KeyCode::Down));
-        assert_eq!(url(&app).as_deref(), Some("https://i"));
-        app.key(plain(KeyCode::Up));
-        app.key(plain(KeyCode::Char('k')));
-        app.key(plain(KeyCode::Char('k')));
-        assert_eq!(url(&app).as_deref(), Some("https://p"));
-        // Other keys don't type into the search.
-        app.key(plain(KeyCode::Char('x')));
-        assert_eq!(app.query, "");
-        let mut terminal = Terminal::new(TestBackend::new(100, 16)).unwrap();
-        terminal.draw(|f| app.draw(f)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
-            .collect();
-        assert!(
-            text.contains("Open link") && text.contains("card 1041") && text.contains("? keys"),
-            "{text}"
-        );
-        assert!(
-            text.contains("card 1041  Work item titles  https://c"),
-            "{text}"
-        );
-        assert!(help_text(&app).starts_with("Link chooser"));
-        app.key(plain(KeyCode::Esc));
-        assert!(app.chooser.is_none());
-        assert_eq!(app.pick(), format!("task:{}/s/a/3", hex("")));
         // The header shows the titled work item under the name line.
         assert_eq!(app.detail_rows(80), 2);
         let mut terminal = Terminal::new(TestBackend::new(80, 2)).unwrap();
@@ -6731,7 +6496,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_opens_work_items_even_for_one_link_and_asks_before_closing() {
+    fn ctrl_b_opens_work_items_even_for_one_link_and_asks_before_closing() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.deliver(|app| {
@@ -6743,17 +6508,22 @@ mod tests {
             app.tasks_load = Tasks::Ready;
         });
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_b = KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL);
         let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
         app.selected = app.rows.iter().position(|&i| i == Item::Task(1));
-        app.key(ctrl_r);
+        app.key(ctrl_b);
         assert!(app.items.is_none());
         assert_eq!(
             app.note.as_ref().map(|n| n.0.as_str()),
             Some("/none has no linked work items")
         );
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
-        assert!(help_text(&app).contains("⌃R work items"));
+        assert!(help_text(&app).contains("⌃B work items"));
+        assert!(!help_text(&app).contains("⌃R work items"));
+        // ctrl-r is only the Work view's reload now.
         app.key(ctrl_r);
+        assert!(app.items.is_none());
+        app.key(ctrl_b);
         assert!(app.items.is_some());
         // Its letters don't search, and x asks first, naming the card.
         app.key(plain(KeyCode::Char('x')));
@@ -6786,9 +6556,9 @@ mod tests {
         assert!(app.items.as_ref().is_some_and(|i| i.question().is_none()));
         app.key(plain(KeyCode::Esc));
         assert!(app.items.is_none());
-        // ctrl-r again closes it too.
-        app.key(ctrl_r);
-        app.key(ctrl_r);
+        // ctrl-b again closes it too.
+        app.key(ctrl_b);
+        app.key(ctrl_b);
         assert!(app.items.is_none());
     }
 

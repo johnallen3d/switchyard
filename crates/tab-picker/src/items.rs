@@ -1,8 +1,7 @@
-//! The ctrl-r work items float: the highlighted task's linked items, each
+//! The ctrl-b work items float: the highlighted task's linked items, each
 //! with its state, checks and title; what can be done to the highlighted
 //! one is in the footer (see core's `item_actions`).
-//! It is separate from ctrl-b's chooser, which only opens links, and opens
-//! even for a task with one link.
+//! It opens even for a task with one link.
 //!
 //! On the highlighted item: Enter or `o` opens it in the browser; `v`
 //! reads its description and comments here, in a scrolling reader over
@@ -11,7 +10,7 @@
 //! an issue (not a PR); `r` marks a
 //! draft PR ready for review. Nothing mutates without its explicit key and
 //! then a confirmation naming the item (Enter or `y` runs it, anything
-//! else goes back). Escape, ctrl-c or ctrl-r again close the float; in
+//! else goes back). Escape, ctrl-c or ctrl-b again close the float; in
 //! the reader, Escape or `q` goes back to the list.
 //!
 //! This holds the float's state and keys; `standalone_key` runs what they
@@ -514,7 +513,7 @@ impl Items {
         };
         match k.code {
             KeyCode::Esc => Outcome::Close,
-            KeyCode::Char('c' | 'r') if ctrl => Outcome::Close,
+            KeyCode::Char('c' | 'b') if ctrl => Outcome::Close,
             KeyCode::Char('?') => Outcome::Help,
             KeyCode::Up | KeyCode::Char('k') => self.step(self.selected.saturating_sub(1)),
             KeyCode::Char('p') if ctrl => self.step(self.selected.saturating_sub(1)),
@@ -566,7 +565,7 @@ impl Items {
         let page = page.saturating_sub(1).max(1);
         let to = match k.code {
             KeyCode::Esc | KeyCode::Char('q') => return Outcome::Stay,
-            KeyCode::Char('c' | 'r') if ctrl => return Outcome::Close,
+            KeyCode::Char('c' | 'b') if ctrl => return Outcome::Close,
             KeyCode::Char('?') => {
                 self.mode = Mode::Read { thread, scroll };
                 return Outcome::Help;
