@@ -146,6 +146,22 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
     worktree_for(&repo, &branch).ok_or_else(|| fail(format!("wt made no worktree for {branch}")))
 }
 
+/// The system-prompt note that keeps a task's agent on the worktree and
+/// branch Switchyard made for it. Switchyard learns a task's commits and
+/// links only from its branch, so work an agent moves to a worktree of its
+/// own disappears from the task.
+fn task_note(worktree: &Path, branch: &str) -> String {
+    let worktree = worktree.display();
+    format!(
+        "You are running as a Switchyard task. This task's worktree is {worktree}, on \
+         branch {branch}; you start in it. Do all of this task's work there: edits, \
+         commits, pushes, pull requests, and `switchyard link`. Do not create another \
+         worktree or branch for this task, even when a skill or instruction says to make \
+         one: this worktree is the task worktree such a workflow asks for, so reuse it. \
+         Switchyard tracks the task's commits, issues and pull requests only on {branch}."
+    )
+}
+
 /// `session` is the agent session to start (`mode` "new") or resume
 /// ("resume"); None when the command gave none. A new session
 /// starts on `prompt` when there is one.
@@ -182,6 +198,16 @@ pub fn run(
             if harness == "claude" {
                 agent.arg("--dangerously-skip-permissions");
             }
+            // On resume too: an older session never had the note.
+            let branch = branch_and_slug(name).0;
+            agent
+                .arg("--append-system-prompt")
+                .arg(task_note(&worktree, &branch));
+            // `switchyard link` run from another branch also links these
+            // (see the cli's `link`).
+            agent
+                .env("SWITCHYARD_TASK_WORKTREE", &worktree)
+                .env("SWITCHYARD_TASK_BRANCH", &branch);
             let mut resuming = false;
             if let Some((id, mode)) = session {
                 let here = worktree.display().to_string();
@@ -230,4 +256,16 @@ pub fn run(
         .exec();
     eprintln!("switchyard: {shell}: {err}");
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_note_names_the_worktree_and_branch() {
+        let note = task_note(Path::new("/r/.worktrees/x"), "fix/x");
+        assert!(note.contains("worktree is /r/.worktrees/x, on branch fix/x"));
+        assert!(note.contains("Do not create another worktree or branch"));
+    }
 }

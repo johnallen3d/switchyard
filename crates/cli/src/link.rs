@@ -37,19 +37,23 @@ fn run(args: &[String]) -> Result<(), String> {
         [cmd, refs @ ..] if cmd == "unlink" && !refs.is_empty() => (true, refs),
         _ => return Err(USAGE.into()),
     };
-    let branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .map_err(|_| "not on a branch: run this in the task's worktree".to_string())?;
-    let key = format!("branch.{}.switchyard-link", branch.trim());
-    // --get-all exits 1 when the key has no values.
-    let existing: Vec<String> = git(&["config", "--get-all", &key])
-        .unwrap_or_default()
-        .lines()
-        .map(String::from)
-        .collect();
+    let branch = git(&["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let task = task_branch(branch.as_deref().ok().map(str::trim));
+    let branch = match branch {
+        Ok(b) => b.trim().to_string(),
+        // Off a branch in a task's own repo, link the task's branch.
+        Err(_) => match &task {
+            Some(TaskBranch::SameRepo(b)) => b.clone(),
+            _ => return Err("not on a branch: run this in the task's worktree".into()),
+        },
+    };
+    let key = link_key(&branch);
+    let existing = links_of(&key);
     if refs.is_empty() {
         for r in &existing {
             println!("{r}");
         }
+        task_hint(task.as_ref(), &branch);
         return Ok(());
     }
     if unlink {
@@ -57,22 +61,101 @@ fn run(args: &[String]) -> Result<(), String> {
         switchyard_core::server::refresh();
         return Ok(());
     }
-    for r in refs {
-        let r = r.trim();
-        if !ref_shape_ok(r) {
-            return Err(format!("{r}: not a work item ref\n\n{USAGE}"));
-        } else if existing.iter().any(|e| e == r) {
-            println!("already linked {r}");
-        } else {
-            git(&["config", "--add", &key, r])?;
-            println!("linked {r}");
+    if let Some(r) = refs.iter().find(|r| !ref_shape_ok(r.trim())) {
+        return Err(format!("{}: not a work item ref\n\n{USAGE}", r.trim()));
+    }
+    add_links(&key, &existing, refs, "")?;
+    match &task {
+        Some(TaskBranch::SameRepo(b)) if *b != branch => {
+            eprintln!(
+                "switchyard: {branch} is not this task's branch, {b}, where Switchyard \
+                 looks; linked there too"
+            );
+            let key = link_key(b);
+            add_links(&key, &links_of(&key), refs, &format!(" on {b}"))?;
         }
+        other => task_hint(other.as_ref(), &branch),
     }
     // On the config host, have switchyard-server check the tasks now rather
     // than at its next timer, so the inbox shows the change; elsewhere
     // there is no server socket and this does nothing.
     switchyard_core::server::refresh();
     Ok(())
+}
+
+fn link_key(branch: &str) -> String {
+    format!("branch.{branch}.switchyard-link")
+}
+
+/// The refs linked under `key`.
+fn links_of(key: &str) -> Vec<String> {
+    // --get-all exits 1 when the key has no values.
+    git(&["config", "--get-all", key])
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect()
+}
+
+/// Add `refs` under `key`, skipping those in `existing`; `on` follows each
+/// report.
+fn add_links(key: &str, existing: &[String], refs: &[String], on: &str) -> Result<(), String> {
+    for r in refs {
+        let r = r.trim();
+        if existing.iter().any(|e| e == r) {
+            println!("already linked {r}{on}");
+        } else {
+            git(&["config", "--add", key, r])?;
+            println!("linked {r}{on}");
+        }
+    }
+    Ok(())
+}
+
+/// The branch of the Switchyard task this runs under, from the environment
+/// `task run` gives its agent, when it is not the current branch.
+enum TaskBranch {
+    /// In this repository, whose config can hold its links too.
+    SameRepo(String),
+    /// In another repository: the branch and its worktree.
+    Elsewhere(String, String),
+}
+
+fn task_branch(current: Option<&str>) -> Option<TaskBranch> {
+    let branch = std::env::var("SWITCHYARD_TASK_BRANCH").ok()?;
+    let worktree = std::env::var("SWITCHYARD_TASK_WORKTREE").ok()?;
+    if branch.is_empty() || current == Some(branch.as_str()) {
+        return None;
+    }
+    let common = |dir: Option<&str>| {
+        let mut args = vec![];
+        if let Some(dir) = dir {
+            args.extend(["-C", dir]);
+        }
+        args.extend(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        git(&args)
+            .ok()
+            .map(|d| std::fs::canonicalize(d.trim()).unwrap_or_else(|_| d.trim().into()))
+    };
+    match (common(None), common(Some(&worktree))) {
+        (Some(here), Some(there)) if here == there => Some(TaskBranch::SameRepo(branch)),
+        _ => Some(TaskBranch::Elsewhere(branch, worktree)),
+    }
+}
+
+/// Warn that `branch` is not the task's branch, where Switchyard looks.
+fn task_hint(task: Option<&TaskBranch>, branch: &str) {
+    match task {
+        Some(TaskBranch::Elsewhere(b, worktree)) => eprintln!(
+            "switchyard: {branch} is not this task's branch; Switchyard looks for its links \
+             on {b}: run `switchyard link` in {worktree} for work items this task is for"
+        ),
+        Some(TaskBranch::SameRepo(b)) => eprintln!(
+            "switchyard: {branch} is not this task's branch; Switchyard looks for its links \
+             on {b}"
+        ),
+        None => {}
+    }
 }
 
 /// Remove `refs` from the branch's git config and from its task's links in
