@@ -250,11 +250,59 @@ pub fn snooze(window: &str, until: u64) -> Result<String, String> {
     })
 }
 
-/// How long to let the agent take a paste before pressing Enter.
-const PASTE_SETTLE: Duration = Duration::from_millis(150);
+/// How long to let the agent take the typed text before pressing Enter.
+const TYPE_SETTLE: Duration = Duration::from_millis(150);
+
+/// The most text typed in one write. Claude takes a larger burst of input
+/// (over about 800 bytes) for a paste, so it is typed in pieces this size.
+const TYPE_CHUNK: usize = 256;
+
+/// One step of typing a message into an agent's prompt.
+#[derive(Debug, PartialEq, Eq)]
+enum Typing {
+    /// Text typed as-is, never more than `TYPE_CHUNK` bytes.
+    Text(String),
+    /// This many line breaks, each a shift-Enter: it starts a new line in
+    /// Claude's and Pi's prompts, where a plain Enter would submit.
+    Breaks(usize),
+}
+
+/// How to type `text`: its lines in chunks of at most `TYPE_CHUNK` bytes,
+/// split on character boundaries, with the breaks between them. Tabs become
+/// spaces (a typed tab would complete) and other control characters are
+/// dropped, so nothing typed can act as a key.
+fn typing(text: &str) -> Vec<Typing> {
+    let mut steps = Vec::new();
+    for (i, line) in text.replace("\r\n", "\n").split(['\n', '\r']).enumerate() {
+        if i > 0 {
+            match steps.last_mut() {
+                Some(Typing::Breaks(n)) => *n += 1,
+                _ => steps.push(Typing::Breaks(1)),
+            }
+        }
+        let mut chunk = String::new();
+        for c in line.chars() {
+            let c = if c == '\t' { ' ' } else { c };
+            if c.is_control() {
+                continue;
+            }
+            if chunk.len() + c.len_utf8() > TYPE_CHUNK {
+                steps.push(Typing::Text(std::mem::take(&mut chunk)));
+            }
+            chunk.push(c);
+        }
+        if !chunk.is_empty() {
+            steps.push(Typing::Text(chunk));
+        }
+    }
+    steps
+}
 
 /// Send `text` to the agent in `window` on `host`, as if John typed it in
-/// the tab: one paste (so newlines stay in the message), then Enter. An
+/// the tab: typed text with shift-Enter between its lines (so newlines stay
+/// in the message), then Enter. It is typed rather than pasted because an
+/// agent takes a pasted message as quoted material rather than John's own
+/// words, and may ask him to confirm it before acting on it. An
 /// idle agent starts a turn on it; a working one takes it into the current
 /// turn at its next chance (Claude after the running tool call, Pi as a
 /// steering message). An agent waiting on a prompt (`blocked`) is refused,
@@ -266,7 +314,7 @@ const PASTE_SETTLE: Duration = Duration::from_millis(150);
 ///
 /// Fails when the text is empty, the tab or its agent pane can't be found,
 /// the agent is waiting on a prompt, a pasted file can't be carried over,
-/// or Rex refuses the paste or the Enter.
+/// or Rex refuses the typing or the Enter.
 pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
     message_from(&local_label(), host, session, window, text)
 }
@@ -302,15 +350,18 @@ fn message_from(
             "{label} is waiting on a prompt; answer it in its tab"
         ));
     }
-    let text = &carry(from, host, text)?;
-    let event = serde_json::json!({
-        "session_id": session,
-        "block_id": block,
-        "event": { "type": "paste", "payload": { "text": text } },
-    })
-    .to_string();
-    rex(host, &["api", "call", "block.event", &event])?;
-    std::thread::sleep(PASTE_SETTLE);
+    let text = carry(from, host, text)?;
+    for step in typing(&text) {
+        match step {
+            Typing::Text(chunk) => rex(host, &["send", "-s", session, "-b", block, "--", &chunk])?,
+            Typing::Breaks(n) => {
+                let mut args = vec!["send-key", "-s", session, "-b", block];
+                args.extend(std::iter::repeat_n("shift+enter", n));
+                rex(host, &args)?;
+            }
+        }
+    }
+    std::thread::sleep(TYPE_SETTLE);
     rex(host, &["send-key", "-s", session, "-b", block, "enter"])?;
     Ok(format!("sent to {label}"))
 }
@@ -658,6 +709,37 @@ fn remove_worktree(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn typing_breaks_lines_with_shift_enter() {
+        assert_eq!(
+            typing("one\r\ntwo\n\n\tthree"),
+            [
+                Typing::Text("one".into()),
+                Typing::Breaks(1),
+                Typing::Text("two".into()),
+                Typing::Breaks(2),
+                Typing::Text(" three".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_chunks_long_lines_on_character_boundaries() {
+        let line = format!("{}é{}", "a".repeat(TYPE_CHUNK - 1), "b".repeat(10));
+        assert_eq!(
+            typing(&line),
+            [
+                Typing::Text("a".repeat(TYPE_CHUNK - 1)),
+                Typing::Text(format!("é{}", "b".repeat(10))),
+            ]
+        );
+    }
+
+    #[test]
+    fn typing_drops_control_characters() {
+        assert_eq!(typing("a\u{1b}[2Jb"), [Typing::Text("a[2Jb".into())]);
+    }
 
     #[test]
     fn checkout_script_finds_the_checkout_repo_and_branch() {
