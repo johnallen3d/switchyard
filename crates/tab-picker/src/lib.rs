@@ -93,8 +93,11 @@
 //! with its rounded corners. Tab moves into it to message the highlighted
 //! agent; alt- or shift-Enter adds a line, Escape (or Tab, while it's
 //! empty) leaves it, and shift with the arrows (or the page keys) scrolls
-//! the preview. An agent waiting on a prompt is refused. Enter sends the
-//! message (see core's actions).
+//! the preview. ctrl-j and ctrl-k leave it and move through the list;
+//! ctrl-u and ctrl-d leave it for scrollback, half a page up or down;
+//! ctrl-x leaves it and arms an archive, as in the list. An
+//! agent waiting on a prompt is refused. Enter sends the message (see
+//! core's actions).
 //!
 //! Each action goes through `pick`, the highlighted row as
 //! `ACTION:TARGET/SESSION/WINDOW`: ACTION is `go` (a tab), `task` (a row
@@ -613,6 +616,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("y ⏎", "copy and leave"),
                 ("esc", "drop selection, search, then leave"),
                 ("q ⌃C ⌃V", "leave"),
+                ("⇥", "leave for the reply box"),
             ],
         ),
         Section::new(
@@ -624,6 +628,9 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("↑↓", "earlier messages, at the first or last line"),
                 ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
                 ("⌃V", "scroll back, then back here"),
+                ("⌃J ⌃K", "leave for the list, next or previous"),
+                ("⌃U ⌃D", "leave for scrollback, half a page"),
+                ("⌃X", "leave and arm an archive"),
                 ("⌃G", "edit in the editor"),
                 ("⌃C", "clear, then leave"),
                 ("esc", "leave"),
@@ -2252,6 +2259,21 @@ impl App {
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
             KeyCode::Char('c') if ctrl => self.close_reply(),
             KeyCode::Char('v') if ctrl => self.enter_scrollback(None),
+            // ctrl-j and ctrl-k leave the box for the list and move in it;
+            // ctrl-u and ctrl-d leave it for scrollback, half a page along.
+            KeyCode::Char(c @ ('j' | 'k')) if ctrl => {
+                self.close_reply();
+                self.wrap_step(if c == 'j' { 1 } else { -1 });
+            }
+            KeyCode::Char('u' | 'd') if ctrl => {
+                self.close_reply();
+                self.enter_scrollback(Some(k));
+            }
+            // ctrl-x leaves it to arm an archive of its agent's task.
+            KeyCode::Char('x') if ctrl => {
+                self.close_reply();
+                self.arm_archive();
+            }
             KeyCode::Char('g') if ctrl => self.edit_requested = true,
             KeyCode::PageUp => self.scroll_preview(page),
             KeyCode::PageDown => self.scroll_preview(-page),
@@ -2672,6 +2694,15 @@ impl App {
     }
 
     fn scrollback_key(&mut self, k: KeyEvent) {
+        // Tab, in Inbox, leaves for the reply box: back to the one it was
+        // entered from, else a new one on the highlighted agent.
+        if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && self.view == View::Inbox {
+            self.leave_scrollback();
+            if self.reply.is_none() {
+                self.open_reply();
+            }
+            return;
+        }
         let Some((lines, nav)) = self.transcript_text() else {
             return self.leave_scrollback();
         };

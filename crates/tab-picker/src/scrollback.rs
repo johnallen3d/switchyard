@@ -18,7 +18,7 @@
 //!   `y` or Enter (elsewhere than on a jump) copies the markdown it was
 //!   drawn from (or the cursor line's) and leaves.
 //! - Escape drops the selection, then the search, then leaves; `q`, ctrl-c
-//!   and ctrl-v again leave.
+//!   and ctrl-v again leave. Tab, in Inbox, leaves for the reply box.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
