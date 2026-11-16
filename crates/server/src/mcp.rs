@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use switchyard_core::hosts::catalog;
-use switchyard_core::launch::launch_text;
+use switchyard_core::launch::{Placement, launch_text};
 use switchyard_core::naming::name_char;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
@@ -420,6 +420,7 @@ fn tools() -> Value {
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
                     "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
                     "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set." },
+                    "hidden": { "type": "boolean", "default": true, "description": "Start the agent hidden, in no tab (the default); false gives it a tab of its own. ctrl-y in the tab picker (cmd+i) shows a hidden agent in a tab and hides it again." },
                 },
                 "required": ["project", "name", "prompt"],
             },
@@ -675,7 +676,10 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         harness,
         prompt,
         opt_arg(args, "work_item"),
-        parent.as_deref(),
+        Placement {
+            parent: parent.as_deref(),
+            hidden: args["hidden"].as_bool().unwrap_or(true),
+        },
     )?;
     let _ = endpoint.refresh.send("mcp");
     // The registry has it now: name it as list_tasks will.

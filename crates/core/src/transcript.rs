@@ -60,42 +60,52 @@ local sid, wid = rex.args.session, rex.args.window
 local SCREEN_TAIL = 16384
 local _, err = rex.session.attach{ session_id = sid }
 if err ~= nil then error(tostring(err), 0) end
-local view = rex.session.view{ session_id = sid }
-for _, w in ipairs((view and view.windows) or {}) do
-  if w.window_id == wid then
-    local best, rank
-    for _, l in ipairs(w.layers or {}) do
-      if l.kind == "tiled" then
-        for _, b in ipairs(l.blocks or {}) do
-          local st = rex.block.call(T, "program_status", { session_id = sid, block_id = b.block_id })
-          for _, r in ipairs((st and st.records) or {}) do
-            local u = urgency[r.state] or 0.5
-            if rank == nil or u > rank then best, rank = { block = b.block_id, record = r }, u end
-          end
+-- A hidden task's key is its agent's block, in a tab or none.
+local blocks
+if wid:sub(1, 6) == "block:" then
+  blocks = { wid }
+else
+  local view = rex.session.view{ session_id = sid }
+  for _, w in ipairs((view and view.windows) or {}) do
+    if w.window_id == wid then
+      blocks = {}
+      for _, l in ipairs(w.layers or {}) do
+        if l.kind == "tiled" then
+          for _, b in ipairs(l.blocks or {}) do blocks[#blocks + 1] = b.block_id end
         end
       end
     end
-    if best == nil then return {} end
-    local proc = rex.block.call(T, "process", { session_id = sid, block_id = best.block }) or {}
-    local fg = proc.foreground or proc.child or {}
-    local r = best.record
-    local screen
-    if rex.args.screen and (r.state == "idle" or r.state == "done") then
-      -- The end of the screen, styles and all: the total length first,
-      -- then only its last bytes.
-      local head = rex.block.call(T, "format", { session_id = sid, block_id = best.block,
-        format = "vt", unwrap = true, max_bytes = 1 })
-      if head and head.id and head.total then
-        local tail = rex.block.call(T, "blob_read", { session_id = sid, block_id = best.block,
-          id = head.id, offset = math.max(0, head.total - SCREEN_TAIL) })
-        screen = tail and tail.data
-      elseif head then
-        screen = head.content
-      end
-    end
-    return { block = best.block, state = r.state or "", app = r.effective_app or r.app or "",
-      pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "", screen = screen }
   end
+end
+if blocks then
+  local best, rank
+  for _, id in ipairs(blocks) do
+    local st = rex.block.call(T, "program_status", { session_id = sid, block_id = id })
+    for _, r in ipairs((st and st.records) or {}) do
+      local u = urgency[r.state] or 0.5
+      if rank == nil or u > rank then best, rank = { block = id, record = r }, u end
+    end
+  end
+  if best == nil then return {} end
+  local proc = rex.block.call(T, "process", { session_id = sid, block_id = best.block }) or {}
+  local fg = proc.foreground or proc.child or {}
+  local r = best.record
+  local screen
+  if rex.args.screen and (r.state == "idle" or r.state == "done") then
+    -- The end of the screen, styles and all: the total length first,
+    -- then only its last bytes.
+    local head = rex.block.call(T, "format", { session_id = sid, block_id = best.block,
+      format = "vt", unwrap = true, max_bytes = 1 })
+    if head and head.id and head.total then
+      local tail = rex.block.call(T, "blob_read", { session_id = sid, block_id = best.block,
+        id = head.id, offset = math.max(0, head.total - SCREEN_TAIL) })
+      screen = tail and tail.data
+    elseif head then
+      screen = head.content
+    end
+  end
+  return { block = best.block, state = r.state or "", app = r.effective_app or r.app or "",
+    pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "", screen = screen }
 end
 error("tab not found", 0)
 "#;

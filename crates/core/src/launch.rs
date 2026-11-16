@@ -147,7 +147,7 @@ pub fn launch(
         Prompt::Ref(typed.as_deref().unwrap_or_default(), prompt_ref),
         work_item,
         resume,
-        None,
+        Placement::default(),
     )
     .map_err(|e| match prompt_ref {
         Some(r) if typed.as_deref().is_some_and(|t| !t.trim().is_empty()) => {
@@ -167,11 +167,31 @@ fn kept_prompt(prompt_ref: &str) -> String {
     )
 }
 
+/// Where a launched agent goes besides its project's session. By default
+/// it starts hidden, with no parent.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement<'a> {
+    /// The Rex window of the agent that spawned it, if known: the registry
+    /// keeps it as `parent_window`, and the tab picker nests the task under
+    /// that tab.
+    pub parent: Option<&'a str>,
+    /// Start it hidden, in a detached block rather than a tab (see
+    /// `hidden`); its block ID is then its window ID.
+    pub hidden: bool,
+}
+
+impl Default for Placement<'_> {
+    fn default() -> Self {
+        Self {
+            parent: None,
+            hidden: true,
+        }
+    }
+}
+
 /// `launch` with the prompt's text itself rather than a prompt file, for
-/// callers that have it in hand (switchyard-server's MCP tools). `parent`
-/// is the Rex window of the agent that spawned it, if known: the registry
-/// keeps it as `parent_window`, and the tab picker nests the task under
-/// that tab.
+/// callers that have it in hand (switchyard-server's MCP tools), placed as
+/// `placement` says.
 ///
 /// # Errors
 ///
@@ -183,7 +203,7 @@ pub fn launch_text(
     harness: &str,
     prompt: &str,
     work_item: Option<&str>,
-    parent: Option<&str>,
+    placement: Placement,
 ) -> Result<(String, String, String), String> {
     launch_with(
         host,
@@ -193,7 +213,7 @@ pub fn launch_text(
         Prompt::Text(prompt),
         work_item,
         None,
-        parent,
+        placement,
     )
 }
 
@@ -215,7 +235,7 @@ fn launch_with(
     prompt: Prompt,
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
-    parent: Option<&str>,
+    placement: Placement,
 ) -> Result<(String, String, String), String> {
     let project = launch_project(host, path, resume)?;
     let work_item = check_request(name, harness, work_item, resume.is_some())?;
@@ -277,6 +297,16 @@ fn launch_with(
         run.push(&prompt);
     }
     let (session, window_id) = open_tab(host, existing, &project.name, &slug, &cwd, &run)?;
+    // A hidden task goes by its block from here on; failing to hide it
+    // leaves it in its tab, which is still a working task.
+    let window_id = if placement.hidden {
+        crate::hidden::hide_new(host, &session, &window_id, &slug).unwrap_or_else(|e| {
+            log(&format!("could not hide {}/{name}: {e}", project.name));
+            window_id
+        })
+    } else {
+        window_id
+    };
     // The tab holds the prompt now.
     if let Some(r) = prompt_ref {
         discard_prompt(r);
@@ -302,7 +332,7 @@ fn launch_with(
         "ended_at": null,
         "ended_reason": null,
     });
-    if let Some(parent) = parent.filter(|p| !p.is_empty()) {
+    if let Some(parent) = placement.parent.filter(|p| !p.is_empty()) {
         task["parent_window"] = parent.into();
     }
     // The tab is already open: a registry failure only costs the inbox entry.

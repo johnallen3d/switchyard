@@ -1977,9 +1977,12 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         None,
     ) {
         // Launched: close even if the tab can't be shown, so a second Enter
-        // doesn't spawn the work twice.
+        // doesn't spawn the work twice. A hidden agent stays hidden: the tab
+        // picker's ctrl-y shows it.
         Ok((host, session, window)) => {
-            app.exit_note = select(&host, &session, &window).err();
+            if !switchyard_core::hidden::is_block(&window) {
+                app.exit_note = select(&host, &session, &window).err();
+            }
             Ok(true)
         }
         Err(e) => {

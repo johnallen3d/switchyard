@@ -318,6 +318,16 @@ pub fn pin(p: &Pick) -> Result<String, String> {
     logged("pin", actions::act("pin", &p.host, &p.session, &p.window))
 }
 
+/// Show the pick's hidden task in a tab of its own, or hide it again; Ok
+/// says whether it is shown now.
+pub fn toggle_hidden(p: &Pick) -> Result<bool, String> {
+    let r = switchyard_core::hidden::toggle(&p.host, &p.session, &p.window);
+    if let Err(e) = &r {
+        log(&format!("toggle hidden {}: {e}", p.window));
+    }
+    r
+}
+
 /// Snooze the pick's task until `until` (Unix seconds), or wake it for 0.
 pub fn snooze(p: &Pick, until: u64) -> Result<String, String> {
     logged("snooze", actions::snooze(&p.window, until))
@@ -356,7 +366,15 @@ pub fn resume(p: &Pick) -> Result<(), String> {
 /// auto host, claude, named from the item (see core's `launch`). Ok is
 /// where it opened: host, session and window.
 pub fn launch(path: &str, url: &str) -> Result<(String, String, String), String> {
-    let r = switchyard_core::launch::launch_text("auto", path, "", "claude", "", Some(url), None);
+    let r = switchyard_core::launch::launch_text(
+        "auto",
+        path,
+        "",
+        "claude",
+        "",
+        Some(url),
+        switchyard_core::launch::Placement::default(),
+    );
     match &r {
         Ok((host, _, window)) => log(&format!("started work on {url} on {host} ({window})")),
         Err(e) => log(&format!("launch from {url} failed: {e}")),

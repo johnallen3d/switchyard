@@ -11,6 +11,7 @@ pub mod changes;
 pub mod commands;
 pub mod config;
 pub mod folders;
+pub mod hidden;
 pub mod hosts;
 pub mod images;
 pub mod item_actions;

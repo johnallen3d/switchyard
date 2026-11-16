@@ -76,14 +76,19 @@ pub struct Tab {
     pub dir: String,
     /// The open task running in this tab, if any.
     pub task: Option<usize>,
+    /// For a hidden task's block (see core's `hidden`), whether it is in
+    /// no tab (true) or shown in one (false); None for a plain tab.
+    pub hidden: Option<bool>,
 }
 
 /// Rows from the config, tab separated:
 ///   S  TARGET  HOST  `SESSION_ID`  `SESSION_LABEL`
-///   T  `WINDOW_ID`  STATE  NAME  DIR
+///   T  `WINDOW_ID`  STATE  NAME  DIR  [HIDDEN]
 ///   E  HOST  MESSAGE
-/// A T row belongs to the S row before it. An E row says a host's tabs are
-/// missing or stale (see `failed_hosts`); pickers without them skip it.
+/// A T row belongs to the S row before it; HIDDEN is `hidden` or `shown`
+/// for a hidden task's block, whose block ID stands in for `WINDOW_ID`. An
+/// E row says a host's tabs are missing or stale (see `failed_hosts`);
+/// pickers without them skip it.
 pub fn parse_rows(input: &str) -> (Vec<Session>, Vec<Tab>) {
     let mut sessions: Vec<Session> = Vec::new();
     let mut tabs = Vec::new();
@@ -107,6 +112,11 @@ pub fn parse_rows(input: &str) -> (Vec<Session>, Vec<Tab>) {
                     name: f[3].into(),
                     dir: home_relative(f.get(4).copied().unwrap_or("")),
                     task: None,
+                    hidden: match f.get(5).copied() {
+                        Some("hidden") => Some(true),
+                        Some("shown") => Some(false),
+                        _ => None,
+                    },
                 });
             }
             _ => {}
@@ -615,6 +625,20 @@ pub fn age(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn t_rows_say_whether_a_hidden_task_is_in_a_tab() {
+        let (_, tabs) = parse_rows(concat!(
+            "S\t-\tlocal\ts\twork\n",
+            "T\twindow:1\tidle\tplain\t~\n",
+            "T\tblock:2\tworking\tdebug\t~\thidden\n",
+            "T\tblock:3\tworking\tdebug\t~\tshown\n",
+            "T\twindow:4\tidle\tplain\t~\t\n",
+        ));
+        let hidden: Vec<_> = tabs.iter().map(|t| t.hidden).collect();
+        assert_eq!(hidden, [None, Some(true), Some(false), None]);
+        assert_eq!(tabs[1].window_id, "block:2");
+    }
 
     fn link(kind: &str, reference: &str, state: &str) -> Link {
         let system = if kind == "card" { "fizzy" } else { "github" };

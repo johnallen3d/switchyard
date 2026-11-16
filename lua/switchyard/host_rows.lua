@@ -16,6 +16,8 @@ local groups = {}
 -- counts only for the W row: a tab whose agents are all idle shows none.
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
 local with_status = rex.args.status == "yes"
+-- The label prefix of a hidden task's block (see crates/core/src/hidden.rs).
+local hidden_prefix = "switchyard-hidden"
 -- Panes with an agent working or blocked, as hosts.rs's probe counts them.
 local busy = 0
 do
@@ -28,19 +30,14 @@ do
     if view == nil then error(view_err, 0) end
     local tabs = {}
     groups[#groups + 1] = { session = session, tabs = tabs, host = host, target = target }
-    for _, window in ipairs(view.windows or {}) do
-      local blocks = {}
-      for _, layer in ipairs(window.layers or {}) do
-        if layer.kind == "tiled" then
-          for _, block in ipairs(layer.blocks or {}) do
-            blocks[#blocks + 1] = block.block_id
-          end
-        end
-      end
+    -- A tab: its panes' most urgent status, and its focused pane's title
+    -- and folder. KEY is its window, or a hidden task's block (see
+    -- crates/core/src/hidden.rs), shown in a tab or not.
+    local function add_tab(key, blocks, focused, name, hidden)
       local block_id = blocks[1]
       local best
       for _, id in ipairs(blocks) do
-        if id == window.focused_block_id then block_id = id end
+        if id == focused then block_id = id end
         local status = server.block.call(terminal, "program_status",
           { session_id = session.session_id, block_id = id })
         local pane_busy = false
@@ -55,7 +52,6 @@ do
       -- An agent at its prompt is "idle"; a tab with no agent has no state.
       local state = best and urgency[best.state] and best.state or nil
       local args = { session_id = session.session_id, block_id = block_id }
-      local name = window.label or ""
       local dir = ""
       if block_id ~= nil then
         local title = server.block.call(terminal, "title", args)
@@ -75,12 +71,38 @@ do
           dir = "~" .. dir:sub(#home + 1)
         end
       end
-      tabs[#tabs + 1] = { window_id = window.window_id, name = name, dir = dir, state = state, best = best or {} }
+      tabs[#tabs + 1] = { window_id = key, name = name, dir = dir, state = state, best = best or {},
+        hidden = hidden }
+    end
+    local function hidden_label(label) return (label or ""):sub(1, #hidden_prefix) == hidden_prefix end
+    for _, window in ipairs(view.windows or {}) do
+      local blocks, shown = {}, nil
+      for _, layer in ipairs(window.layers or {}) do
+        if layer.kind == "tiled" then
+          for _, block in ipairs(layer.blocks or {}) do
+            blocks[#blocks + 1] = block.block_id
+            if hidden_label(block.label) then shown = block.block_id end
+          end
+        end
+      end
+      if shown then
+        add_tab(shown, { shown }, shown, window.label or "", "shown")
+      else
+        add_tab(window.window_id, blocks, window.focused_block_id, window.label or "", nil)
+      end
+    end
+    local all = server.call("session.list_blocks", { session_id = session.session_id })
+    for _, block in ipairs((all and all.blocks) or {}) do
+      if block.placement == "detached" and hidden_label(block.label) then
+        add_tab(block.block_id, { block.block_id }, block.block_id,
+          block.label:sub(#hidden_prefix + 2), "hidden")
+      end
     end
   end
 end
 
--- The tabs picker draws the rows; see its source for the format. A W row
+-- The tabs picker draws the rows; see its source for the format. A T
+-- row's last field is "hidden" or "shown" for a hidden task's block. A W row
 -- is WINDOW_ID, STATE, UPDATED_AT (RFC 3339) and MSG, empty for a tab with
 -- no status, as the registry's status fields want them (see
 -- crates/core/src/tasks.rs). The B row is the busy pane count.
@@ -93,7 +115,7 @@ for _, group in ipairs(groups) do
   }, "\t")
   for _, tab in ipairs(group.tabs) do
     lines[#lines + 1] = table.concat({
-      "T", tab.window_id, tab.state or "", clean(tab.name), clean(tab.dir),
+      "T", tab.window_id, tab.state or "", clean(tab.name), clean(tab.dir), tab.hidden or "",
     }, "\t")
     if with_status then
       lines[#lines + 1] = table.concat({
