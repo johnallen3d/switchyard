@@ -84,6 +84,8 @@ pub struct Pr {
     pub checks: String,
     /// Issues the PR body says it fixes (`#42`, `owner/repo#42`).
     pub fixes: Vec<String>,
+    /// The PR's head commit, in full, or empty when unknown.
+    pub head: String,
 }
 
 /// Summarize gh's statusCheckRollup: any failure fails, then anything not
@@ -137,6 +139,7 @@ pub fn parse_pr_list(json: &str) -> Result<Option<Pr>, String> {
         state: state.into(),
         checks: checks_summary(&pr["statusCheckRollup"]),
         fixes: fixed_refs(pr["body"].as_str().unwrap_or("")),
+        head: pr["headRefOid"].as_str().unwrap_or("").to_string(),
     }))
 }
 
@@ -257,7 +260,7 @@ pub fn pr_key(repo: &str, branch: &str) -> String {
 fn pr_to_json(pr: Option<&Pr>) -> Value {
     match pr {
         Some(p) => {
-            json!({"number": p.number, "url": p.url, "state": p.state, "checks": p.checks, "fixes": p.fixes})
+            json!({"number": p.number, "url": p.url, "state": p.state, "checks": p.checks, "fixes": p.fixes, "head": p.head})
         }
         None => Value::Null,
     }
@@ -277,6 +280,7 @@ fn pr_from_json(v: &Value) -> Option<Pr> {
                     .collect()
             })
             .unwrap_or_default(),
+        head: v["head"].as_str().unwrap_or("").to_string(),
     })
 }
 
@@ -353,7 +357,7 @@ pub fn find_prs(lookups: &[Lookup]) -> HashMap<String, Option<Pr>> {
                         "--limit",
                         "1",
                         "--json",
-                        "number,url,state,isDraft,statusCheckRollup,body",
+                        "number,url,state,isDraft,statusCheckRollup,body,headRefOid",
                     ],
                 );
                 (l, out.and_then(|o| parse_pr_list(&o).ok()))
@@ -423,6 +427,7 @@ pub fn add_live(task: &mut Value, repo: &str, pr: &Pr) {
         {
             l["state"] = pr.state.clone().into();
             l["checks"] = pr.checks.clone().into();
+            l["head"] = pr.head.clone().into();
         }
     }
 }
@@ -806,6 +811,40 @@ pub fn pr_merged(task: &Value) -> bool {
         })
 }
 
+/// Whether one of the task's PRs merged with `head` (the branch head, full
+/// or abbreviated) as its head commit: the branch's current work landed
+/// through it, not only earlier work. Its live state on the link counts, or
+/// else the lookup cache's, however old; a PR without a known head doesn't.
+#[must_use]
+pub fn pr_merged_at(task: &Value, head: &str) -> bool {
+    if head.is_empty() {
+        return false;
+    }
+    let at = |pr: &Value| {
+        pr["state"] == "merged"
+            && pr["head"]
+                .as_str()
+                .is_some_and(|h| !h.is_empty() && h.starts_with(head))
+    };
+    let branch = task["branch"].as_str().unwrap_or("");
+    let cache = load_cache();
+    task["links"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|l| l["kind"] == "pr")
+        .any(|l| {
+            if at(l) {
+                return true;
+            }
+            let Some((repo, n)) = l["ref"].as_str().and_then(|r| r.split_once('#')) else {
+                return false;
+            };
+            let pr = &cache["prs"][&pr_key(repo, branch)]["pr"];
+            at(pr) && pr["number"].as_u64().map(|x| x.to_string()).as_deref() == Some(n)
+        })
+}
+
 /// The link John most likely wants to open: a PR, then an issue, a card,
 /// a commit; the first of a kind.
 #[must_use]
@@ -844,7 +883,7 @@ mod tests {
 
     #[test]
     fn pr_list_reduces_state_and_checks() {
-        let pr = parse_pr_list(r#"[{"number":57,"url":"u","state":"OPEN","isDraft":false,
+        let pr = parse_pr_list(r#"[{"number":57,"url":"u","state":"OPEN","isDraft":false,"headRefOid":"abc",
             "statusCheckRollup":[{"status":"COMPLETED","conclusion":"SUCCESS"},{"state":"SUCCESS"}]}]"#)
             .unwrap()
             .unwrap();
@@ -855,7 +894,8 @@ mod tests {
                 url: "u".into(),
                 state: "open".into(),
                 checks: "pass".into(),
-                fixes: vec![]
+                fixes: vec![],
+                head: "abc".into()
             }
         );
         let pr = parse_pr_list(
@@ -888,6 +928,7 @@ mod tests {
             state: "open".into(),
             checks: String::new(),
             fixes: vec![],
+            head: String::new(),
         });
         assert!(set_derived_pr(&mut task, "o/r", &pr));
         let links = task["links"].as_array().unwrap();
@@ -912,6 +953,7 @@ mod tests {
             state: "merged".into(),
             checks: "pass".into(),
             fixes: vec![],
+            head: String::new(),
         };
         assert!(!set_derived_pr(&mut task, "o/r", &Some(pr.clone())));
         add_live(&mut task, "o/r", &pr);
@@ -1103,6 +1145,7 @@ mod tests {
                 state: "open".into(),
                 checks: String::new(),
                 fixes: vec![],
+                head: String::new(),
             }),
         );
         assert!(!set_derived_items(

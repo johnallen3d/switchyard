@@ -15,6 +15,10 @@
 //!   Fizzy last reported all closed is safe to archive; the task ends as "merged"
 //!   rather than "archived".
 //!
+//!   switchyard-server archives a task on its own once its work lands
+//!   upstream (its PR merged, or its commits pushed to the default branch)
+//!   and its agent has gone quiet; see `auto_archive`.
+//!
 //!   Both also work on an ended task whose tab was closed without an
 //!   archive, which leaves its worktree behind: they remove the worktree
 //!   and mark the task archived.
@@ -176,6 +180,10 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         "" => "claude".to_string(),
         h => h.to_string(),
     };
+    // The branch head it resumes at: auto-archive waits for work landed
+    // after it, so a merged task resumed for a follow-up isn't archived again
+    // before the follow-up lands.
+    let resume_head = branch_head(host, &path, &field("branch"));
     let (host, session, window_id) = launch(
         host,
         &path,
@@ -193,13 +201,33 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
             .iter_mut()
             .rev()
             .find(|t| t["ended_at"].is_null() && in_window(t, &window_id))
-            && task["links"].as_array().is_some_and(|l| !l.is_empty())
         {
-            new["links"] = task["links"].clone();
+            if task["links"].as_array().is_some_and(|l| !l.is_empty()) {
+                new["links"] = task["links"].clone();
+            }
+            if let Some(head) = &resume_head {
+                new["resume_head"] = head.clone().into();
+            }
         }
         Ok(())
     })?;
     Ok(format!("{host}\t{session}\t{window_id}"))
+}
+
+/// `branch`'s head commit in the checkout at `repo` on `host`, in full; None
+/// when it can't be read.
+fn branch_head(host: &str, repo: &str, branch: &str) -> Option<String> {
+    if branch.is_empty() {
+        return None;
+    }
+    let script = format!(
+        "git -C {} rev-parse --verify --quiet {}\n",
+        sh_quote(repo),
+        sh_quote(&format!("refs/heads/{branch}"))
+    );
+    let out = host_bash(host, &script).filter(|o| o.status.success())?;
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!head.is_empty()).then_some(head)
 }
 
 /// The archive's check of a worktree: exit 3 when it is gone, else its
@@ -613,6 +641,56 @@ fn archive_worktree(
     ))
 }
 
+/// How long an agent must have been idle on landed work before
+/// `auto_archive` archives its task, so its last message can still be read.
+pub const AUTO_ARCHIVE_IDLE_SECS: u64 = 300;
+
+/// Whether reconciled task `t` (as `reconcile_tasks` returns it, with its
+/// unsaved fields) is due to be archived on its own at `now`: it is open
+/// and not pinned, has its own clean worktree, its work has landed (a PR
+/// GitHub reported merged with the branch head as its head, or the branch
+/// head in the default branch, local or origin's, as after a direct push),
+/// the branch head has moved since a resume (`resume_head`), and its agent is neither working,
+/// blocked nor scheduled, and hasn't changed state for
+/// `AUTO_ARCHIVE_IDLE_SECS`. Closed cards alone don't count: only the work
+/// itself landing does.
+#[must_use]
+pub fn auto_archivable(t: &serde_json::Value, now: u64) -> bool {
+    let s = |k: &str| t[k].as_str().unwrap_or("");
+    let own_worktree = !s("worktree").is_empty()
+        && s("worktree").trim_end_matches('/') != s("repo").trim_end_matches('/');
+    let head = s("branch_head");
+    let landed = s("branch_merged") == "merged" || crate::links::pr_merged_at(t, head);
+    // A resumed task: only work landed since the resume counts.
+    let moved =
+        s("resume_head").is_empty() || (!head.is_empty() && !s("resume_head").starts_with(head));
+    let quiet = !matches!(s("status"), "working" | "blocked" | "scheduled")
+        && now.saturating_sub(t["status_at"].as_u64().unwrap_or(0)) >= AUTO_ARCHIVE_IDLE_SECS;
+    t["ended_at"].is_null()
+        && !t["pinned"].as_bool().unwrap_or(false)
+        && own_worktree
+        && t["dirty_count"].as_u64() == Some(0)
+        && landed
+        && moved
+        && quiet
+}
+
+/// Archive each task in reconciled `tasks` that `auto_archivable` picks, as
+/// the tab picker's archive does (it still refuses uncommitted changes, and
+/// the task ends as "merged"). Returns each outcome, for the caller to log.
+#[must_use]
+pub fn auto_archive(tasks: &[serde_json::Value]) -> Vec<Result<String, String>> {
+    let now = now();
+    tasks
+        .iter()
+        .filter(|t| auto_archivable(t, now))
+        .map(|t| {
+            let s = |k: &str| t[k].as_str().unwrap_or("");
+            run_action("archive", s("host"), s("session_id"), s("window_id"))
+        })
+        .collect()
+}
+
 /// The index in `tasks` of the task an action on `window` acts on: an open
 /// task. For an archive of a tab that is still open, the latest ended task
 /// reopened (it ended by mistake), or else one adopted for the agent in it,
@@ -877,5 +955,60 @@ mod tests {
         assert_eq!(run(), (Some(0), "?? f\n@merged\n".into()));
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(run().0, Some(3));
+    }
+
+    #[test]
+    fn auto_archive_needs_landed_clean_quiet_work() {
+        let now = 10_000;
+        let base = serde_json::json!({
+            "ended_at": null,
+            "worktree": "/r/.worktrees/x",
+            "repo": "/r",
+            "dirty_count": 0,
+            "branch_merged": "merged",
+            "branch_head": "abc123def456",
+            "status": "idle",
+            "status_at": now - AUTO_ARCHIVE_IDLE_SECS,
+        });
+        assert!(auto_archivable(&base, now));
+        let with = |k: &str, v: serde_json::Value| {
+            let mut t = base.clone();
+            t[k] = v;
+            t
+        };
+        // A PR GitHub reported merged counts as landed too, when the branch
+        // head is the PR's: later commits haven't landed (a squash merge).
+        let mut pr = with("branch_merged", "unmerged".into());
+        pr["links"] =
+            serde_json::json!([{"kind": "pr", "state": "merged", "head": "abc123def4560000"}]);
+        assert!(auto_archivable(&pr, now));
+        pr["links"][0]["head"] = "fff".into();
+        assert!(!auto_archivable(&pr, now));
+        pr["links"][0]["head"] = serde_json::Value::Null;
+        assert!(!auto_archivable(&pr, now));
+        // A resumed task waits for its head to move from where it resumed.
+        assert!(auto_archivable(
+            &with("resume_head", "0000aaaa".into()),
+            now
+        ));
+        let mut resumed = with("resume_head", "abc123def4560000".into());
+        assert!(!auto_archivable(&resumed, now));
+        resumed["branch_head"] = "".into();
+        assert!(!auto_archivable(&resumed, now));
+        for t in [
+            with("branch_merged", "unmerged".into()),
+            with("branch_merged", "new".into()),
+            with("dirty_count", 1.into()),
+            with("dirty_count", serde_json::Value::Null),
+            with("worktree", "/r".into()),
+            with("pinned", true.into()),
+            with("ended_at", 1.into()),
+            with("status", "working".into()),
+            with("status", "blocked".into()),
+            with("status", "scheduled".into()),
+            with("status_at", (now - 10).into()),
+        ] {
+            assert!(!auto_archivable(&t, now), "{t}");
+        }
     }
 }

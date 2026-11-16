@@ -7,6 +7,8 @@
 //! client that has just archived, resumed or launched asks for one at once
 //! (`refresh`), rather than waiting for the registry poll.
 //! Between checks the tasks get live status from the watchers' rows.
+//! After each check, tasks whose work has landed upstream and whose agent
+//! has gone quiet are archived (core's `auto_archive`).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -14,6 +16,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+use switchyard_core::actions::auto_archive;
 use switchyard_core::tasks::{load_tasks, reconcile_tasks, tasks_path};
 
 use crate::state::Shared;
@@ -50,7 +53,12 @@ pub fn run(shared: &Arc<Shared>, triggers: &Receiver<&'static str>) {
         if let Err(e) = &got {
             crate::log(&format!("tasks ({why}): {e}"));
         }
+        let checked = got.as_ref().ok().cloned().unwrap_or_default();
         shared.update(|s| s.set_tasks(got, true, Instant::now()));
+        // An archive rewrites the registry, which prompts the next check.
+        for outcome in auto_archive(&checked) {
+            crate::log(&format!("auto-archive: {}", outcome.unwrap_or_else(|e| e)));
+        }
         shared.check_wakes();
         if started.elapsed() > Duration::from_secs(5) {
             crate::log(&format!(
