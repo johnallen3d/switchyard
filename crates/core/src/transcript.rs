@@ -164,7 +164,7 @@ pub fn suggestion(screen: &str) -> Option<String> {
             },
             '\r' => {}
             c if c.is_whitespace() => text.push(' '),
-            c if !dim => return None,
+            _ if !dim => return None,
             c => text.push(c),
         }
     }

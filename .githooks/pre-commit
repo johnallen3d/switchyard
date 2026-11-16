@@ -1,0 +1,30 @@
+#!/bin/sh
+# Run CI's lint checks (flake.nix `checks`) before committing Rust changes,
+# with CI's toolchain (the flake's devShell): a local rustup toolchain can be
+# older and miss lints CI fails on.
+# Enable once per clone: git config core.hooksPath .githooks
+# Bypass in an emergency: git commit --no-verify
+set -eu
+
+# Only lint when the commit touches Rust sources or Cargo manifests.
+if ! git diff --cached --name-only --diff-filter=ACMR |
+	grep -qE '\.rs$|(^|/)Cargo\.(toml|lock)$'; then
+	exit 0
+fi
+
+# A separate target dir, so switching toolchains doesn't rebuild the
+# everyday rustup build's dependencies (and vice versa).
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/pre-commit}"
+run() { nix develop --no-update-lock-file --quiet --option warn-dirty false --command "$@"; }
+
+if ! run cargo fmt --all --check; then
+	echo >&2
+	echo "pre-commit: code is not formatted; run 'cargo fmt --all' and re-stage." >&2
+	exit 1
+fi
+
+if ! run cargo clippy --workspace --all-targets --quiet -- -D warnings; then
+	echo >&2
+	echo "pre-commit: clippy failed; fix the warnings above (CI runs the same check)." >&2
+	exit 1
+fi

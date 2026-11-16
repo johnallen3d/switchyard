@@ -44,6 +44,16 @@
       '';
     });
 
+    # CI's Rust toolchain (nixpkgs', often newer than a local rustup one, with
+    # newer lints). .githooks/pre-commit lints with it.
+    devShells = forAllSystems (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in {
+      default = pkgs.mkShell {
+        packages = [pkgs.cargo pkgs.rustc pkgs.clippy pkgs.rustfmt];
+      };
+    });
+
     homeManagerModules.default = ./nix/module.nix;
     homeModules.default = self.homeManagerModules.default;
 
