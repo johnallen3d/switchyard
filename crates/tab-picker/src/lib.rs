@@ -1850,10 +1850,24 @@ impl App {
     }
 
     /// As `step`, but past either end of the list it wraps to the other.
+    /// In Inbox it passes over the Snoozed section (the last), rows nested
+    /// there included, unless nothing else is left to pick.
     fn wrap_step(&mut self, delta: isize) {
         let Some(at) = self.selected else { return };
         self.moved();
-        self.selected = Some(draw::step_wrapping(&self.rows, at, delta, selectable));
+        let snoozed = if self.view == View::Inbox {
+            self.rows.iter().position(|r| *r == Item::Status("snoozed"))
+        } else {
+            None
+        }
+        .unwrap_or(self.rows.len());
+        let indexed: Vec<(usize, Item)> = self.rows.iter().copied().enumerate().collect();
+        let awake = |&(i, r): &(usize, Item)| i < snoozed && selectable(&r);
+        self.selected = Some(if indexed.iter().any(awake) {
+            draw::step_wrapping(&indexed, at, delta, awake)
+        } else {
+            draw::step_wrapping(&self.rows, at, delta, selectable)
+        });
     }
 
     /// Move to the first pick of the next group, or back to the first pick
@@ -2489,7 +2503,8 @@ impl App {
             }
             KeyCode::Char('p') if ctrl => self.step(-1),
             KeyCode::Char('n') if ctrl => self.step(1),
-            // ctrl-j and ctrl-k wrap past either end of the list.
+            // ctrl-j and ctrl-k wrap past either end of the list, passing
+            // over Inbox's Snoozed rows.
             KeyCode::Char('k') if ctrl => self.wrap_step(-1),
             KeyCode::Char('j') if ctrl => self.wrap_step(1),
             // The archive is long and has no transcript, so ctrl-u and
@@ -6344,6 +6359,32 @@ mod tests {
         app.set_view(View::Archive);
         app.key(ctrl('s'));
         assert!(app.snooze.is_none());
+    }
+
+    #[test]
+    fn ctrl_j_and_k_pass_over_snoozed_rows() {
+        let mut app = inbox_with_lifecycle();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.deliver(|app| app.tasks[2].snoozed_until = 8200);
+        assert_eq!(app.rows.last(), Some(&Item::Tab(2)));
+        let snoozed = app
+            .rows
+            .iter()
+            .position(|r| *r == Item::Status("snoozed"))
+            .unwrap();
+        let first = app.rows.iter().position(selectable).unwrap();
+        let last = app.rows[..snoozed].iter().rposition(selectable).unwrap();
+        // ctrl-j wraps from the last awake row to the first ...
+        app.selected = Some(last);
+        app.key(ctrl('j'));
+        assert_eq!(app.selected, Some(first));
+        // ... and ctrl-k back, over the snoozed one.
+        app.key(ctrl('k'));
+        assert_eq!(app.selected, Some(last));
+        // From a snoozed row, they move onto awake ones.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.key(ctrl('j'));
+        assert_eq!(app.selected, Some(first));
     }
 
     #[test]
