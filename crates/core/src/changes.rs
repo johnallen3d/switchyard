@@ -1,5 +1,5 @@
 //! What a task has changed: its diff against the base branch and its local
-//! commits, for the tab picker's preview (ctrl-d in Inbox).
+//! commits, for the tab picker's preview (ctrl-l in Inbox).
 //!
 //! `fetch` runs on the config host for a tab (host, session, window), as
 //! `transcript::fetch` does: the task registry's worktree for the tab's

@@ -1,4 +1,4 @@
-//! What the highlighted task has changed, in Inbox's preview: ctrl-d turns
+//! What the highlighted task has changed, in Inbox's preview: ctrl-l turns
 //! the transcript into its diff against the base branch, then its local
 //! commits, then back (see `Lens`).
 //!
@@ -38,7 +38,7 @@ pub enum Lens {
 impl Lens {
     pub const ALL: [Lens; 3] = [Lens::Transcript, Lens::Diff, Lens::Commits];
 
-    /// The one ctrl-d moves to.
+    /// The one ctrl-l moves to.
     pub fn next(self) -> Lens {
         match self {
             Lens::Transcript => Lens::Diff,

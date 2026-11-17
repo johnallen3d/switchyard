@@ -1,6 +1,6 @@
 //! The Work view's right side: the highlighted item's description and
 //! comments (core's `item_view`), and for a pull request its diff and
-//! commits (core's `changes::pull_request`), which ctrl-d cycles through
+//! commits (core's `changes::pull_request`), which ctrl-l cycles through
 //! (see `Lens`). ctrl-e gives it the whole view.
 //!
 //! Each item is fetched once the highlight has rested on it for `SETTLE`,
@@ -49,7 +49,7 @@ pub enum Lens {
 impl Lens {
     const ALL: [Lens; 3] = [Lens::About, Lens::Diff, Lens::Commits];
 
-    /// The one ctrl-d moves to.
+    /// The one ctrl-l moves to.
     pub fn next(self) -> Lens {
         match self {
             Lens::About => Lens::Diff,
@@ -105,8 +105,11 @@ pub struct Detail {
     text: Rect,
     /// Drawn this frame, so scrollback has lines to move through.
     pub visible: bool,
-    /// ctrl-v gave it the view: enter scrollback once it is drawn.
+    /// ctrl-v (or ctrl-u or ctrl-d, the key in it) gave it the view:
+    /// enter scrollback once it is drawn, then the key.
     pub want_scroll: bool,
+    /// The key to give scrollback once `want_scroll` enters it.
+    pub want_key: Option<ratatui::crossterm::event::KeyEvent>,
     /// The description's lines as last drawn: URL, width, lines and the
     /// comments' headers as sections.
     drawn: Option<(String, u16, Vec<Line<'static>>, Nav)>,
@@ -126,6 +129,7 @@ impl Default for Detail {
             text: Rect::default(),
             visible: false,
             want_scroll: false,
+            want_key: None,
             drawn: None,
         }
     }
@@ -143,7 +147,7 @@ impl Detail {
         if is_pr(link) { self.lens } else { Lens::About }
     }
 
-    /// ctrl-d: the next lens, for a pull request; why not, for others.
+    /// ctrl-l: the next lens, for a pull request; why not, for others.
     ///
     /// # Errors
     ///

@@ -20,6 +20,8 @@ searchable, with that tab highlighted. Enter jumps to the highlighted tab
 and Escape closes the float; cmd+k again closes it too. Over a session on
 another host, the Mac feeds the float its tabs and tasks and makes the jump.
 
+[docs/keys.md](docs/keys.md) tables every tab picker key by view and pane.
+
 From a terminal on the Mac:
 
 ```bash

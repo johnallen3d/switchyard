@@ -26,11 +26,12 @@
 //!
 //! With room, the view splits: the list on the left and the highlighted
 //! item on the right, its description and comments, and for a pull
-//! request its diff and commits with ctrl-d (see detail.rs). ctrl-e gives
+//! request its diff and commits with ctrl-l (see detail.rs). ctrl-e gives
 //! the right side the whole view, where the arrows scroll it; shift and
 //! the arrows scroll it beside the list. ctrl-v moves the keys into it as
 //! scrollback, giving it the whole view first when there is no room
-//! beside the list. This holds the view's state and keys; `standalone_key` runs
+//! beside the list; ctrl-u and ctrl-d do too, half a page up or down.
+//! This holds the view's state and keys; `standalone_key` runs
 //! what they ask for (see `Outcome`).
 
 use std::collections::{HashMap, HashSet};
@@ -150,8 +151,9 @@ pub enum Outcome {
     },
     /// Show the linked task's tab.
     Go(Linked),
-    /// Move the keys into the highlighted item's side, as scrollback.
-    Scroll,
+    /// Move the keys into the highlighted item's side, as scrollback,
+    /// then the key that asked (ctrl-u or ctrl-d) in it.
+    Scroll(Option<KeyEvent>),
     /// Open the URL in the browser here.
     Open(String),
     /// ctrl-g armed an approval: the footer says what Enter will do.
@@ -514,7 +516,7 @@ impl Work {
                 self.detail.forget();
                 Outcome::Stay
             }
-            KeyCode::Char('d') if ctrl => match self.selected_link() {
+            KeyCode::Char('l') if ctrl => match self.selected_link() {
                 Some(l) => match self.detail.cycle(&l) {
                     Ok(_) => Outcome::Stay,
                     Err(why) => Outcome::Refuse(why),
@@ -556,7 +558,13 @@ impl Work {
             KeyCode::Enter if approving.is_some() => self.approve(approving.as_deref()),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('v') if ctrl => match self.selected_item() {
-                Some(_) => Outcome::Scroll,
+                Some(_) => Outcome::Scroll(None),
+                None => Outcome::Stay,
+            },
+            // ctrl-u and ctrl-d scroll the item half a page, in scrollback;
+            // search finds a row faster than paging the list.
+            KeyCode::Char('u' | 'd') if ctrl => match self.selected_item() {
+                Some(_) => Outcome::Scroll(Some(k)),
                 None => Outcome::Stay,
             },
             KeyCode::Char('b') if ctrl => match self.selected_item() {
@@ -730,7 +738,7 @@ impl Work {
             h.push(("⌃G", "approve"));
         }
         if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
-            h.push(("⌃D", self.detail.lens_for(&l).next().name()));
+            h.push(("⌃L", self.detail.lens_for(&l).next().name()));
         }
         h.push((
             "⌃E",
@@ -1254,8 +1262,8 @@ mod tests {
                 "patch": patch, "truncated": false,
             }),
         );
-        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        assert_eq!(w.key(ctrl_d, 10), Outcome::Stay);
+        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_l, 10), Outcome::Stay);
         let p = Palette::load();
         let mut terminal = Terminal::new(TestBackend::new(120, 20)).unwrap();
         let mut screen = |w: &mut Work, sb: Option<&mut Scrollback>| {
@@ -1470,10 +1478,15 @@ mod tests {
         let mut w = work();
         w.refilter("", &[]);
         assert_eq!(w.key(key(KeyCode::Char('x')), 10), Outcome::Pass);
-        let ctrl_l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL);
-        assert_eq!(w.key(ctrl_l, 10), Outcome::Pass);
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_o, 10), Outcome::Pass);
         let ctrl_v = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
-        assert_eq!(w.key(ctrl_v, 10), Outcome::Scroll);
+        assert_eq!(w.key(ctrl_v, 10), Outcome::Scroll(None));
+        // ctrl-u and ctrl-d scroll the item, not the list.
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_d, 10), Outcome::Scroll(Some(ctrl_d)));
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(w.key(ctrl_u, 10), Outcome::Scroll(Some(ctrl_u)));
     }
 
     #[test]

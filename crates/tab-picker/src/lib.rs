@@ -26,8 +26,8 @@
 //! and the picker highlights that tab again.
 //!
 //! The highlighted row and an armed archive survive each delivery. Tasks
-//! link to tabs by (`session_id`, `window_id`). Views, moved along with ctrl-h
-//! and ctrl-l:
+//! link to tabs by (`session_id`, `window_id`). Views, picked with cmd+1-4
+//! on the picker's tab:
 //!
 //! - Inbox (default): one flat list across every session, each row naming
 //!   its project. Agents (tabs with live agent status or an open task, and
@@ -43,15 +43,18 @@
 //!   work items and host over its whole status message, the agent's
 //!   transcript, live, and the reply box. ctrl-e collapses the sidebar, and
 //!   typing to search brings it back. Narrower, a preview under the list
-//!   shows the transcript, and ctrl-e expands it over the list. ctrl-d
+//!   shows the transcript, and ctrl-e expands it over the list. ctrl-l
 //!   turns the transcript into the task's diff against its base branch,
-//!   then its commits, then back (see changes.rs).
+//!   then its commits, then back (see changes.rs). ctrl-u and ctrl-d go
+//!   into scrollback on it, half a page up or down, rather than paging the
+//!   list, which search moves through faster.
 //! - Work: one catalog project's open cards or issues, or with ctrl-f its
 //!   open pull requests, the ones an open task links to dimmed; Enter starts a session from the highlighted
 //!   item, switching to Inbox and highlighting the session once it lists,
 //!   or goes to its task (see work.rs). With the width, the highlighted
 //!   item shows on the right: its description and comments, and with
-//!   ctrl-d a pull request's diff and commits (see detail.rs).
+//!   ctrl-l a pull request's diff and commits (see detail.rs); ctrl-u and
+//!   ctrl-d scroll it, in scrollback, as in Inbox.
 //! - Usage: read-only accounting (see usage.rs).
 //! - Archive (ctrl-a): one flat list of ended tasks, newest first, each
 //!   row naming its project and how it ended; ctrl-f hides the archived
@@ -242,8 +245,7 @@ enum Tasks {
     Failed,
 }
 
-/// The picker's views, cycled with ctrl-h and ctrl-l, or picked with
-/// cmd+1-4 on the picker's tab.
+/// The picker's views, picked with cmd+1-4 on the picker's tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Inbox,
@@ -254,7 +256,7 @@ pub enum View {
 }
 
 impl View {
-    /// Every view, in the order ctrl-l moves through them.
+    /// Every view, in the frame's view strip's order.
     const ALL: [View; 4] = [View::Inbox, View::Work, View::Usage, View::Archive];
 
     /// Its name in the frame's view strip.
@@ -278,19 +280,10 @@ impl View {
             _ => None,
         }
     }
-
-    fn next(self, back: bool) -> Self {
-        match (self, back) {
-            (View::Inbox, false) | (View::Usage, true) => View::Work,
-            (View::Work, false) | (View::Archive, true) => View::Usage,
-            (View::Usage, false) | (View::Inbox, true) => View::Archive,
-            (View::Archive, false) | (View::Work, true) => View::Inbox,
-        }
-    }
 }
 
 /// The footer's hint for moving along the frame's view strip.
-const VIEW_HINT: (&str, &str) = ("⌃H ⌃L", "views");
+const VIEW_HINT: (&str, &str) = ("⌘1-4", "views");
 
 /// Columns `spans` take.
 fn spans_width(spans: &[Span]) -> usize {
@@ -578,7 +571,8 @@ fn help_float_sections() -> Vec<help::Section> {
             &[
                 ("⌃V", "scroll back"),
                 ("⇧↑ ⇧PgUp", "scroll back from here"),
-                ("⌃D", "the task's diff, then commits, then back"),
+                ("⌃L", "the task's diff, then commits, then back"),
+                ("⌃U ⌃D", "scroll back, half a page"),
                 ("⇥", "message the agent"),
             ],
         ),
@@ -749,7 +743,7 @@ struct App {
     preview: Option<preview::Preview>,
     /// The pane a standalone picker last asked its feed to capture.
     asked: Option<preview::Pane>,
-    /// What the preview shows of the highlighted agent (ctrl-d).
+    /// What the preview shows of the highlighted agent (ctrl-l).
     lens: changes::Lens,
     /// The last changes fetched (see changes.rs), shown while their row is
     /// highlighted and a lens other than the transcript is on.
@@ -2431,7 +2425,13 @@ impl App {
                 self.expanded = !self.expanded;
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
-            KeyCode::Char('d') if ctrl && self.view == View::Inbox => self.lens = self.lens.next(),
+            KeyCode::Char('l') if ctrl && self.view == View::Inbox => self.lens = self.lens.next(),
+            // ctrl-u and ctrl-d scroll the transcript (or the changes) half
+            // a page, in scrollback; search finds a row faster than paging
+            // the list.
+            KeyCode::Char('u' | 'd') if ctrl && self.view == View::Inbox => {
+                self.enter_scrollback(Some(k));
+            }
             KeyCode::Char('p') if ctrl => self.step(-1),
             KeyCode::Char('n') if ctrl => self.step(1),
             // ctrl-j and ctrl-k wrap past either end of the list.
@@ -2469,10 +2469,6 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
-            // ctrl-h and ctrl-l cycle the views, so every letter
-            // stays free for the search.
-            KeyCode::Char('h') if ctrl => self.set_view(self.view.next(true)),
-            KeyCode::Char('l') if ctrl => self.set_view(self.view.next(false)),
             KeyCode::Char('?') if !ctrl && !alt => self.help = Some(help::Help::default()),
             KeyCode::Char(c) if !ctrl && !alt => {
                 // Searching brings back the list it searches.
@@ -2564,7 +2560,7 @@ impl App {
 
     /// Scrollback over the Work view's highlighted item, from the top of
     /// what its side shows.
-    fn enter_work_scrollback(&mut self) {
+    fn enter_work_scrollback(&mut self, k: Option<KeyEvent>) {
         let link = self.work.selected_link();
         let (Some(link), Some((lines, nav))) = (link, self.transcript_text()) else {
             self.note = Some(("nothing here to scroll through yet".into(), true));
@@ -2580,6 +2576,10 @@ impl App {
         sb.top = top;
         sb.nav = nav;
         sb.sync(lines.len(), h);
+        if let Some(k) = k {
+            sb.key(k, &lines, h);
+            sb.sync(lines.len(), h);
+        }
         self.scrollback = Some(sb);
     }
 
@@ -2587,7 +2587,7 @@ impl App {
     /// shows, then `k` in it.
     fn enter_scrollback(&mut self, k: Option<KeyEvent>) {
         if self.view == View::Work {
-            return self.enter_work_scrollback();
+            return self.enter_work_scrollback(k);
         }
         let (Some(pane), Some((lines, nav))) = (self.preview_want(), self.transcript_text()) else {
             self.note = Some(("nothing here to scroll through".into(), true));
@@ -3344,8 +3344,8 @@ impl App {
 
     /// The frame's title strip of the views, the current one lit, in what
     /// `room` it has; just the current one's name if they all don't fit.
-    /// None in the quick float, which has only its list. ctrl-h and ctrl-l
-    /// move along it; the footer says so.
+    /// None in the quick float, which has only its list. cmd+1-4 pick
+    /// from it; the footer says so.
     /// The frame's border colour: iris in scrollback, so the whole window
     /// says it has the keys, else the usual quiet line.
     fn border(&self) -> Color {
@@ -3800,7 +3800,7 @@ impl App {
                     Span::styled("Nothing matches ", Style::new().fg(p.subtle)),
                     Span::styled(format!("“{}”", self.query), Style::new().fg(p.text)),
                 ]),
-                if self.view == View::Archive {
+                if matches!(self.view, View::Archive | View::Inbox | View::Work) {
                     draw::key_hint(p, "⌃W", " deletes a word of the search")
                 } else {
                     draw::key_hint(p, "⌃U", " clears the search")
@@ -4323,7 +4323,8 @@ impl App {
                     ("⌃B", "open it in the browser"),
                     ("⇥", "choose the project"),
                     ("⌃F", "switch between work items and pull requests"),
-                    ("⌃D", "show a pull request's description, diff or commits"),
+                    ("⌃L", "show a pull request's description, diff or commits"),
+                    ("⌃U ⌃D", "scroll it, half a page"),
                     ("⌃G", "arm a pull request's approval: ⏎ approves it"),
                     ("⌃E", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
@@ -4338,7 +4339,6 @@ impl App {
                     ("Home End", "first, last"),
                     ("type", "search titles and numbers"),
                     ("⌃W ⌥⌫", "delete a word"),
-                    ("⌃U", "clear the search"),
                 ],
             ));
         } else if self.view == View::Usage {
@@ -4423,8 +4423,9 @@ impl App {
         }
         if self.preview_want().is_some() {
             row.push(("⇥", "message the agent"));
+            row.push(("⌃U ⌃D", "scroll back, half a page"));
             row.push((
-                "⌃D",
+                "⌃L",
                 match self.lens.next() {
                     changes::Lens::Transcript => "show the transcript",
                     changes::Lens::Diff => "show the diff",
@@ -4452,11 +4453,11 @@ impl App {
                 ("⌃W ⌥⌫", "delete a word"),
             ]);
         } else {
-            moving.extend([
-                ("type", "search"),
-                ("⌃W ⌥⌫", "delete a word"),
-                ("⌃U", "clear the search"),
-            ]);
+            moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word")]);
+            // Inbox's ctrl-u scrolls the transcript instead.
+            if self.view != View::Inbox {
+                moving.push(("⌃U", "clear the search"));
+            }
         }
         moving
     }
@@ -4466,7 +4467,6 @@ impl App {
         let profile = format!("show {}", self.profile.next().name());
         let mut views = vec![
             ("⌘1-4", "Inbox, Work, Usage, Archive"),
-            ("⌃H ⌃L", "previous, next view"),
             ("⌃A", "archive, and back"),
             ("⌃O", profile.as_str()),
         ];
@@ -5036,6 +5036,7 @@ impl App {
     fn run_work_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         // Any other key drops a ctrl-v waiting on the item.
         self.work.detail.want_scroll = false;
+        self.work.detail.want_key = None;
         let page = usize::try_from(self.page()).unwrap_or(1);
         let shown = (self.work.project, self.work.kind);
         let outcome = self.work.key(k, page);
@@ -5068,16 +5069,17 @@ impl App {
                     Err(e) => (e, true),
                 });
             }
-            work::Outcome::Scroll => {
+            work::Outcome::Scroll(k) => {
                 let link = self.work.selected_link();
                 if self.work.detail.visible && !self.work.detail.busy(link.as_ref()) {
-                    self.enter_scrollback(None);
+                    self.enter_scrollback(k);
                 } else {
                     // No room beside the list, or still reading: give it
                     // the view, then scroll once it is drawn and has come
                     // (see `take_work`).
                     self.work.detail.expanded |= !self.work.detail.visible;
                     self.work.detail.want_scroll = true;
+                    self.work.detail.want_key = k;
                 }
             }
             work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
@@ -5156,7 +5158,8 @@ impl App {
                 && !self.work.detail.busy(self.work.selected_link().as_ref())
             {
                 self.work.detail.want_scroll = false;
-                self.enter_scrollback(None);
+                let k = self.work.detail.want_key.take();
+                self.enter_scrollback(k);
             }
         }
         let mut done = Vec::new();
@@ -5680,25 +5683,22 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_h_and_l_cycle_the_views_while_letters_search() {
+    fn ctrl_l_turns_the_preview_and_letters_search() {
         let mut app = inbox();
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.key(plain(KeyCode::Char('h')));
         app.key(plain(KeyCode::Char('l')));
         assert!(app.view == View::Inbox && app.query == "hl");
-        app.key(ctrl('l'));
-        assert!(app.view == View::Work);
-        app.key(ctrl('l'));
-        assert!(app.view == View::Usage);
-        app.key(ctrl('l'));
-        assert!(app.view == View::Archive);
+        // cmd+1-4 pick the view; ctrl-h and ctrl-l no longer cycle it.
         app.key(ctrl('h'));
-        assert!(app.view == View::Usage);
-        app.key(ctrl('h'));
-        assert!(app.view == View::Work);
-        app.key(ctrl('h'));
-        assert!(app.view == View::Inbox);
+        assert!(app.view == View::Inbox && app.query == "hl");
+        app.key(ctrl('l'));
+        assert!(app.view == View::Inbox && app.lens == changes::Lens::Diff);
+        app.key(ctrl('l'));
+        assert_eq!(app.lens, changes::Lens::Commits);
+        app.key(ctrl('l'));
+        assert_eq!(app.lens, changes::Lens::Transcript);
     }
 
     #[test]
@@ -6082,7 +6082,7 @@ mod tests {
             top.starts_with("╭─ Inbox · Work · Usage · Archive "),
             "{top}"
         );
-        assert!(footer.contains("⌃H ⌃L views"), "{footer}");
+        assert!(footer.contains("⌘1-4 views"), "{footer}");
         // The current view lit, the others not.
         let fg = |name: &str| {
             let x = top[..top.find(name).unwrap()].chars().count();
@@ -7101,12 +7101,6 @@ mod tests {
     #[test]
     fn usage_is_integrated_read_only_and_handles_narrow_frames() {
         let mut app = inbox();
-        let mut view = View::Inbox;
-        for expected in [View::Work, View::Usage, View::Archive, View::Inbox] {
-            view = view.next(false);
-            assert!(view == expected);
-            assert!(view.next(true).next(false) == view);
-        }
         app.set_view(View::Usage);
         assert_eq!(app.rows, [] as [Item; 0]);
         assert_eq!(app.pick(), "");
@@ -7188,7 +7182,7 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
         // Too narrow, Inbox stacks the list over the reply box as before.
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 80);
         assert!(!app.sidebar);
         assert!(
