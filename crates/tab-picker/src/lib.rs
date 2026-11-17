@@ -2965,11 +2965,10 @@ impl App {
     }
 
     /// Inbox's list and the preview under it, when there is room for both:
-    /// a third of the height (8 to 14 lines) for the preview, the rest
-    /// for the list; expanded (ctrl-e), the preview alone. The
-    /// preview stays while John moves, whatever the row, so the list
-    /// doesn't change height under him. With focus in the reply box, the
-    /// preview gets half of what is left, as what John is replying to.
+    /// four fifths of the height for the preview, the transcript being
+    /// what John reads, and the rest for the list; expanded (ctrl-e), the
+    /// preview alone. The preview stays while John moves, whatever the
+    /// row, so the list doesn't change height under him.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
         if self.view != View::Inbox || self.quick {
             return None;
@@ -2981,11 +2980,7 @@ impl App {
         if body.height < if replying { 12 } else { 15 } {
             return None;
         }
-        let pane = if replying {
-            (body.height / 2).clamp(6, 14)
-        } else {
-            (body.height / 3).clamp(8, 14)
-        };
+        let pane = body.height * 4 / 5;
         let [list, _, preview] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
