@@ -308,9 +308,13 @@ pub fn go(p: &Pick) -> Result<(), String> {
     select(&p.host, &p.session, &p.window)
 }
 
-/// Archive (or force-archive) the pick's task; Ok is the outcome to show.
+/// Archive (or force-archive) the pick's task and the open tasks it
+/// spawned; Ok is the outcome to show.
 pub fn archive(action: &str, p: &Pick) -> Result<String, String> {
-    logged(action, actions::act(action, &p.host, &p.session, &p.window))
+    logged(
+        action,
+        actions::archive_family(action, &p.host, &p.session, &p.window),
+    )
 }
 
 /// Pin or unpin the pick's task; Ok is the outcome to show.

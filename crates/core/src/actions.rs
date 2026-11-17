@@ -47,6 +47,7 @@
 //! Archiving doesn't delete an unmerged branch: only uncommitted work can be
 //! lost, and a resume finds its commits again.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use crate::hosts::catalog;
@@ -510,6 +511,68 @@ pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<Stri
     result
 }
 
+/// Archive (or force-archive) the task in `window` as `act` does, then each
+/// open task it spawned (`parent_window`), and theirs in turn, so archiving a
+/// lead agent doesn't leave its helpers running. Children always get a plain
+/// archive: one with uncommitted changes is kept and named in the outcome,
+/// since forcing the parent only answered for the parent's own changes.
+///
+/// # Errors
+///
+/// Fails as `act` does when the parent's archive fails, leaving its children
+/// alone; a child that can't be archived only adds to the message.
+pub fn archive_family(
+    action: &str,
+    host: &str,
+    session: &str,
+    window: &str,
+) -> Result<String, String> {
+    let mut outcome = run_action(action, host, session, window);
+    if outcome.is_ok() {
+        let mut seen = std::collections::HashSet::from([window.to_string()]);
+        let mut queue = vec![window.to_string()];
+        let (mut archived, mut kept) = (0, Vec::new());
+        while let Some(parent) = queue.pop() {
+            let Ok(tasks) = load_tasks() else { break };
+            for (h, s, w) in open_children(&tasks, &parent) {
+                if !seen.insert(w.clone()) {
+                    continue;
+                }
+                match run_action("archive", &h, &s, &w) {
+                    Ok(_) => {
+                        archived += 1;
+                        queue.push(w);
+                    }
+                    Err(e) => kept.push(e),
+                }
+            }
+        }
+        if let Ok(msg) = &mut outcome {
+            if archived > 0 {
+                let s = if archived == 1 { "" } else { "s" };
+                let _ = write!(msg, " and {archived} child task{s}");
+            }
+            for e in &kept {
+                let _ = write!(msg, "; kept {e}");
+            }
+        }
+    }
+    crate::server::refresh();
+    outcome
+}
+
+/// Each open task in `tasks` spawned from the tab `window`, as host,
+/// session and window.
+fn open_children(tasks: &[serde_json::Value], window: &str) -> Vec<(String, String, String)> {
+    let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
+    tasks
+        .iter()
+        .filter(|t| t["ended_at"].is_null() && s(t, "parent_window") == window)
+        .map(|t| (s(t, "host"), s(t, "session_id"), s(t, "window_id")))
+        .filter(|(_, _, w)| !w.is_empty() && w != window)
+        .collect()
+}
+
 fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
     if action == "resume" {
         return resume(host, window);
@@ -819,6 +882,25 @@ fn remove_worktree(
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn open_children_are_open_tasks_spawned_from_the_window() {
+        let tasks = vec![
+            serde_json::json!({"host":"h","session_id":"s","window_id":"lead","ended_at":null}),
+            serde_json::json!({"host":"h","session_id":"s","window_id":"kid","parent_window":"lead","ended_at":null}),
+            serde_json::json!({"host":"m","session_id":"t","window_id":"far","parent_window":"lead","ended_at":null}),
+            serde_json::json!({"host":"h","session_id":"s","window_id":"old","parent_window":"lead","ended_at":5}),
+            serde_json::json!({"host":"h","session_id":"s","window_id":"grand","parent_window":"kid","ended_at":null}),
+        ];
+        assert_eq!(
+            open_children(&tasks, "lead"),
+            [
+                ("h".into(), "s".into(), "kid".into()),
+                ("m".into(), "t".into(), "far".into())
+            ]
+        );
+        assert_eq!(open_children(&tasks, "grand"), []);
+    }
 
     #[test]
     fn typing_breaks_lines_with_shift_enter() {
