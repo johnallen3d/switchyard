@@ -10,7 +10,8 @@
 //!   `ctrl-f`/`ctrl-b` or the page keys a page; `{`/`}` to the blank line
 //!   before or after (between turns); `g`/`G` or Home/End to the ends.
 //! - `]`/`[` jump to the next or previous section the text marks (see
-//!   `Nav`): a diff's files, a work item's comments. Enter on a row that
+//!   `Nav`): a transcript's prompts from John, a diff's files, a work
+//!   item's comments. Enter on a row that
 //!   names one, such as a file in a diff's list, jumps to it.
 //! - `/` searches forward and `?` back, ignoring case unless the query has
 //!   a capital; `n` repeats it, `N` the other way.

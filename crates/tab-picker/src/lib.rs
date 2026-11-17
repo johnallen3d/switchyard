@@ -2555,7 +2555,7 @@ impl App {
         let pv = self.preview.as_mut().filter(|pv| pv.pane == pane)?;
         let lines = pv.lines(width, &p).ok()?;
         let text = lines.iter().map(scrollback::line_text).collect();
-        Some((text, scrollback::Nav::default()))
+        Some((text, pv.nav()))
     }
 
     /// Scrollback over the Work view's highlighted item, from the top of

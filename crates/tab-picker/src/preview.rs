@@ -18,6 +18,8 @@ use switchyard_ui::Palette;
 use switchyard_ui::draw::str_width;
 use switchyard_ui::protocol::DATA;
 
+use crate::scrollback::Nav;
+
 /// How often a highlighted agent's transcript is fetched again.
 pub const REFRESH: Duration = Duration::from_secs(2);
 
@@ -72,6 +74,9 @@ pub struct Preview {
 struct Drawn {
     lines: Vec<Line<'static>>,
     from: Vec<Option<(usize, Range<usize>)>>,
+    /// Where each of John's messages starts (its band's top row), for
+    /// scrollback's `]`/`[`.
+    marks: Vec<usize>,
 }
 
 impl Drawn {
@@ -93,6 +98,20 @@ impl Preview {
             .as_ref()
             .map(|(_, d)| d.lines.as_slice())
             .unwrap_or_default())
+    }
+
+    /// Where John's messages start, as last drawn, for scrollback's
+    /// `]`/`[`.
+    pub fn nav(&self) -> Nav {
+        Nav {
+            marks: self
+                .drawn
+                .as_ref()
+                .map(|(_, d)| d.marks.clone())
+                .unwrap_or_default(),
+            jumps: Vec::new(),
+            what: "prompts",
+        }
     }
 
     /// John's messages, oldest first, a repeat of the one before left out,
@@ -213,7 +232,7 @@ pub fn tokens_label(n: u64) -> String {
 }
 
 /// The entries as lines `width` wide: John's messages after `›` on a
-/// full-width band, the agent's after `●`, both drawn from markdown, its
+/// full-width band padded a row above and below, the agent's after `●`, both drawn from markdown, its
 /// tool calls dim, one line each, and questions for John in gold. A blank line goes between
 /// turns, not between tool calls; blank lines within a turn keep the
 /// gutter, so scrollback's `{`/`}` stop only between turns.
@@ -229,7 +248,7 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
             "user" => (
                 "› ",
                 Style::new().fg(p.iris).add_modifier(Modifier::BOLD),
-                Style::new().fg(p.iris),
+                Style::new().fg(p.text),
             ),
             "ask" => (
                 "? ",
@@ -251,6 +270,13 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
             ]);
             out.push(line, Some((e, 0..text.len())));
             continue;
+        }
+        // The band's padding rows are spaces, not blank, so `{`/`}` pass
+        // them, and copy the whole message.
+        let band = || Line::from(" ".repeat(width)).style(Style::new().bg(p.overlay));
+        if kind == "user" {
+            out.marks.push(out.lines.len());
+            out.push(band(), Some((e, 0..text.len())));
         }
         let mut first = true;
         for (row, from) in markdown(text, room, p) {
@@ -274,6 +300,9 @@ fn render(entries: &[(String, String)], width: usize, p: &Palette) -> Drawn {
                 line = line.style(Style::new().bg(p.overlay));
             }
             out.push(line, from.map(|r| (e, r)));
+        }
+        if kind == "user" {
+            out.push(band(), Some((e, 0..text.len())));
         }
     }
     out
@@ -779,7 +808,9 @@ mod tests {
         assert_eq!(
             lines,
             [
+                "              ",
                 "› Fix it      ",
+                "              ",
                 "",
                 "· Bash: Run t…",
                 "· Read: /a/ve…",
@@ -788,6 +819,24 @@ mod tests {
                 "  tested"
             ]
         );
+    }
+
+    #[test]
+    fn johns_messages_are_scrollback_sections() {
+        let json = serde_json::json!({ "entries": [
+            { "kind": "user", "text": "one" },
+            { "kind": "assistant", "text": "two" },
+            { "kind": "user", "text": "three" },
+        ]});
+        let mut pv = parse(&format!("-/s/w\n{json}")).unwrap();
+        let p = Palette::load();
+        let lines: Vec<String> = pv.lines(10, &p).unwrap().iter().map(text).collect();
+        let nav = pv.nav();
+        assert_eq!(nav.marks, [0, 6]);
+        assert!(lines[6].trim().is_empty() && !lines[6].is_empty());
+        assert_eq!(lines[7].trim_end(), "› three");
+        // A padding row copies the message it pads.
+        assert_eq!(pv.source(6, 6).as_deref(), Some("three"));
     }
 
     #[test]
@@ -1003,21 +1052,27 @@ mod tests {
         let lines = pv.lines(20, &p).unwrap();
         assert_eq!(
             lines.iter().map(text).collect::<Vec<_>>(),
-            ["› one two           "]
+            [
+                "                    ",
+                "› one two           ",
+                "                    "
+            ]
         );
         assert!(
-            lines[0]
+            lines[1]
                 .spans
                 .iter()
                 .any(|s| s.content == "two" && s.style.add_modifier.contains(Modifier::ITALIC))
         );
-        // On a full-width band, in their own colour.
-        assert_eq!(lines[0].style.bg, Some(p.overlay));
+        // On a full-width band padded above and below, the text plain
+        // and the mark in iris.
+        assert!(lines.iter().all(|l| l.style.bg == Some(p.overlay)));
+        assert_eq!(lines[1].spans[0].style.fg, Some(p.iris));
         assert!(
-            lines[0]
+            lines[1]
                 .spans
                 .iter()
-                .any(|s| s.content == "one" && s.style.fg == Some(p.iris))
+                .any(|s| s.content == "one" && s.style.fg == Some(p.text))
         );
     }
 
