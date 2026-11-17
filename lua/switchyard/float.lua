@@ -25,10 +25,12 @@ function M.close_float(ctx, label)
   rex.client.queue("client.mode.exit_all")
 end
 
--- The config host runs with a bare PATH, so find its rex CLI.
+-- The config host runs with a bare PATH, so find its rex CLI. On the Mac
+-- that includes Homebrew's, where mise lives: work-profile gh lookups
+-- (a work item's title, to name a launch) load amfaro's env through it.
 function M.user_path()
   local r = rex.exec({ "sh", "-c",
-    'printf %s "$HOME/.local/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH"' })
+    'printf %s "$HOME/.local/bin:/etc/profiles/per-user/$(id -un)/bin:/opt/homebrew/bin:$PATH"' })
   return r.stdout
 end
 
