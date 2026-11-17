@@ -348,6 +348,8 @@ local lines = {}
 local function clean(s) return (tostring(s or ""):gsub("[\t\r\n]", " ")) end
 local list = rex.call("session.list")
 for _, s in ipairs((list and list.sessions) or {}) do
+  -- Every session the server has, whether or not its view reads below.
+  lines[#lines + 1] = "L\t" .. s.session_id
   rex.session.attach{ session_id = s.session_id }
   local view = rex.session.view{ session_id = s.session_id }
   if view and view.windows then lines[#lines + 1] = "S\t" .. s.session_id end
@@ -437,10 +439,11 @@ pub fn rfc3339_secs(s: &str) -> Option<u64> {
     u64::try_from(days * 86400 + h * 3600 + mi * 60 + sec - offset).ok()
 }
 
-/// What a host's Rex server listed: the sessions whose windows it read, and
-/// those windows' live status by window ID.
+/// What a host's Rex server listed: every session it has, the sessions
+/// whose windows it read, and those windows' live status by window ID.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct HostWindows {
+    pub all_sessions: std::collections::HashSet<String>,
     pub sessions: std::collections::HashSet<String>,
     pub tabs: HashMap<String, TabStatus>,
 }
@@ -451,7 +454,9 @@ impl HostWindows {
     pub fn parse(reply: &str) -> Self {
         let mut listed = Self::default();
         for line in reply.lines().filter(|l| !l.is_empty()) {
-            if let Some(session) = line.strip_prefix("S\t") {
+            if let Some(session) = line.strip_prefix("L\t") {
+                listed.all_sessions.insert(session.to_string());
+            } else if let Some(session) = line.strip_prefix("S\t") {
                 listed.sessions.insert(session.to_string());
             } else {
                 let (id, status) = parse_window_status(line);
@@ -471,6 +476,23 @@ impl HostWindows {
             && !window_id.is_empty()
             && self.sessions.contains(session_id)
             && !self.tabs.contains_key(window_id)
+    }
+
+    /// Whether this listing shows the task's whole session gone, as when a
+    /// hidden task's block was its session's last and Rex dropped the
+    /// session with it. A server without the session could be another or
+    /// a fresh one (see `tab_gone`), so it counts only when the server also
+    /// has one of `peers`, sessions the registry knows on this host,
+    /// proving it is the server the task ran on.
+    #[must_use]
+    pub fn session_gone<'a>(
+        &self,
+        session_id: &str,
+        mut peers: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        !session_id.is_empty()
+            && !self.all_sessions.contains(session_id)
+            && peers.any(|p| p != session_id && self.all_sessions.contains(p))
     }
 }
 
@@ -864,6 +886,12 @@ fn apply_checks(
         let Ok((host, windows, worktrees)) = handle.join() else {
             continue;
         };
+        let peers: std::collections::HashSet<String> = tasks
+            .iter()
+            .filter(|t| t["host"].as_str() == Some(host.as_str()))
+            .map(|t| field(t, "session_id"))
+            .filter(|s| !s.is_empty())
+            .collect();
         let mine = tasks
             .iter_mut()
             .filter(|t| checked(t) && t["host"].as_str() == Some(host.as_str()));
@@ -887,10 +915,12 @@ fn apply_checks(
                 continue;
             }
             // Ended only when Rex positively lists the task's session
-            // without its tab; see `HostWindows::tab_gone`.
-            let tab_gone = windows
-                .as_ref()
-                .is_some_and(|w| w.tab_gone(&session_id, window_id));
+            // without its tab, or the task's server without its session;
+            // see `HostWindows::tab_gone` and `HostWindows::session_gone`.
+            let tab_gone = windows.as_ref().is_some_and(|w| {
+                w.tab_gone(&session_id, window_id)
+                    || w.session_gone(&session_id, peers.iter().map(String::as_str))
+            });
             if let Some(status) = windows.as_ref().and_then(|w| w.tabs.get(window_id)) {
                 live.insert(window_id.to_string(), status.clone());
             }
@@ -1262,6 +1292,41 @@ mod tests {
             let listed = HostWindows::parse(reply);
             assert!(
                 !listed.tab_gone("session:01a1db3e", "window:01a1db57"),
+                "{reply:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_session_gone_from_the_tasks_server_closes_its_tab() {
+        let listed =
+            HostWindows::parse("L\tsession:a\nS\tsession:a\nL\tsession:b\nblock:1\tidle\t\t\n");
+        assert_eq!(
+            listed.all_sessions,
+            ["session:a", "session:b"].map(String::from).into()
+        );
+        // session:a, which the registry knows, proves it the task's server.
+        assert!(listed.session_gone("session:gone", ["session:a"].into_iter()));
+        // Its own session listed, unread or not, isn't gone.
+        assert!(!listed.session_gone("session:a", ["session:a"].into_iter()));
+        assert!(!listed.session_gone("session:b", ["session:a"].into_iter()));
+        // No known peer listed, or none at all: another server, maybe.
+        assert!(!listed.session_gone("session:gone", ["session:x"].into_iter()));
+        assert!(!listed.session_gone("session:gone", ["session:gone"].into_iter()));
+        assert!(!listed.session_gone("session:gone", std::iter::empty()));
+        assert!(!listed.session_gone("", ["session:a"].into_iter()));
+    }
+
+    #[test]
+    fn a_fresh_server_shows_no_session_gone() {
+        for reply in [
+            "",
+            "L\tsession:fresh\n",
+            "L\tsession:fresh\nS\tsession:fresh\n",
+        ] {
+            let listed = HostWindows::parse(reply);
+            assert!(
+                !listed.session_gone("session:01a1db3e", ["session:01a1e66a"].into_iter()),
                 "{reply:?}"
             );
         }
