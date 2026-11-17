@@ -382,6 +382,9 @@ struct Flat<'a> {
     wake: u64,
     /// When a scheduled agent resumes; 0 when unknown (a background job).
     alarm: u64,
+    /// Shown as `working` because a task it spawned, or one of theirs, is
+    /// working while it waits at its prompt (see `kids_working`).
+    waiting: bool,
 }
 
 type Key = (String, String);
@@ -1389,8 +1392,56 @@ impl App {
         }
     }
 
-    /// A tab or task row as the flat views show it.
+    /// A tab or task row as the flat views show it: an idle, done or
+    /// scheduled agent whose child tasks are working is waiting on them, so
+    /// shown as working.
     fn flat(&self, item: Item) -> Flat<'_> {
+        let mut f = self.flat_own(item);
+        let window = match item {
+            Item::Tab(i) => self.tabs[i].window_id.as_str(),
+            Item::Task(k) => self.tasks[k].window_id.as_str(),
+            Item::Status(_) => "",
+        };
+        if f.ended.is_none()
+            && matches!(f.state, "idle" | "done" | "scheduled")
+            && self.kids_working(window)
+        {
+            f.state = "working";
+            f.waiting = true;
+        }
+        f
+    }
+
+    /// Whether an open task the agent in `window` spawned, or one of
+    /// theirs in turn, is working.
+    fn kids_working(&self, window: &str) -> bool {
+        let mut seen = HashSet::new();
+        let mut todo = vec![window];
+        while let Some(w) = todo.pop() {
+            if w.is_empty() || !seen.insert(w) {
+                continue;
+            }
+            for t in self
+                .tasks
+                .iter()
+                .filter(|t| t.ended.is_none() && t.parent_window == w)
+            {
+                // The tab's own status is newer than the task's.
+                let state = match t.tab.map(|i| self.tabs[i].state) {
+                    Some(State::Idle) | None => t.state.as_str(),
+                    Some(s) => s.name(),
+                };
+                if state == "working" {
+                    return true;
+                }
+                todo.push(&t.window_id);
+            }
+        }
+        false
+    }
+
+    /// A tab or task row with its agent's own status.
+    fn flat_own(&self, item: Item) -> Flat<'_> {
         match item {
             Item::Tab(i) => {
                 let tab = &self.tabs[i];
@@ -1421,6 +1472,7 @@ impl App {
                             0
                         },
                         alarm: t.wake_at,
+                        waiting: false,
                     },
                     None => Flat {
                         project: &session.label,
@@ -1437,6 +1489,7 @@ impl App {
                         merged: "",
                         wake: 0,
                         alarm: 0,
+                        waiting: false,
                     },
                 }
             }
@@ -1456,6 +1509,7 @@ impl App {
                 merged: "",
                 wake: 0,
                 alarm: 0,
+                waiting: false,
             },
             Item::Task(k) => {
                 let t = &self.tasks[k];
@@ -1478,6 +1532,7 @@ impl App {
                         0
                     },
                     alarm: t.wake_at,
+                    waiting: false,
                 }
             }
         }
@@ -2077,7 +2132,7 @@ impl App {
         let r = self.reply.as_ref()?;
         let waiting = self
             .selected_item()
-            .is_some_and(|i| matches!(self.flat(i).state, "idle" | "done"));
+            .is_some_and(|i| matches!(self.flat_own(i).state, "idle" | "done"));
         if !waiting || !r.prompt.is_empty() {
             return None;
         }
@@ -2351,7 +2406,7 @@ impl App {
         self.preview_want().is_some()
             && self
                 .selected_item()
-                .is_some_and(|i| self.flat(i).state == "working")
+                .is_some_and(|i| self.flat_own(i).state == "working")
     }
 
     /// ctrl-c: arm an interrupt of the highlighted agent, which must be
@@ -2370,7 +2425,7 @@ impl App {
             return;
         };
         let label = self.selected_label();
-        self.note = match self.flat(item).state {
+        self.note = match self.flat_own(item).state {
             "working" => {
                 self.armed = Armed::Interrupt;
                 None
@@ -5842,13 +5897,14 @@ mod tests {
         let app = spawned();
         // The kid (blocked) and sib (done) leave their groups for the
         // lead's; a spawner that's gone leaves `lost` where it was, and the
-        // snoozed `nap` stays snoozed.
+        // snoozed `nap` stays snoozed. The idle lead waits on its working
+        // grandchild, so is working too.
         assert_eq!(
             app.rows,
             vec![
                 Item::Status("error"),
                 Item::Tab(5),
-                Item::Status("idle"),
+                Item::Status("working"),
                 Item::Tab(0),
                 Item::Tab(1),
                 Item::Tab(2),
@@ -5857,6 +5913,9 @@ mod tests {
                 Item::Tab(4),
             ]
         );
+        assert!(app.flat(Item::Tab(0)).waiting);
+        assert_eq!(app.flat_own(Item::Tab(0)).state, "idle");
+        assert_eq!(app.flat(Item::Tab(3)).state, "done");
         let branch = |t| app.tree.get(&Item::Tab(t)).map(Guide::branch);
         assert_eq!(branch(0), None);
         assert_eq!(branch(1).as_deref(), Some("├ "));

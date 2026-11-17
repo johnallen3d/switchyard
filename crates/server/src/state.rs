@@ -23,7 +23,7 @@
 //! snapshots (see `hostinfo`): each host's zoxide folders and each dev
 //! host's load and memory. Those change no snapshot and are never pushed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
@@ -334,6 +334,7 @@ impl State {
             let mut list = list.clone();
             apply_live(&mut list, &self.live());
             wakes::apply(&mut list, &self.waits);
+            apply_waiting(&mut list);
             list
         });
         json!({
@@ -459,6 +460,34 @@ impl Shared {
     }
 }
 
+/// Mark each open task whose agent is idle, done or scheduled while a task
+/// it spawned (`parent_window`), or one of theirs in turn, is working, as
+/// `working` too: it is waiting on them. Run after `wakes::apply`.
+fn apply_waiting(tasks: &mut [Value]) {
+    let open = || tasks.iter().filter(|t| t["ended_at"].is_null());
+    let parents: HashMap<&str, &str> = open()
+        .filter_map(|t| Some((t["window_id"].as_str()?, t["parent_window"].as_str()?)))
+        .filter(|(_, up)| !up.is_empty())
+        .collect();
+    // Every spawner above a working task.
+    let mut waiting: HashSet<String> = HashSet::new();
+    for t in open().filter(|t| t["status"] == "working") {
+        let mut at = t["window_id"].as_str().unwrap_or("");
+        while let Some(&up) = parents.get(at) {
+            if !waiting.insert(up.to_string()) {
+                break;
+            }
+            at = up;
+        }
+    }
+    for t in tasks.iter_mut().filter(|t| t["ended_at"].is_null()) {
+        let settled = matches!(t["status"].as_str(), Some("idle" | "done" | "scheduled"));
+        if settled && t["window_id"].as_str().is_some_and(|w| waiting.contains(w)) {
+            t["status"] = "working".into();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,6 +499,32 @@ mod tests {
         T\twindow:b\t\tshell\t~\n\
         W\twindow:b\tidle\t\t\n\
         B\t2\n";
+
+    #[test]
+    fn spawners_of_working_tasks_count_as_working() {
+        let task = |w: &str, up: &str, status: &str| json!({"window_id": w, "parent_window": up, "status": status, "ended_at": null});
+        let mut tasks = vec![
+            task("lead", "", "done"),
+            task("kid", "lead", "idle"),
+            task("grand", "kid", "working"),
+            task("calm", "", "idle"),
+            task("still", "calm", "idle"),
+            task("ask", "", "blocked"),
+            task("q", "ask", "working"),
+            json!({"window_id": "old", "parent_window": "calm", "status": "working", "ended_at": 5}),
+        ];
+        apply_waiting(&mut tasks);
+        let status: Vec<&str> = tasks
+            .iter()
+            .map(|t| t["status"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            status,
+            [
+                "working", "working", "working", "idle", "idle", "blocked", "working", "working"
+            ]
+        );
+    }
 
     #[test]
     fn split_rows_keeps_the_picker_rows_and_takes_the_status() {
