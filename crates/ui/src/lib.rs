@@ -5,6 +5,7 @@
 
 pub mod chrome;
 pub mod draw;
+pub mod emoji;
 pub mod fuzzy;
 pub mod glyphs;
 pub mod palette;

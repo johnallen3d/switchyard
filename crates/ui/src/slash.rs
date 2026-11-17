@@ -183,83 +183,129 @@ impl Menu {
     /// Draw the menu for `found` (the highlight on `selected`) just above
     /// `card` in `bounds`, or below it when there is no room above.
     pub fn draw(&self, f: &mut Frame, p: &Palette, found: &[Hit], card: Rect, bounds: Rect) {
-        let rows = cells(found.len().min(MENU_ROWS));
-        let above = card.y.saturating_sub(bounds.y);
-        let below = (bounds.y + bounds.height).saturating_sub(card.y + card.height);
-        let (y, rows) = if above >= rows || above >= below {
-            (card.y - rows.min(above), rows.min(above))
-        } else {
-            (card.y + card.height, rows.min(below))
-        };
-        if rows == 0 || card.width < 8 {
-            return;
-        }
-        let area = Rect {
-            x: card.x,
-            y,
-            width: card.width,
-            height: rows,
-        };
-        f.render_widget(Clear, area);
-        let first = self.selected.saturating_sub(usize::from(rows) - 1);
-        let width = usize::from(area.width);
-        for (n, hit) in found.iter().enumerate().skip(first).take(usize::from(rows)) {
-            let cmd = &self.commands[hit.index];
-            let bg = if n == self.selected {
-                p.hl_med
-            } else {
-                p.surface
-            };
-            // The name, with the characters the query matched picked out.
-            let plain = Style::new().fg(p.text).bg(bg);
-            let picked = Style::new().fg(p.foam).bg(bg).add_modifier(Modifier::BOLD);
-            let mut spans = vec![
-                Span::styled("  ", Style::new().bg(bg)),
-                Span::styled("/", plain),
-            ];
-            let mut run = String::new();
-            let mut run_hit = false;
-            for (k, ch) in cmd.name.chars().enumerate() {
-                let is_hit = hit.chars.binary_search(&k).is_ok();
-                if is_hit != run_hit && !run.is_empty() {
-                    spans.push(Span::styled(
-                        std::mem::take(&mut run),
-                        if run_hit { picked } else { plain },
-                    ));
+        let rows: Vec<Row> = found
+            .iter()
+            .map(|hit| {
+                let cmd = &self.commands[hit.index];
+                Row {
+                    lead: "/".into(),
+                    name: &cmd.name,
+                    chars: &hit.chars,
+                    tail: "",
+                    hint: &cmd.hint,
+                    description: cmd.description.lines().next().unwrap_or(""),
                 }
-                run_hit = is_hit;
-                run.push(ch);
-            }
-            if !run.is_empty() {
-                spans.push(Span::styled(run, if run_hit { picked } else { plain }));
-            }
-            if !cmd.hint.is_empty() {
-                spans.push(Span::styled(
-                    format!(" {}", cmd.hint),
-                    Style::new().fg(p.subtle).bg(bg),
-                ));
-            }
-            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            if !cmd.description.is_empty() && used + 4 < width {
-                let first_line = cmd.description.lines().next().unwrap_or("");
-                spans.push(Span::styled(
-                    format!("  {}", clip(first_line, width - used - 3)),
-                    Style::new().fg(p.muted).bg(bg),
-                ));
-            }
-            let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
-            spans.push(Span::styled(
-                " ".repeat(width.saturating_sub(used)),
-                Style::new().bg(bg),
-            ));
-            let row = Rect {
-                y: area.y + cells(n - first),
-                height: 1,
-                ..area
-            };
-            f.render_widget(Line::from(spans), row);
-        }
+            })
+            .collect();
+        draw_rows(f, p, &rows, self.selected, card, bounds);
     }
+}
+
+/// A completion menu row: `lead`, then `name` with its `chars` the query
+/// matched picked out, `tail`, and dimmer `hint` and `description`.
+pub(crate) struct Row<'a> {
+    pub lead: String,
+    pub name: &'a str,
+    pub chars: &'a [usize],
+    pub tail: &'a str,
+    pub hint: &'a str,
+    pub description: &'a str,
+}
+
+/// Draw a completion menu of `rows` (the highlight on `selected`) just above
+/// `card` in `bounds`, or below it when there is no room above.
+pub(crate) fn draw_rows(
+    f: &mut Frame,
+    p: &Palette,
+    rows: &[Row],
+    selected: usize,
+    card: Rect,
+    bounds: Rect,
+) {
+    let height = cells(rows.len().min(MENU_ROWS));
+    let above = card.y.saturating_sub(bounds.y);
+    let below = (bounds.y + bounds.height).saturating_sub(card.y + card.height);
+    let (y, height) = if above >= height || above >= below {
+        (card.y - height.min(above), height.min(above))
+    } else {
+        (card.y + card.height, height.min(below))
+    };
+    if height == 0 || card.width < 8 {
+        return;
+    }
+    let area = Rect {
+        x: card.x,
+        y,
+        width: card.width,
+        height,
+    };
+    f.render_widget(Clear, area);
+    let first = selected.saturating_sub(usize::from(height) - 1);
+    let width = usize::from(area.width);
+    for (n, row) in rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(usize::from(height))
+    {
+        let bg = if n == selected { p.hl_med } else { p.surface };
+        let line = row_line(p, row, bg, width);
+        let at = Rect {
+            y: area.y + cells(n - first),
+            height: 1,
+            ..area
+        };
+        f.render_widget(line, at);
+    }
+}
+
+/// One menu row on `bg`, filled out to `width` columns.
+fn row_line<'a>(p: &Palette, row: &Row<'a>, bg: ratatui::style::Color, width: usize) -> Line<'a> {
+    // The name, with the characters the query matched picked out.
+    let plain = Style::new().fg(p.text).bg(bg);
+    let picked = Style::new().fg(p.foam).bg(bg).add_modifier(Modifier::BOLD);
+    let mut spans = vec![
+        Span::styled("  ", Style::new().bg(bg)),
+        Span::styled(row.lead.clone(), plain),
+    ];
+    let mut run = String::new();
+    let mut run_hit = false;
+    for (k, ch) in row.name.chars().enumerate() {
+        let is_hit = row.chars.binary_search(&k).is_ok();
+        if is_hit != run_hit && !run.is_empty() {
+            spans.push(Span::styled(
+                std::mem::take(&mut run),
+                if run_hit { picked } else { plain },
+            ));
+        }
+        run_hit = is_hit;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if run_hit { picked } else { plain }));
+    }
+    if !row.tail.is_empty() {
+        spans.push(Span::styled(row.tail, plain));
+    }
+    if !row.hint.is_empty() {
+        spans.push(Span::styled(
+            format!(" {}", row.hint),
+            Style::new().fg(p.subtle).bg(bg),
+        ));
+    }
+    let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+    if !row.description.is_empty() && used + 4 < width {
+        spans.push(Span::styled(
+            format!("  {}", clip(row.description, width - used - 3)),
+            Style::new().fg(p.muted).bg(bg),
+        ));
+    }
+    let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+    spans.push(Span::styled(
+        " ".repeat(width.saturating_sub(used)),
+        Style::new().bg(bg),
+    ));
+    Line::from(spans)
 }
 
 /// `s` cut to `room` columns, with `…` when cut.

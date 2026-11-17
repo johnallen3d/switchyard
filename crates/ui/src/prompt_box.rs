@@ -9,8 +9,9 @@
 //! shift-Enter (or arrives in a paste).
 //!
 //! Given the agent's slash commands (`set_commands`), it completes them:
-//! see `slash`. Callers offer keys to `menu_key` first and draw the menu
-//! with `draw_menu` after everything else.
+//! see `slash`. It completes emoji shortcodes after `:` too: see `emoji`.
+//! Callers offer keys to `menu_key` first and draw the menu with
+//! `draw_menu` after everything else.
 
 use std::io;
 use std::process::Command;
@@ -34,7 +35,7 @@ use unicode_width::UnicodeWidthChar;
 use crate::Palette;
 use crate::chrome;
 use crate::draw::{cells, str_width};
-use crate::slash;
+use crate::{emoji, slash};
 
 /// The rows a prompt box adds around its text: soft top and bottom edges, a
 /// gap and the chip row.
@@ -50,6 +51,23 @@ pub struct PromptBox {
     pub saved_ok: bool,
     /// The agent's slash commands and their menu.
     slash: slash::Menu,
+    emoji: emoji::Menu,
+}
+
+/// The completion menu open at the cursor, the word it would replace and
+/// its matches.
+enum Open {
+    Slash(slash::Word, Vec<slash::Hit>),
+    Emoji(slash::Word, Vec<emoji::Hit>),
+}
+
+impl Open {
+    fn len(&self) -> usize {
+        match self {
+            Open::Slash(_, found) => found.len(),
+            Open::Emoji(_, found) => found.len(),
+        }
+    }
 }
 
 impl Default for PromptBox {
@@ -69,6 +87,7 @@ impl PromptBox {
             saved: String::new(),
             saved_ok: true,
             slash: slash::Menu::default(),
+            emoji: emoji::Menu::default(),
         }
     }
 
@@ -91,9 +110,19 @@ impl PromptBox {
         self.paste(text);
     }
 
-    /// Edit with readline keys (see `text_key`).
+    /// Edit with readline keys (see `text_key`). A typed `:` that closes
+    /// a known `:shortcode:` turns it into its emoji.
     pub fn key(&mut self, k: KeyEvent) {
         text_key(&mut self.field, k);
+        if k.code == KeyCode::Char(':') && !k.modifiers.contains(KeyModifiers::CONTROL) {
+            let c = self.field.cursor();
+            if let Some((start, end, e)) = emoji::closed_at(self.field.lines(), (c.0, c.1)) {
+                self.field
+                    .move_cursor(CursorMove::Jump(cells(c.0), cells(start)));
+                self.field.delete_str(end - start);
+                self.field.insert_str(e);
+            }
+        }
     }
 
     /// Complete these commands after `/`: anywhere in the text, or (for
@@ -106,44 +135,77 @@ impl PromptBox {
         !self.slash.is_empty()
     }
 
-    fn menu(&mut self) -> Option<(slash::Word, Vec<slash::Hit>)> {
+    fn menu(&mut self) -> Option<Open> {
         let c = self.field.cursor();
-        self.slash.open(self.field.lines(), (c.0, c.1))
+        let cursor = (c.0, c.1);
+        if let Some((word, found)) = self.slash.open(self.field.lines(), cursor) {
+            return Some(Open::Slash(word, found));
+        }
+        let (word, found) = self.emoji.open(self.field.lines(), cursor)?;
+        Some(Open::Emoji(word, found))
     }
 
-    /// Whether the slash-command menu is showing.
+    /// Whether the slash-command or emoji menu is showing.
     pub fn menu_open(&mut self) -> bool {
         self.menu().is_some()
     }
 
-    /// Take a key for the open menu: Tab completes the highlighted command,
-    /// Up/Down (ctrl-p/n, shift-Tab) move, Escape closes it. False when the
-    /// menu is closed or the key isn't one of these.
+    /// Take a key for the open menu: Tab completes the highlighted command
+    /// or emoji, Up/Down (ctrl-p/n, shift-Tab) move, Escape closes it. False
+    /// when the menu is closed or the key isn't one of these.
     pub fn menu_key(&mut self, k: KeyEvent) -> bool {
-        let Some((word, found)) = self.menu() else {
+        let Some(open) = self.menu() else {
             return false;
         };
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        match k.code {
-            KeyCode::Tab => self.complete(&word, found[self.slash.selected].index),
-            KeyCode::Down => self.slash.step(1, found.len()),
-            KeyCode::Char('n') if ctrl => self.slash.step(1, found.len()),
-            KeyCode::Up | KeyCode::BackTab => self.slash.step(-1, found.len()),
-            KeyCode::Char('p') if ctrl => self.slash.step(-1, found.len()),
-            KeyCode::Esc => self.slash.dismiss(),
+        let step = match k.code {
+            KeyCode::Tab => {
+                match &open {
+                    Open::Slash(word, found) => {
+                        let name = format!(
+                            "/{}",
+                            self.slash.command(found[self.slash.selected].index).name
+                        );
+                        self.complete(word, &name, true);
+                    }
+                    Open::Emoji(word, found) => {
+                        let e = emoji::emoji(found[self.emoji.selected].index);
+                        self.complete(word, e, false);
+                    }
+                }
+                return true;
+            }
+            KeyCode::Down => 1,
+            KeyCode::Char('n') if ctrl => 1,
+            KeyCode::Up | KeyCode::BackTab => -1,
+            KeyCode::Char('p') if ctrl => -1,
+            KeyCode::Esc => {
+                match open {
+                    Open::Slash(..) => self.slash.dismiss(),
+                    Open::Emoji(..) => self.emoji.dismiss(),
+                }
+                return true;
+            }
             _ => return false,
+        };
+        let count = open.len();
+        match open {
+            Open::Slash(..) => self.slash.step(step, count),
+            Open::Emoji(..) => self.emoji.step(step, count),
         }
         true
     }
 
-    /// Replace `word` with command `i` and a space after it.
-    fn complete(&mut self, word: &slash::Word, i: usize) {
-        let name = format!("/{}", self.slash.command(i).name);
+    /// Replace `word` with `text`, and a space after it when `space`.
+    fn complete(&mut self, word: &slash::Word, text: &str, space: bool) {
         let line_len = self.field.lines()[word.row].chars().count();
         self.field
             .move_cursor(CursorMove::Jump(cells(word.row), cells(word.start)));
         self.field.delete_str(word.end - word.start);
-        self.field.insert_str(&name);
+        self.field.insert_str(text);
+        if !space {
+            return;
+        }
         // Step over a space already there rather than adding a second.
         if word.end < line_len {
             self.field.move_cursor(CursorMove::Forward);
@@ -152,11 +214,13 @@ impl PromptBox {
         }
     }
 
-    /// Draw the open slash-command menu next to the box drawn in `card`,
-    /// within `bounds`; call it after everything else.
+    /// Draw the open slash-command or emoji menu next to the box drawn in
+    /// `card`, within `bounds`; call it after everything else.
     pub fn draw_menu(&mut self, f: &mut Frame, p: &Palette, card: Rect, bounds: Rect) {
-        if let Some((_, found)) = self.menu() {
-            self.slash.draw(f, p, &found, card, bounds);
+        match self.menu() {
+            Some(Open::Slash(_, found)) => self.slash.draw(f, p, &found, card, bounds),
+            Some(Open::Emoji(_, found)) => self.emoji.draw(f, p, &found, card, bounds),
+            None => {}
         }
     }
 
@@ -546,5 +610,22 @@ mod tests {
         assert!(!b.menu_key(key(KeyCode::Tab)));
         typed(&mut b, "r");
         assert!(b.menu_open());
+    }
+
+    #[test]
+    fn tab_puts_in_the_highlighted_emoji() {
+        let mut b = PromptBox::new();
+        typed(&mut b, "ship it :tad");
+        assert!(b.menu_open());
+        assert!(b.menu_key(key(KeyCode::Tab)));
+        assert_eq!(b.text(), "ship it 🎉");
+        assert!(!b.menu_open());
+    }
+
+    #[test]
+    fn a_typed_shortcode_turns_into_its_emoji() {
+        let mut b = PromptBox::new();
+        typed(&mut b, "go :rocket: now :nope_nope:");
+        assert_eq!(b.text(), "go 🚀 now :nope_nope:");
     }
 }

@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 switchyard-core.workspace = true
 libc.workspace = true
+emojis.workspace = true
 nucleo-matcher.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true

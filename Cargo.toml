@@ -28,6 +28,7 @@ switchyard-server = { path = "crates/server" }
 switchyard-spawn = { path = "crates/spawn" }
 switchyard-tabs = { path = "crates/tab-picker" }
 libc = "0.2"
+emojis = "0.9"
 nucleo-matcher = "0.3"
 pulldown-cmark = { version = "0.13.5", default-features = false }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
