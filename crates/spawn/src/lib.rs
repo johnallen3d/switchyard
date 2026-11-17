@@ -66,6 +66,7 @@
 
 mod picker;
 mod run;
+mod trust;
 
 use std::io;
 

@@ -9,6 +9,8 @@ use switchyard_core::naming::branch_and_slug;
 use switchyard_core::rex::home;
 use switchyard_core::sessions::{new_session_id, session_exists_here, work_env};
 
+use crate::trust::{claude_config, trust_at};
+
 fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => home().join(rest),
@@ -164,6 +166,27 @@ fn task_note(worktree: &Path, branch: &str) -> String {
     )
 }
 
+/// Mark the repository, and a worktree outside it, trusted in the Claude
+/// profile's config (see `trust`), so the agent doesn't stop on Claude's
+/// trust dialog. `env` is the profile's own environment, if any. A failure
+/// is only shown: the dialog then asks as before.
+fn trust_folders(env: &[(String, String)], repo: &Path, worktree: &Path) {
+    let dir = env
+        .iter()
+        .find(|(k, _)| k == "CLAUDE_CONFIG_DIR")
+        .map(|(_, v)| v.clone())
+        .or_else(|| std::env::var("CLAUDE_CONFIG_DIR").ok());
+    let config = claude_config(dir.as_deref());
+    match trust_at(&config, &[repo.to_path_buf(), worktree.to_path_buf()]) {
+        Ok(marked) => {
+            for dir in marked {
+                status(&format!("Trusting {} for Claude", dir.display()));
+            }
+        }
+        Err(e) => eprintln!("\x1b[33mswitchyard: trusting the folder: {e}\x1b[0m"),
+    }
+}
+
 /// `session` is the agent session to start (`mode` "new") or resume
 /// ("resume"); None when the command gave none. A new session
 /// starts on `prompt` when there is one.
@@ -188,17 +211,19 @@ pub fn run(
             let mut agent = Command::new(harness);
             // The inherited $PWD still names the tab's start directory.
             agent.env("PWD", &worktree);
+            let mut env = Vec::new();
             if profile == "work" {
                 match work_env() {
-                    Ok(env) => {
-                        agent.envs(env);
-                    }
+                    Ok(work) => env = work,
                     Err(e) => eprintln!("\x1b[31mswitchyard: work profile: {e}\x1b[0m"),
                 }
             }
-            // Spawned Claude tasks always run without permission prompts.
+            agent.envs(env.iter().map(|(k, v)| (k, v)));
+            // Spawned Claude tasks always run without permission prompts,
+            // and in folders they trust.
             if harness == "claude" {
                 agent.arg("--dangerously-skip-permissions");
+                trust_folders(&env, &expand(path), &worktree);
             }
             // On resume too: an older session never had the note.
             let branch = branch_and_slug(name).0;

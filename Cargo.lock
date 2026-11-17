@@ -847,6 +847,7 @@ dependencies = [
  "nucleo-matcher",
  "ratatui",
  "ratatui-textarea",
+ "serde_json",
  "switchyard-core",
  "switchyard-ui",
 ]

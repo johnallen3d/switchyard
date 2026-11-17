@@ -9,6 +9,7 @@ switchyard-ui.workspace = true
 nucleo-matcher.workspace = true
 ratatui.workspace = true
 ratatui-textarea.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
