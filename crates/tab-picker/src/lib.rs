@@ -35,7 +35,8 @@
 //!   order (Waiting, Failed, Done, Working, Idle, No status). Plain tabs
 //!   with no agent are left out, as is the picker's own `switchyard` tab;
 //!   the quick float (cmd+k) lists them under Tabs.
-//!   Pinned tasks lead the list and Snoozed ones trail it. A task an
+//!   Pinned tasks lead the list and Snoozed ones trail it, with the agents
+//!   scheduled to resume themselves (a timer or background job). A task an
 //!   agent spawned (through the MCP endpoint's `spawn_task`) hangs off its
 //!   spawner's row as a small tree when both are listed (see `nest`).
 //!   With the width, the list is a sidebar on the left (search over it,
@@ -201,18 +202,10 @@ pub(crate) fn backdrop(f: &mut Frame, p: &Palette) {
 }
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
-/// no known status), the tabs with no agent (quick float only), then Snoozed.
-const SECTIONS: [&str; 10] = [
-    "pinned",
-    "blocked",
-    "error",
-    "done",
-    "working",
-    "scheduled",
-    "idle",
-    "",
-    "tabs",
-    "snoozed",
+/// no known status), the tabs with no agent (quick float only), then Snoozed
+/// (which takes the scheduled agents too).
+const SECTIONS: [&str; 9] = [
+    "pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed",
 ];
 
 /// How long a pin or snooze made here holds over deliveries that don't
@@ -1163,7 +1156,8 @@ impl App {
     }
 
     /// The Agents group a row goes in: `pinned`, `snoozed` (which wins), or
-    /// its status (empty when unknown).
+    /// its status (empty when unknown). A scheduled agent, which will resume
+    /// itself, is snoozed unless pinned.
     fn agent_group(&self, item: Item) -> &'static str {
         let task = self.task_of(item);
         if task.is_some_and(|t| t.is_snoozed(self.now)) {
@@ -1177,7 +1171,7 @@ impl App {
             "error" => "error",
             "done" => "done",
             "working" => "working",
-            "scheduled" => "scheduled",
+            "scheduled" => "snoozed",
             "idle" => "idle",
             _ => "",
         }
@@ -1315,7 +1309,8 @@ impl App {
 
     /// Where an agent goes among others in its group: most urgent first
     /// and, within a state that wants John, the one waiting longest first
-    /// (unknown times last); the snoozed by when they wake. Working and idle
+    /// (unknown times last); the snoozed by when they wake (a snooze, else a
+    /// scheduled agent's timer; unknown times last). Working and idle
     /// agents go by name: their status time moves with every status
     /// message, and rows that swap as agents report are hard to pick. Ties
     /// go by name too, so the order never depends on which host answered
@@ -1328,13 +1323,15 @@ impl App {
             f.host.to_string(),
         );
         if self.agent_group(i) == "snoozed" {
-            return (std::cmp::Reverse(0), f.wake, name);
+            let at = match (f.wake, f.alarm) {
+                (wake, _) if wake > 0 => wake,
+                (_, alarm) if f.state == "scheduled" && alarm > 0 => alarm,
+                _ => u64::MAX,
+            };
+            return (std::cmp::Reverse(0), at, name);
         }
         let at = match f.state {
             "working" | "idle" => 0,
-            // The one to resume soonest first, unknown times last.
-            "scheduled" if f.alarm > 0 => f.alarm,
-            "scheduled" => u64::MAX,
             _ if f.since == 0 => u64::MAX,
             _ => f.since,
         };
@@ -3567,7 +3564,6 @@ impl App {
                 (count("error"), "failed", p.love),
                 (count("done"), "done", p.pine),
                 (count("working"), "working", p.foam),
-                (count("scheduled"), "scheduled", p.iris),
             ] {
                 if n > 0 {
                     right.push(Span::styled(
@@ -3772,7 +3768,6 @@ impl App {
             "error" => ("✗", "Failed", p.love),
             "done" => ("✓", "Done", p.pine),
             "working" => ("●", "Working", p.foam),
-            "scheduled" => ("◷", "Scheduled", p.iris),
             "idle" => ("·", "Idle", p.muted),
             "pinned" => (ICON_PIN, "Pinned", p.iris),
             "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
@@ -5829,7 +5824,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_with_a_timer_pending_are_scheduled_soonest_first() {
+    fn agents_with_a_timer_pending_are_snoozed_soonest_first() {
         let mut app = App::new((String::new(), String::new()), View::Inbox);
         app.follow = false;
         app.now = 1000;
@@ -5857,12 +5852,12 @@ mod tests {
             vec![
                 Item::Status("working"),
                 Item::Tab(2),
-                Item::Status("scheduled"),
+                Item::Status("idle"),
+                Item::Tab(3),
+                Item::Status("snoozed"),
                 Item::Tab(1),
                 Item::Tab(0),
                 Item::Tab(4),
-                Item::Status("idle"),
-                Item::Tab(3),
             ]
         );
         assert_eq!(
