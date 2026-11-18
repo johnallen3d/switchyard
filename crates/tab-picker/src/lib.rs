@@ -38,7 +38,11 @@
 //!   Pinned tasks lead the list and Snoozed ones trail it, with the agents
 //!   scheduled to resume themselves (a timer or background job). A task an
 //!   agent spawned (through the MCP endpoint's `spawn_task`) hangs off its
-//!   spawner's row as a small tree when both are listed (see `nest`).
+//!   spawner's row as a small tree when both are listed (see `nest`),
+//!   folded away by default so ctrl-j and ctrl-k pass over it: the
+//!   spawner's name carries `▸N` (gold while one of them waits on a
+//!   prompt), Right lists them under it, and Left folds them again. A
+//!   search lists every match.
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
 //!   work items and host over its whole status message, the agent's
@@ -403,6 +407,67 @@ impl Guide {
     }
 }
 
+/// Push `item`'s children, and theirs in turn, each with its guide, when
+/// `item` is `open`.
+fn descend(
+    item: Item,
+    lead: &str,
+    children: &HashMap<Item, Vec<Item>>,
+    open: &HashSet<Item>,
+    rows: &mut Vec<Item>,
+    tree: &mut HashMap<Item, Guide>,
+) {
+    let Some(kids) = children.get(&item).filter(|_| open.contains(&item)) else {
+        return;
+    };
+    for (n, &kid) in kids.iter().enumerate() {
+        let guide = Guide {
+            lead: lead.to_string(),
+            last: n + 1 == kids.len(),
+        };
+        let next = guide.stem();
+        rows.push(kid);
+        tree.insert(kid, guide);
+        descend(kid, &next, children, open, rows, tree);
+    }
+}
+
+/// Every row nested under `item`, at any depth.
+fn descendants(item: Item, children: &HashMap<Item, Vec<Item>>) -> Vec<Item> {
+    let mut found = Vec::new();
+    let mut todo = vec![item];
+    while let Some(at) = todo.pop() {
+        for &kid in children.get(&at).into_iter().flatten() {
+            found.push(kid);
+            todo.push(kid);
+        }
+    }
+    found
+}
+
+/// A spawner's rows nested under it: folded away (the default) or listed
+/// under it (Right unfolds, Left folds; a search lists them all).
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct Fold {
+    /// Its descendants, at every depth.
+    rows: usize,
+    /// Whether they are listed under it.
+    open: bool,
+    /// Whether one of them, folded away, is waiting on a prompt.
+    blocked: bool,
+}
+
+impl Fold {
+    /// The badge after its name: `▸3` folded, `▾` unfolded.
+    fn badge(self) -> String {
+        if self.open {
+            " ▾".to_string()
+        } else {
+            format!(" ▸{}", self.rows)
+        }
+    }
+}
+
 /// The ctrl-s prompt: when to wake the highlighted task, typed (see
 /// snooze.rs). Empty, it wakes a snoozed task.
 struct Snooze {
@@ -674,6 +739,12 @@ struct App {
     /// Inbox rows nested under the agent that spawned them (see `nest`),
     /// with the tree guides they are drawn with.
     tree: HashMap<Item, Guide>,
+    /// Each Inbox row with rows nested under it: how many, folded or not
+    /// (see `Fold`).
+    folds: HashMap<Item, Fold>,
+    /// The spawners whose children John unfolded (Right); the rest fold
+    /// theirs away, so ctrl-j and ctrl-k pass over them.
+    unfolded: HashSet<Key>,
     selected: Option<usize>,
     offset: usize,
     /// What ctrl-x has armed for the selected task; Enter confirms it.
@@ -803,6 +874,8 @@ impl App {
             rows: Vec::new(),
             hits: HashMap::new(),
             tree: HashMap::new(),
+            folds: HashMap::new(),
+            unfolded: HashSet::new(),
             selected: None,
             offset: 0,
             armed: Armed::No,
@@ -1108,13 +1181,39 @@ impl App {
         self.selected_item().and_then(|i| self.key_of(i))
     }
 
+    /// Highlight `want`'s row; for a row folded away under its spawner
+    /// (see `Fold`), the spawner's, else the first row.
     fn select_key(&mut self, want: Option<Key>) {
-        let at = want.and_then(|w| {
-            self.rows
-                .iter()
-                .position(|&i| self.key_of(i).as_ref() == Some(&w))
-        });
+        let at = want.and_then(|w| self.row_of_key(&w));
         self.selected = at.or_else(|| self.rows.iter().position(selectable));
+    }
+
+    /// The row with this key, or, folded away, its nearest listed spawner's.
+    fn row_of_key(&self, want: &Key) -> Option<usize> {
+        let at = self
+            .rows
+            .iter()
+            .position(|&i| self.key_of(i).as_ref() == Some(want));
+        if at.is_some() || self.view != View::Inbox {
+            return at;
+        }
+        let mut up = self.item_of_key(want).and_then(|i| self.parent_of(i));
+        let mut seen = HashSet::new();
+        while let Some(i) = up.filter(|&i| seen.insert(i)) {
+            if let Some(at) = self.rows.iter().position(|&r| r == i) {
+                return Some(at);
+            }
+            up = self.parent_of(i);
+        }
+        None
+    }
+
+    /// The listed tab, else the open task, with this key.
+    fn item_of_key(&self, key: &Key) -> Option<Item> {
+        (0..self.tabs.len())
+            .map(Item::Tab)
+            .chain((0..self.tasks.len()).map(Item::Task))
+            .find(|&i| self.key_of(i).as_ref() == Some(key))
     }
 
     /// The task a row stands for: a tab's open task, or the row's own.
@@ -1546,6 +1645,7 @@ impl App {
         self.rows.clear();
         self.hits.clear();
         self.tree.clear();
+        self.folds.clear();
         let pattern = Pattern::parse(&self.query, CaseMatching::Smart, Normalization::Smart);
         let filtering = !self.query.trim().is_empty();
         let best = match self.view {
@@ -1654,7 +1754,7 @@ impl App {
             self.rows.push(Item::Status(heading));
             self.rows.extend(rows);
         }
-        self.nest();
+        self.nest(filtering);
         best.map(|(_, i)| i)
     }
 
@@ -1686,30 +1786,9 @@ impl App {
     /// (see `Guide`), most urgent child first. A pinned or snoozed child
     /// stays in its group unless its spawner is in that group too, so a pin
     /// or snooze still says where the row goes. Headings left with no rows
-    /// go.
-    fn nest(&mut self) {
-        /// Push `item`'s children, and theirs in turn, each with its guide.
-        fn descend(
-            item: Item,
-            lead: &str,
-            children: &HashMap<Item, Vec<Item>>,
-            rows: &mut Vec<Item>,
-            tree: &mut HashMap<Item, Guide>,
-        ) {
-            let Some(kids) = children.get(&item) else {
-                return;
-            };
-            for (n, &kid) in kids.iter().enumerate() {
-                let guide = Guide {
-                    lead: lead.to_string(),
-                    last: n + 1 == kids.len(),
-                };
-                let next = guide.stem();
-                rows.push(kid);
-                tree.insert(kid, guide);
-                descend(kid, &next, children, rows, tree);
-            }
-        }
+    /// go. A spawner's children stay folded away under it (see `Fold`)
+    /// unless John unfolded it or a search (`filtering`) is listing rows.
+    fn nest(&mut self, filtering: bool) {
         let listed: HashSet<Item> = self.rows.iter().copied().filter(selectable).collect();
         let mut parent: HashMap<Item, Item> = HashMap::new();
         for &item in &listed {
@@ -1755,6 +1834,23 @@ impl App {
         for kids in children.values_mut() {
             kids.sort_by_cached_key(|&i| self.agent_key(i));
         }
+        let open: HashSet<Item> = children
+            .keys()
+            .copied()
+            .filter(|&up| filtering || self.key_of(up).is_some_and(|k| self.unfolded.contains(&k)))
+            .collect();
+        for &up in children.keys() {
+            let below = descendants(up, &children);
+            let blocked = below.iter().any(|&i| self.flat(i).state == "blocked");
+            self.folds.insert(
+                up,
+                Fold {
+                    rows: below.len(),
+                    open: open.contains(&up),
+                    blocked,
+                },
+            );
+        }
         let old = std::mem::take(&mut self.rows);
         let mut rows = Vec::with_capacity(old.len());
         for item in old {
@@ -1769,7 +1865,7 @@ impl App {
                 _ if parent.contains_key(&item) => {}
                 _ => {
                     rows.push(item);
-                    descend(item, "", &children, &mut rows, &mut self.tree);
+                    descend(item, "", &children, &open, &mut rows, &mut self.tree);
                 }
             }
         }
@@ -1865,6 +1961,46 @@ impl App {
         } else {
             draw::step_wrapping(&self.rows, at, delta, selectable)
         });
+    }
+
+    /// Right: list the highlighted spawner's children under it (see
+    /// `Fold`), or, already listed, move to the first.
+    fn unfold(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        match self.folds.get(&item) {
+            Some(f) if f.open => self.step(1),
+            Some(_) => {
+                if let Some(k) = self.key_of(item) {
+                    self.unfolded.insert(k);
+                }
+                self.refilter();
+            }
+            None => {}
+        }
+    }
+
+    /// Left: fold the highlighted spawner's children away, or a nested
+    /// row's siblings, highlighting their spawner. While searching, every
+    /// row stays listed.
+    fn fold(&mut self) {
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let up = if self.folds.get(&item).is_some_and(|f| f.open) {
+            item
+        } else if self.tree.contains_key(&item)
+            && let Some(up) = self.parent_of(item)
+        {
+            up
+        } else {
+            return;
+        };
+        let Some(key) = self.key_of(up) else { return };
+        self.moved();
+        self.unfolded.remove(&key);
+        self.refilter_to(Some(key));
     }
 
     /// Move to the first pick of the next group, or back to the first pick
@@ -2562,6 +2698,8 @@ impl App {
             KeyCode::End if self.expanded => {}
             KeyCode::Up if alt => self.jump_group(false),
             KeyCode::Down if alt => self.jump_group(true),
+            KeyCode::Right if self.view == View::Inbox => self.unfold(),
+            KeyCode::Left if self.view == View::Inbox => self.fold(),
             KeyCode::Up => self.step(-1),
             KeyCode::Down => self.step(1),
             KeyCode::PageUp => self.step(-page),
@@ -4179,7 +4317,10 @@ impl App {
         let guide = self.tree.get(&item);
         let (branch, stem) = guide.map(|g| (g.branch(), g.stem())).unwrap_or_default();
         let guide_style = Style::new().fg(p.muted).bg(bg);
-        let room = width.saturating_sub(3 + str_width(&branch) + str_width(&when) + 1);
+        let fold = self.fold_badge(item, bg);
+        let room = width.saturating_sub(
+            3 + str_width(&branch) + str_width(&when) + 1 + str_width(&fold.content),
+        );
         let name_style = Style::new().fg(p.text).bg(bg);
         let name_style = if selected {
             name_style.add_modifier(Modifier::BOLD)
@@ -4192,6 +4333,7 @@ impl App {
             Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)),
         ];
         left.extend(highlight(t.name, &hits.name, room, false, name_style, hl));
+        left.push(fold);
         let line = Rect { height: 1, ..r };
         f.render_widget(Line::from(left), line);
         // A span, not a styled Line: a Line's style colours its whole row.
@@ -4324,13 +4466,18 @@ impl App {
         let branch = self.tree.get(&item).map(Guide::branch).unwrap_or_default();
         let branch_w = str_width(&branch);
         left.push(Span::styled(branch, Style::new().fg(p.muted).bg(bg)));
-        column(
-            &mut left,
-            t.name,
-            &hits.name,
-            name_w.saturating_sub(branch_w),
-            name_style,
-        );
+        // A spawner's fold badge follows its name, inside the column.
+        let fold = self.fold_badge(item, bg);
+        let fold_w = str_width(&fold.content);
+        let name_room = name_w.saturating_sub(branch_w + fold_w);
+        let spans = highlight(t.name, &hits.name, name_room, false, name_style, hl);
+        let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        left.extend(spans);
+        left.push(fold);
+        left.push(Span::styled(
+            " ".repeat(name_room.saturating_sub(used) + 2),
+            Style::new().bg(bg),
+        ));
         if let Item::Tab(tab) = item
             && plain
         {
@@ -4496,6 +4643,23 @@ impl App {
         row
     }
 
+    /// The badge after a spawner's name (see `Fold`), gold while a row
+    /// folded under it waits on a prompt; empty for any other row.
+    fn fold_badge(&self, item: Item, bg: Color) -> Span<'static> {
+        let p = &self.p;
+        match self.folds.get(&item) {
+            Some(f) => {
+                let fg = if f.blocked && !f.open {
+                    p.gold
+                } else {
+                    p.muted
+                };
+                Span::styled(f.badge(), Style::new().fg(fg).bg(bg))
+            }
+            None => Span::raw(""),
+        }
+    }
+
     /// The help float's keys for moving and searching in this view.
     fn moving_keys(&self) -> Vec<(&'static str, &'static str)> {
         let mut moving = vec![
@@ -4505,6 +4669,7 @@ impl App {
         ];
         if self.view == View::Inbox {
             moving.push(("⌥↑↓", "previous, next group"));
+            moving.push(("→ ←", "unfold, fold the agents a task spawned"));
         }
         if self.view == View::Archive {
             moving.extend([
@@ -5902,9 +6067,19 @@ mod tests {
         app
     }
 
+    /// `spawned` with every spawner unfolded.
+    fn spawned_open() -> App {
+        let mut app = spawned();
+        app.unfolded = (0..app.tabs.len())
+            .filter_map(|t| app.key_of(Item::Tab(t)))
+            .collect();
+        app.refilter();
+        app
+    }
+
     #[test]
     fn spawned_agents_nest_under_their_spawner_most_urgent_first() {
-        let app = spawned();
+        let app = spawned_open();
         // The kid (blocked) and sib (done) leave their groups for the
         // lead's; a spawner that's gone leaves `lost` where it was, and the
         // snoozed `nap` stays snoozed. The idle lead waits on its working
@@ -5942,6 +6117,58 @@ mod tests {
     }
 
     #[test]
+    fn spawned_agents_fold_under_their_spawner_until_unfolded() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = spawned();
+        // Folded by default: the lead stands for its three, one blocked.
+        assert_eq!(
+            app.rows,
+            vec![
+                Item::Status("error"),
+                Item::Tab(5),
+                Item::Status("working"),
+                Item::Tab(0),
+                Item::Status("snoozed"),
+                Item::Tab(4),
+            ]
+        );
+        let lead = app.folds[&Item::Tab(0)];
+        assert_eq!((lead.rows, lead.open, lead.blocked), (3, false, true));
+        assert_eq!(lead.badge(), " ▸3");
+        // ctrl-j passes from the lead to the next group's row, wrapping.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
+        app.key(ctrl('j'));
+        assert_eq!(app.selected_item(), Some(Item::Tab(5)));
+        // A folded row asked for highlights its spawner.
+        app.select_key(app.key_of(Item::Tab(2)));
+        assert_eq!(app.selected_item(), Some(Item::Tab(0)));
+        // Right lists the children; the kid keeps its own folded.
+        app.key(plain(KeyCode::Right));
+        assert_eq!(&app.rows[3..6], &[Item::Tab(0), Item::Tab(1), Item::Tab(3)]);
+        assert_eq!(app.selected_item(), Some(Item::Tab(0)));
+        assert_eq!(app.folds[&Item::Tab(1)].badge(), " ▸1");
+        // Right again moves into them, and on the kid unfolds its own.
+        app.key(plain(KeyCode::Right));
+        assert_eq!(app.selected_item(), Some(Item::Tab(1)));
+        app.key(plain(KeyCode::Right));
+        assert_eq!(app.rows[5], Item::Tab(2));
+        app.key(ctrl('j'));
+        assert_eq!(app.selected_item(), Some(Item::Tab(2)));
+        // Left folds a nested row's siblings away, onto their spawner.
+        app.key(plain(KeyCode::Left));
+        assert_eq!(app.selected_item(), Some(Item::Tab(1)));
+        assert!(!app.rows.contains(&Item::Tab(2)));
+        app.key(plain(KeyCode::Left));
+        assert_eq!(app.selected_item(), Some(Item::Tab(0)));
+        assert!(!app.rows.contains(&Item::Tab(1)));
+        // A search lists every match, folded or not.
+        app.query = "s".into();
+        app.refilter();
+        assert!(app.rows.contains(&Item::Tab(3)));
+    }
+
+    #[test]
     fn spawned_agents_stay_in_their_groups_when_the_spawner_is_filtered_out() {
         let mut app = spawned();
         app.query = "kid".into();
@@ -5952,7 +6179,7 @@ mod tests {
 
     #[test]
     fn a_loop_of_spawners_nests_nothing() {
-        let mut app = spawned();
+        let mut app = spawned_open();
         app.deliver(|app| {
             app.tasks.push(parse_tasks(&serde_json::json!([
                 {"session_id":"s", "window_id":"lead", "name":"lead", "parent_window":"grand"}
