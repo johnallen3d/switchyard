@@ -656,6 +656,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("esc", "drop selection, search, then leave"),
                 ("q ⌃C ⌃V", "leave"),
                 ("⇥", "leave for the reply box"),
+                ("⌃E", "collapse or expand the sidebar"),
             ],
         ),
         Section::new(
@@ -2833,6 +2834,20 @@ impl App {
             if self.reply.is_none() {
                 self.open_reply();
             }
+            return;
+        }
+        // ctrl-e, in Inbox, still collapses or expands the sidebar, staying
+        // in scrollback; a search being typed keeps its keys.
+        let typing = self
+            .scrollback
+            .as_ref()
+            .is_some_and(|sb| sb.typing.is_some());
+        if k.code == KeyCode::Char('e')
+            && k.modifiers.contains(KeyModifiers::CONTROL)
+            && self.view == View::Inbox
+            && !typing
+        {
+            self.expanded = !self.expanded;
             return;
         }
         let Some((lines, nav)) = self.transcript_text() else {
@@ -6793,6 +6808,22 @@ mod tests {
             );
             app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
         }
+    }
+
+    #[test]
+    fn ctrl_e_toggles_the_sidebar_in_scrollback() {
+        let mut app = inbox_with_lifecycle();
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.scrollback = Some(scrollback::Scrollback::new(
+            app.preview_want().unwrap(),
+            10,
+            5,
+        ));
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        app.key(ctrl_e);
+        assert!(app.expanded && app.scrollback.is_some());
+        app.key(ctrl_e);
+        assert!(!app.expanded && app.scrollback.is_some());
     }
 
     #[test]
