@@ -52,6 +52,7 @@ The views themselves are picked with cmd+1-4 on the picker's tab: Inbox,
 Work, Usage, Archive.
 
 Scrollback adds vi-like keys of its own: `j` `k`, `{` `}`, `[` `]`, `g` `G`,
-`/` `?` `n` `N`, `v` `V` Space and `y`. The work items float adds `o`, `v`,
-`c`, `x`, `r` and, in its reader, `j` `k` Space `b` `g` `G` `q`. The help
+`/` `?` `n` `N`, `v` `V` Space and `y`. The work items float adds Enter (show
+the item in the Work view), `o` (open it in the browser), `v`, `c`, `x`, `r`
+and, in its reader, `j` `k` Space `b` `g` `G` `q`. The help
 float filters with `/` and clears the filter with ⌃U.

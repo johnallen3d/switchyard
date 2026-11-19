@@ -3,8 +3,8 @@
 //! one is in the footer (see core's `item_actions`).
 //! It opens even for a task with one link.
 //!
-//! On the highlighted item: Enter or `o` opens it in the browser and
-//! closes the float; `v`
+//! On the highlighted item: Enter shows it in the Work view, closing the
+//! float; `o` opens it in the browser and closes the float; `v`
 //! reads its description and comments here, in a scrolling reader over
 //! the float (a card, issue or PR; see core's `item_view`); `c`
 //! types a comment for a card, issue or PR, in a wrapping prompt box; `x` closes a card or
@@ -108,6 +108,8 @@ pub enum Outcome {
     Help,
     /// Open the URL in the browser here.
     Open(String),
+    /// Show the item in the Work view.
+    Show(Link),
     /// Fetch the highlighted item's thread to read here (then `show`).
     Read,
     /// Run the confirmed action on the item.
@@ -525,7 +527,8 @@ impl Items {
             KeyCode::Char('n') if ctrl => self.step((self.selected + 1).min(last)),
             KeyCode::Home => self.step(0),
             KeyCode::End => self.step(last),
-            KeyCode::Enter | KeyCode::Char('o') if !ctrl => match self.entry().link.url.as_str() {
+            KeyCode::Enter if !ctrl => Outcome::Show(self.entry().link.clone()),
+            KeyCode::Char('o') if !ctrl => match self.entry().link.url.as_str() {
                 "" => Outcome::Refuse(format!("{} has no URL to open", self.entry().name())),
                 url => Outcome::Open(url.to_string()),
             },
@@ -638,7 +641,7 @@ impl Items {
     pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
         match &self.mode {
             Mode::List => {
-                let mut h = vec![("⏎", "open"), ("v", "read")];
+                let mut h = vec![("⏎", "show in Work"), ("o", "open"), ("v", "read")];
                 let card = matches!(self.entry().item, Some(Item::Card { .. }));
                 h.extend(self.entry().actions().into_iter().map(|a| match a {
                     // Not to be confused with esc dismissing the float.
@@ -1036,10 +1039,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_and_nothing_mutates_without_a_confirmation() {
+    fn enter_shows_o_opens_and_nothing_mutates_without_a_confirmation() {
         let mut i = items();
-        assert_eq!(
+        assert!(matches!(
             press(&mut i, KeyCode::Enter),
+            Outcome::Show(l) if l.url == "https://github.com/o/r/pull/57"
+        ));
+        assert_eq!(
+            press(&mut i, KeyCode::Char('o')),
             Outcome::Open("https://github.com/o/r/pull/57".into())
         );
         // r on the draft PR asks first, naming it.
@@ -1107,7 +1114,7 @@ mod tests {
     fn close_card_confirms_naming_the_card() {
         let mut i = items();
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close card")]);
+        assert_eq!(i.hints()[3..5], [("c", "comment"), ("x", "close card")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close card 1041?");
         assert_eq!(press(&mut i, KeyCode::Esc), Outcome::Stay);
@@ -1130,10 +1137,10 @@ mod tests {
     #[test]
     fn issues_take_comments_and_close_prs_take_comments() {
         let mut i = items();
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("r", "mark ready")]);
+        assert_eq!(i.hints()[3..5], [("c", "comment"), ("r", "mark ready")]);
         press(&mut i, KeyCode::Down);
         press(&mut i, KeyCode::Down);
-        assert_eq!(i.hints()[2..4], [("c", "comment"), ("x", "close issue")]);
+        assert_eq!(i.hints()[3..5], [("c", "comment"), ("x", "close issue")]);
         press(&mut i, KeyCode::Char('x'));
         assert_eq!(i.question().unwrap(), "Close issue #3?");
         press(&mut i, KeyCode::Esc);
@@ -1201,7 +1208,10 @@ mod tests {
     #[test]
     fn v_reads_the_item_in_place_and_esc_goes_back() {
         let mut i = items();
-        assert_eq!(i.hints()[..2], [("⏎", "open"), ("v", "read")]);
+        assert_eq!(
+            i.hints()[..3],
+            [("⏎", "show in Work"), ("o", "open"), ("v", "read")]
+        );
         // The PR, then the card, can be read; the float fetches, then shows.
         assert_eq!(press(&mut i, KeyCode::Char('v')), Outcome::Read);
         press(&mut i, KeyCode::Down);

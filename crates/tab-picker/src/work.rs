@@ -16,6 +16,11 @@
 //! labels, assignee and age. Typing searches titles and numbers, as in the
 //! other views.
 //!
+//! The Inbox's ctrl-b float sends an item here with Enter: the view opens
+//! on its task's project, listing pull requests for a PR, and highlights
+//! the item once it lists (see `focus_on`); the footer says when it isn't
+//! among the open ones.
+//!
 //! On the highlighted item: Enter starts a session from it (auto host,
 //! claude, named from the item; see core's `launch`), in the background,
 //! switching to Inbox, which highlights the session once it lists, or on
@@ -191,6 +196,10 @@ pub struct Work {
     pub detail: Detail,
     /// The pull request ctrl-g armed to approve, by URL, until the next key.
     pub approving: Option<String>,
+    /// The item to highlight once its listing comes (see `focus_on`).
+    focus: Option<Link>,
+    /// The last item to highlight that wasn't listed, for the footer.
+    pub missed: Option<Link>,
 }
 
 impl Default for Work {
@@ -212,6 +221,8 @@ impl Default for Work {
             starting: HashSet::new(),
             detail: Detail::default(),
             approving: None,
+            focus: None,
+            missed: None,
         }
     }
 }
@@ -261,6 +272,54 @@ impl Work {
             self.show(i);
         }
         self.load(false);
+    }
+
+    /// Highlight `link` once the shown listing has it, listing pull
+    /// requests for a PR and work items otherwise. Call before `open`,
+    /// which lists the project.
+    pub fn focus_on(&mut self, link: Link) {
+        let kind = if link.kind == "pr" {
+            Kind::Prs
+        } else {
+            Kind::Items
+        };
+        if kind != self.kind {
+            self.kind = kind;
+            self.reset();
+        }
+        self.missed = None;
+        self.focus = Some(link);
+    }
+
+    /// Highlight the pending focus if the listing has come: on its row, or
+    /// noting it as missed when it isn't one.
+    fn take_focus(&mut self) {
+        let Some(link) = &self.focus else {
+            return;
+        };
+        match self.listing() {
+            Some(Listing::Ready(_)) => {}
+            Some(Listing::Failed(_)) => {
+                self.focus = None;
+                return;
+            }
+            _ => return,
+        }
+        let key = (
+            link.kind.clone(),
+            link.system.clone(),
+            link.reference.clone(),
+        );
+        let found = self.rows.iter().position(|r| {
+            let item = &self.items()[r.index];
+            (!link.url.is_empty() && item.url == link.url)
+                || link_key(&item.url) == Some(key.clone())
+        });
+        let link = self.focus.take();
+        match found {
+            Some(i) => self.selected = i,
+            None => self.missed = link,
+        }
     }
 
     /// Show project `i`, from its first item.
@@ -452,6 +511,7 @@ impl Work {
             .unwrap_or(self.selected)
             .min(self.rows.len().saturating_sub(1))
         };
+        self.take_focus();
     }
 
     pub fn selected_row(&self) -> Option<&Row> {
@@ -1308,6 +1368,43 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn a_focused_item_is_highlighted_once_listed_or_noted_as_missed() {
+        let link = |kind: &str, url: &str| Link {
+            kind: kind.into(),
+            system: if kind == "pr" { "github" } else { "fizzy" }.into(),
+            reference: url.rsplit('/').next().unwrap().into(),
+            url: url.into(),
+            ..Link::default()
+        };
+        // A card waits for its listing, then gets the highlight.
+        let mut w = work();
+        let ready = w.lists.remove(&("sy".into(), Kind::Items)).unwrap();
+        w.lists.insert(("sy".into(), Kind::Items), Listing::Loading);
+        w.focus_on(link("card", "https://app.fizzy.do/1/cards/1"));
+        w.refilter("", &[]);
+        assert_eq!((w.selected, w.focus.is_some()), (0, true));
+        w.lists.insert(("sy".into(), Kind::Items), ready);
+        w.refilter("", &[]);
+        assert_eq!(w.selected_item().unwrap().number, 1);
+        assert!(w.focus.is_none() && w.missed.is_none());
+        // A PR switches to pull requests; one not listed is missed.
+        w.focus_on(link("pr", "https://github.com/o/r/pull/9"));
+        assert_eq!(w.kind, Kind::Prs);
+        w.lists.insert(
+            ("sy".into(), Kind::Prs),
+            Listing::Ready(OpenItems {
+                noun: "pull requests",
+                items: Vec::new(),
+            }),
+        );
+        w.refilter("", &[]);
+        assert_eq!(
+            w.missed.as_ref().map(|l| l.url.as_str()),
+            Some("https://github.com/o/r/pull/9")
+        );
     }
 
     #[test]

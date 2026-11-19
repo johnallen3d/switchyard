@@ -90,7 +90,7 @@
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
 //! empty prompt wakes a snoozed one. Task rows show their links as badges
 //! grouped by kind. ctrl-b opens the work items float on the highlighted
-//! task's links (PRs, cards, then issues), even one: open each, read its description and comments in place, comment
+//! task's links (PRs, cards, then issues), even one: show each in the Work view or open it, read its description and comments in place, comment
 //! on a card, issue or PR, close a card or issue, mark a draft PR ready, each
 //! mutation behind its own key and a confirmation naming the item (see
 //! items.rs).
@@ -5412,6 +5412,7 @@ impl App {
     fn take_work(&mut self) {
         if self.work.receive() && self.view == View::Work {
             self.refilter();
+            self.note_work_missed();
         }
         if self.view == View::Work {
             self.work.poll_detail();
@@ -5466,6 +5467,33 @@ impl App {
         }
     }
 
+    /// Switch to the Work view on the highlighted task's project and
+    /// highlight `link` there once it lists (see work.rs's `focus_on`).
+    fn show_in_work(&mut self, link: Link) {
+        self.items = None;
+        self.query.clear();
+        self.work.focus_on(link);
+        self.set_view(View::Work);
+        self.note_work_missed();
+    }
+
+    /// Say in the footer when an item the Work view was asked to show
+    /// isn't among its project's open ones.
+    fn note_work_missed(&mut self) {
+        if let Some(l) = self.work.missed.take() {
+            let project = self.work.current().map_or("", |p| p.name.as_str());
+            let what = if self.work.kind == work::Kind::Prs {
+                "open pull requests"
+            } else {
+                "open work items"
+            };
+            self.note = Some((
+                format!("{} isn't among {project}'s {what}", l.name(None)),
+                true,
+            ));
+        }
+    }
+
     /// Run what the work items float asks for on `k`: open a URL (closing
     /// the float), or take an action on its item, keeping the float open
     /// with the text if it fails.
@@ -5480,6 +5508,7 @@ impl App {
                     Err(e) => (e, true),
                 });
             }
+            Some(items::Outcome::Show(link)) => self.show_in_work(link),
             Some(items::Outcome::Read) => {
                 let Some((link, profile, name)) = self.items.as_ref().map(|i| {
                     (
