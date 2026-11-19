@@ -3,7 +3,8 @@
 //! one is in the footer (see core's `item_actions`).
 //! It opens even for a task with one link.
 //!
-//! On the highlighted item: Enter or `o` opens it in the browser; `v`
+//! On the highlighted item: Enter or `o` opens it in the browser and
+//! closes the float; `v`
 //! reads its description and comments here, in a scrolling reader over
 //! the float (a card, issue or PR; see core's `item_view`); `c`
 //! types a comment for a card, issue or PR, in a wrapping prompt box; `x` closes a card or

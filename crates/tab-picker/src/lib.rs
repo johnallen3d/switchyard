@@ -5451,14 +5451,17 @@ impl App {
         }
     }
 
-    /// Run what the work items float asks for on `k`: open a URL, or take
-    /// an action on its item, keeping the float open with the text if it
-    /// fails.
+    /// Run what the work items float asks for on `k`: open a URL (closing
+    /// the float), or take an action on its item, keeping the float open
+    /// with the text if it fails.
     fn run_items_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
         match self.items_key(k) {
             Some(items::Outcome::Open(url)) => {
                 self.note = Some(match standalone::open_url(&url) {
-                    Ok(()) => (format!("opened {url}"), false),
+                    Ok(()) => {
+                        self.items = None;
+                        (format!("opened {url}"), false)
+                    }
                     Err(e) => (e, true),
                 });
             }
