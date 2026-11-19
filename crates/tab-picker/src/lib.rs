@@ -82,9 +82,11 @@
 //! tab (see core's actions); one waiting on a prompt or idle is refused.
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
-//! a new tab), and ctrl-t pins or unpins the highlighted open task (`pinned` in the registry),
-//! which puts it in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens
-//! a prompt for when to wake the task (see snooze.rs); Enter snoozes it
+//! a new tab); in Inbox that's cmd+Enter, and Enter instead clears the
+//! search, keeping the row it found highlighted. ctrl-t pins or unpins
+//! the highlighted open task (`pinned` in the registry), which puts it
+//! in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens a prompt
+//! for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
 //! empty prompt wakes a snoozed one. Task rows show their links as badges
 //! grouped by kind. ctrl-b opens the work items float on the highlighted
@@ -4602,6 +4604,15 @@ impl App {
             None if self.selected_item().is_some() => vec![("⏎", "go")],
             None => vec![],
         };
+        // Inbox jumps on cmd+Enter; Enter ends the search.
+        if self.view == View::Inbox && !row.is_empty() {
+            for (k, d) in &mut row {
+                if *k == "⏎" && matches!(*d, "go" | "resume") {
+                    *k = "⌘⏎";
+                }
+            }
+            row.insert(0, ("⏎", "clear the search, keeping the highlight"));
+        }
         if task.is_some_and(|t| !chooser_links(&t.links).is_empty()) {
             row.push(("⌃B", "work items: open, read, comment, close, mark ready"));
         }
@@ -5193,6 +5204,9 @@ impl App {
             return false;
         }
         self.note = None;
+        if self.inbox_enter(k) {
+            return true;
+        }
         let Some(pick) = standalone::parse_pick(&self.pick()) else {
             return true;
         };
@@ -5242,6 +5256,24 @@ impl App {
         };
         self.note = Some(note);
         self.refetch();
+        true
+    }
+
+    /// Inbox's plain Enter: end a search on the row it found, which stays
+    /// highlighted (cmd+Enter jumps to it). False for cmd+Enter, other
+    /// views and an armed archive or interrupt, which act as before.
+    fn inbox_enter(&mut self, k: KeyEvent) -> bool {
+        if self.view != View::Inbox
+            || self.armed != Armed::No
+            || k.modifiers.contains(KeyModifiers::SUPER)
+        {
+            return false;
+        }
+        if self.query.is_empty() {
+            self.note = Some(("⌘⏎ jumps to the highlighted tab".into(), false));
+        } else {
+            self.clear_search();
+        }
         true
     }
 
@@ -6238,6 +6270,26 @@ mod tests {
         let expected = vec![Item::Status("working"), Item::Task(1), Item::Task(0)];
         assert_eq!(order(10, 20), expected);
         assert_eq!(order(20, 10), expected);
+    }
+
+    #[test]
+    fn inbox_enter_clears_the_search_and_cmd_enter_jumps() {
+        let mut app = inbox();
+        app.query = "older".into();
+        app.refilter();
+        let found = app.selected_key();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.inbox_enter(enter));
+        assert_eq!(app.query, "");
+        assert!(app.rows.len() > 2);
+        assert_eq!(app.selected_key(), found);
+        // cmd+Enter, and Enter on an armed interrupt, act as before.
+        assert!(!app.inbox_enter(KeyEvent::new(KeyCode::Enter, KeyModifiers::SUPER)));
+        app.armed = Armed::Interrupt;
+        assert!(!app.inbox_enter(enter));
+        app.armed = Armed::No;
+        app.set_view(View::Archive);
+        assert!(!app.inbox_enter(enter));
     }
 
     #[test]
