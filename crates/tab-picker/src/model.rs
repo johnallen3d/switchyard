@@ -352,6 +352,9 @@ pub struct Task {
     pub window_id: String,
     pub project: String,
     pub name: String,
+    /// The agent session's own title (Claude's, or one given with
+    /// `/rename`; see core's `transcript::title`), or empty.
+    pub title: String,
     pub profile: String,
     /// Uncommitted files in the worktree, and the first few of their paths.
     pub dirty: u64,
@@ -387,6 +390,17 @@ pub struct Task {
 impl Task {
     pub fn label(&self) -> String {
         format!("{}/{}", self.project, self.name)
+    }
+
+    /// What its rows call it: its session's title when it has one, which
+    /// says what the work is better than a name made at launch; else its
+    /// name.
+    pub fn shown_name(&self) -> &str {
+        if self.title.is_empty() {
+            &self.name
+        } else {
+            &self.title
+        }
     }
 
     pub fn work(&self) -> bool {
@@ -452,6 +466,7 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             window_id: s(t, "window_id"),
             project: s(t, "project"),
             name: s(t, "name"),
+            title: s(t, "title"),
             profile: s(t, "profile"),
             dirty: t["dirty_count"].as_u64().unwrap_or(0),
             dirty_files: t["dirty_files"]

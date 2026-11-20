@@ -1559,7 +1559,7 @@ impl App {
                 match tab.task.map(|k| &self.tasks[k]) {
                     Some(t) => Flat {
                         project: &t.project,
-                        name: &t.name,
+                        name: t.shown_name(),
                         msg: &t.msg,
                         host: &t.host,
                         // The tab's own status is newer, but an idle or
@@ -1625,7 +1625,7 @@ impl App {
                 let t = &self.tasks[k];
                 Flat {
                     project: &t.project,
-                    name: &t.name,
+                    name: t.shown_name(),
                     msg: &t.msg,
                     host: &t.host,
                     state: &t.state,
@@ -1681,8 +1681,8 @@ impl App {
     }
 
     /// Score an Inbox row against the search, recording its highlights;
-    /// None when it doesn't match. Matches name, folder, project, session,
-    /// host and work items.
+    /// None when it doesn't match. Matches name (or title), folder,
+    /// project, session, host, work items and a titled task's name.
     fn score_row(&mut self, item: Item, pattern: &Pattern) -> Option<u32> {
         let (name, project, host) = {
             let f = self.flat(item);
@@ -1701,10 +1701,15 @@ impl App {
             .map(|s| self.sessions[s].label.clone())
             .unwrap_or_default();
         let links = self.task_of(item).map(Task::links_text).unwrap_or_default();
+        // A task shown by its title is still found by its name.
+        let branch = self
+            .task_of(item)
+            .map(|t| t.name.clone())
+            .unwrap_or_default();
         let (score, f) = score_fields(
             &mut self.matcher,
             pattern,
-            &[&name, &dir, &project, &label, &host, &links],
+            &[&name, &dir, &project, &label, &host, &links, &branch],
         )?;
         self.hits.insert(
             item,
@@ -6104,6 +6109,33 @@ mod tests {
             ]
         );
         assert_eq!(app.selected_item(), Some(Item::Task(1)));
+    }
+
+    #[test]
+    fn a_task_is_shown_by_its_session_title_and_found_by_its_name() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\ttitled\tidle\tcrash-fix\n",
+                "T\tbare\tidle\tother\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"titled", "project":"calc", "name":"fix/crash-fix",
+                 "title":"Slack thread issue", "status":"idle"},
+                {"session_id":"s", "window_id":"bare", "project":"calc", "name":"other", "status":"idle"}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        assert_eq!(app.flat(Item::Tab(0)).name, "Slack thread issue");
+        assert_eq!(app.flat(Item::Tab(1)).name, "other");
+        for query in ["slack", "crash-fix"] {
+            app.query = query.into();
+            app.refilter();
+            assert_eq!(app.selected_item(), Some(Item::Tab(0)), "{query}");
+        }
     }
 
     #[test]

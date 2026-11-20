@@ -306,8 +306,20 @@ impl State {
     /// client would see a difference.
     pub fn set_wake(&mut self, window: &str, at: u64, wake: Option<(u64, String)>) -> bool {
         match self.waits.get_mut(window) {
-            Some(w) if w.at == at && w.wake != wake => {
-                w.wake = wake;
+            Some(w) if w.at == at && w.pending != wake => {
+                w.pending = wake;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A tab's session title, as its log said; whether a client would see a
+    /// difference. A read that found none keeps the title there was.
+    pub fn set_title(&mut self, window: &str, title: Option<String>) -> bool {
+        match (self.waits.get_mut(window), title) {
+            (Some(w), Some(t)) if w.title.as_ref() != Some(&t) => {
+                w.title = Some(t);
                 true
             }
             _ => false,

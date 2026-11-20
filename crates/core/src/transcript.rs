@@ -23,7 +23,8 @@
 //! absent when the log doesn't say), `log`, the log's path on the agent's
 //! host, and `wake: {at, reason}` when a Claude
 //! agent is waiting on a timer or background job to resume it, `at` 0 when
-//! its time isn't known (see `wake`); or `{error}`. `fetch` adds
+//! its time isn't known (see `wake`), and `title` when a Claude session
+//! has one of its own (see `title`); or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them, and
 //! `suggestion` when an idle Claude agent's screen shows the prompt it
 //! suggests next (see `suggestion`).
@@ -312,7 +313,7 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
         return json!({ "error": format!("no {harness} session log for {dir}") });
     };
     match read(&path, harness, started(profile, harness, dir, pid)) {
-        Ok((entries, tokens, model, wake)) => {
+        Ok((entries, tokens, model, wake, title)) => {
             let mut v = json!({
                 "harness": harness,
                 "log": path.display().to_string(),
@@ -326,6 +327,9 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
             }
             if let Some((at, reason)) = wake {
                 v["wake"] = json!({ "at": at, "reason": reason });
+            }
+            if let Some(t) = title {
+                v["title"] = json!(t);
             }
             v
         }
@@ -399,12 +403,14 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
 }
 
 /// The last entries of a log, oldest first, the context its last turn used,
-/// the model it ran on and what it waits on to resume (see `wake`).
+/// the model it ran on, what it waits on to resume (see `wake`) and the
+/// session's title (see `title`).
 type Tail = (
     Vec<(&'static str, String)>,
     Option<u64>,
     Option<String>,
     Option<(u64, String)>,
+    Option<String>,
 );
 
 fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
@@ -426,7 +432,44 @@ fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
         tokens(text, harness),
         model(text, harness),
         wake(text, harness, since),
+        title(text, harness),
     ))
+}
+
+/// A Claude session's title: the last one given with `/rename`, else the
+/// last Claude made up for it. None for Pi, whose logs have none, or
+/// before Claude has titled the session.
+#[must_use]
+pub fn title(log: &str, harness: &str) -> Option<String> {
+    if harness == "pi" {
+        return None;
+    }
+    let mut made_up = None;
+    for line in log.lines().rev() {
+        // Titles are short lines; skip parsing the rest.
+        if !line.contains("-title\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let text = |k: &str| {
+            v[k].as_str()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(String::from)
+        };
+        match v["type"].as_str() {
+            Some("custom-title") => {
+                if let Some(t) = text("customTitle") {
+                    return Some(t);
+                }
+            }
+            Some("ai-title") if made_up.is_none() => made_up = text("aiTitle"),
+            _ => {}
+        }
+    }
+    made_up
 }
 
 /// The model the agent's last turn ran on, or Pi's last switch to one since.
@@ -877,6 +920,26 @@ mod tests {
         .to_string();
         assert_eq!(tokens(&pi, "pi"), Some(63));
         assert_eq!(tokens("{\"type\":\"user\"}", "claude"), None);
+    }
+
+    #[test]
+    fn a_rename_wins_over_claudes_own_title() {
+        let ai = |t: &str| format!(r#"{{"type":"ai-title","aiTitle":"{t}","sessionId":"s"}}"#);
+        let log = [
+            ai("Old"),
+            ai("Slack thread issue"),
+            r#"{"type":"user"}"#.to_string(),
+        ]
+        .join("\n");
+        assert_eq!(title(&log, "claude").as_deref(), Some("Slack thread issue"));
+        let renamed = format!(
+            "{log}\n{}\n{}",
+            r#"{"type":"custom-title","customTitle":"My name","sessionId":"s"}"#,
+            ai("Later")
+        );
+        assert_eq!(title(&renamed, "claude").as_deref(), Some("My name"));
+        assert_eq!(title(&log, "pi"), None);
+        assert_eq!(title(r#"{"type":"user"}"#, "claude"), None);
     }
 
     #[test]

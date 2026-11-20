@@ -9,8 +9,11 @@
 //!   plain session in the highlighted folder or project, or agent work in a
 //!   catalog project or Git folder: a name, a harness (ctrl-t, Claude by
 //!   default), an optional work item and an optional prompt. The name may be
-//!   left blank when there is a work item or prompt: `task launch` names the
-//!   work from it (see core's `autoname`). In a catalog project the work
+//!   left blank when there is a work item, or a prompt that says what the
+//!   work is (core's `autoname::nameable`; a bare link or slash command
+//!   doesn't): on the Mac the picker asks the on-device model for a name as
+//!   the prompt rests and launches with it, otherwise `task launch` names
+//!   the work (see core's `autoname`). In a catalog project the work
 //!   item field offers the project's open Fizzy cards or GitHub issues
 //!   (see core's `items`), listed in the background once it has focus: ↓ or
 //!   typing shows them, Enter takes the highlighted one and Tab fills the

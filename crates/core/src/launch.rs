@@ -392,8 +392,8 @@ fn task_name(
         return Ok(name.to_string());
     }
     let named = name_work(&project.profile, work_item, tracker, typed).ok_or(
-        "couldn't name the work: neither its work item's title nor its prompt has letters or \
-         digits to name it from; name it yourself",
+        "couldn't name the work: neither its work item's title nor its prompt says enough \
+         to name it from; name it yourself",
     )?;
     log(&format!(
         "named {}/{named} from its {}",

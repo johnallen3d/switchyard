@@ -9,6 +9,11 @@
 //! with `wake_at` (Unix seconds) when its time is known and its reason as
 //! the message, in snapshots (see `apply`).
 //!
+//! The same read gives the session's own title (see core's
+//! `transcript::title`), kept until a later read finds another and shown as
+//! the task's `title`: what the agent says the work is, often clearer than
+//! its name.
+//!
 //! The lookup asks the tab's Rex server for its agent pane and reads the
 //! log there, over SSH for another host, so it runs on a thread of its own
 //! and never under the lock.
@@ -31,11 +36,12 @@ const STALE_SECS: u64 = 3600;
 
 /// What the log said for a tab's status at `at`: when the agent resumes (0
 /// when unknown) and why, or None (nothing pending, or the lookup is still
-/// running or failed).
+/// running or failed); and the session's title, from any read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wake {
     pub at: u64,
-    pub wake: Option<(u64, String)>,
+    pub pending: Option<(u64, String)>,
+    pub title: Option<String>,
 }
 
 /// A log to read: the tab's window, its status time, and where it is.
@@ -74,11 +80,13 @@ pub fn due(
         if waits.get(&window).is_some_and(|w| w.at == status.at) {
             continue;
         }
+        let title = waits.get(&window).and_then(|w| w.title.clone());
         waits.insert(
             window.clone(),
             Wake {
                 at: status.at,
-                wake: None,
+                pending: None,
+                title,
             },
         );
         jobs.push(Job {
@@ -104,23 +112,34 @@ pub fn start(shared: &Arc<Shared>, jobs: Vec<Job>) {
                     w["reason"].as_str().unwrap_or("").to_string(),
                 )
             });
-            shared.update(|s| s.set_wake(&job.window, job.at, wake));
+            let title = v["title"].as_str().map(String::from);
+            shared.update(|s| {
+                s.set_wake(&job.window, job.at, wake) | s.set_title(&job.window, title)
+            });
         });
     }
 }
 
-/// Mark each open task whose tab is still in the status its log was read
-/// for, with something pending, as `scheduled`: `wake_at` when known, and
-/// its reason as `status_msg` when it has one. Run after `apply_live`.
+/// Give each open task its session's title, when a read found one, and
+/// mark each whose tab is still in the status its log was read for, with
+/// something pending, as `scheduled`: `wake_at` when known, and its reason
+/// as `status_msg` when it has one. Run after `apply_live`.
 pub fn apply(tasks: &mut [Value], waits: &HashMap<String, Wake>) {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     for task in tasks.iter_mut().filter(|t| t["ended_at"].is_null()) {
-        let Some(Wake {
+        let Some(w) = task["window_id"].as_str().and_then(|w| waits.get(w)) else {
+            continue;
+        };
+        if let Some(title) = &w.title {
+            task["title"] = title.clone().into();
+        }
+        let Wake {
             at,
-            wake: Some((wake_at, reason)),
-        }) = task["window_id"].as_str().and_then(|w| waits.get(w))
+            pending: Some((wake_at, reason)),
+            ..
+        } = w
         else {
             continue;
         };
@@ -178,6 +197,20 @@ mod tests {
     }
 
     #[test]
+    fn a_title_outlives_the_status_it_was_read_for() {
+        let tasks = vec![json!({"window_id":"w","host":"h","session_id":"s"})];
+        let mut waits = HashMap::new();
+        due(&mut waits, &tasks, &live("idle", 5));
+        waits.get_mut("w").unwrap().title = Some("Slack thread issue".into());
+        due(&mut waits, &tasks, &live("done", 9));
+        assert_eq!(waits["w"].title.as_deref(), Some("Slack thread issue"));
+        let mut list = vec![json!({"window_id":"w","status":"working","status_at":10})];
+        apply(&mut list, &waits);
+        assert_eq!(list[0]["title"], "Slack thread issue");
+        assert_eq!(list[0]["status"], "working");
+    }
+
+    #[test]
     fn a_pending_timer_makes_its_task_scheduled_until_the_status_moves() {
         let soon = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -188,7 +221,8 @@ mod tests {
             "w".to_string(),
             Wake {
                 at: 5,
-                wake: Some((soon, "CI".into())),
+                pending: Some((soon, "CI".into())),
+                title: None,
             },
         )]);
         let task = |state: &str, at: u64| json!({"window_id":"w","status":state,"status_at":at,"status_msg":"m"});
@@ -206,7 +240,8 @@ mod tests {
             "w".to_string(),
             Wake {
                 at: 5,
-                wake: Some((10, String::new())),
+                pending: Some((10, String::new())),
+                title: None,
             },
         )]);
         let mut tasks = vec![task("idle", 5)];
@@ -217,11 +252,13 @@ mod tests {
             "w".to_string(),
             Wake {
                 at: 5,
-                wake: Some((0, "Build".into())),
+                pending: Some((0, "Build".into())),
+                title: None,
             },
         )]);
         let mut tasks = vec![task("idle", 5)];
         apply(&mut tasks, &job);
+        assert!(tasks[0]["title"].is_null());
         assert_eq!(
             (tasks[0]["status"].as_str(), tasks[0]["status_msg"].as_str()),
             (Some("scheduled"), Some("Build"))

@@ -596,6 +596,7 @@ fn summary(task: &Value) -> Value {
     for key in [
         "project",
         "name",
+        "title",
         "host",
         "harness",
         "branch",

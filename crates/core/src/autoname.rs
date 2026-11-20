@@ -8,7 +8,22 @@
 //! answers with something unusable, a work item's title, or else the
 //! prompt's first words, becomes the name as it is (slugged). The picker
 //! has already closed by then, so a launch never fails for want of a name
-//! unless the text has no usable characters at all.
+//! unless the text has nothing to name it from.
+//!
+//! The model makes up a name when the text gives it nothing to go on (a
+//! bare link and a slash command become `fix/crash-fix`, echoing its
+//! instructions), so:
+//!
+//! - A prompt names work only when it is `nameable`: enough words of its
+//!   own once links, paths, slash commands and code are dropped (see
+//!   `prose`). The picker asks for a name otherwise, and `name_work` gives
+//!   none.
+//! - An answer counts only when it is `grounded`: some specific word of its
+//!   slug (not a prefix or a generic word like `fix` or `issue`) appears in
+//!   the text, near enough (see `same_word`).
+//!
+//! The picker also asks for a name as the prompt is typed (`suggest_name`),
+//! so Enter rarely waits on the model at launch.
 
 use std::process::Command;
 use std::time::Duration;
@@ -30,6 +45,29 @@ const MAX_SLUG_CHARS: usize = 40;
 /// The prefixes a name may have; `feature` work is named by its slug alone
 /// (see `naming::branch_and_slug`).
 const PREFIXES: [&str; 5] = ["feature", "fix", "chore", "docs", "refactor"];
+/// How many words of its own (see `content_words`) a prompt needs to name
+/// work from.
+const MIN_PROSE_WORDS: usize = 2;
+/// Words that say nothing about which work is meant: they don't make a
+/// prompt nameable, nor ground a name (with `GENERIC`).
+const FILLER: &[&str] = &[
+    "about", "after", "again", "all", "also", "and", "any", "are", "before", "but", "can", "check",
+    "could", "did", "does", "doing", "done", "for", "from", "get", "give", "got", "had", "has",
+    "have", "help", "here", "hey", "hello", "how", "into", "its", "just", "let", "lets", "like",
+    "look", "make", "more", "need", "not", "now", "okay", "one", "our", "out", "please", "read",
+    "really", "see", "should", "some", "take", "thank", "thanks", "that", "the", "then", "there",
+    "these", "this", "those", "try", "very", "want", "was", "were", "what", "when", "where",
+    "which", "who", "why", "will", "with", "would", "yeah", "yes", "you", "your",
+];
+/// Slug words too generic to show the model read the text: the model
+/// reaches for them (and its instructions' examples) when it has nothing.
+const GENERIC: &[&str] = &[
+    "add", "bug", "change", "chore", "crash", "docs", "error", "feature", "fix", "improve",
+    "issue", "problem", "refactor", "support", "task", "update", "work",
+];
+/// Letters two words must share at the start to count as one (`archive`
+/// and `archiving`).
+const STEM_CHARS: usize = 5;
 
 const INSTRUCTIONS: &str = "Name a software task as a git branch. Pick the prefix by intent: \
 fix for bugs and crashes, feature for new behaviour, docs for documentation, refactor for \
@@ -55,7 +93,8 @@ const SCHEMA: &str = r#"{
 
 /// A name for work that has none: from `item`'s title when it can be
 /// looked up (the model's name, or the title itself slugged), otherwise
-/// from `prompt` (likewise). None when neither has usable characters.
+/// from `prompt` (likewise) when it is `nameable`. None when neither gives
+/// one.
 #[must_use]
 pub fn name_work(
     profile: &str,
@@ -67,9 +106,111 @@ pub fn name_work(
         .and_then(|title| suggest(&title).or_else(|| title_name(&title)))
         .or_else(|| {
             Some(prompt.trim())
-                .filter(|p| !p.is_empty())
+                .filter(|p| nameable(p))
                 .and_then(|p| suggest(p).or_else(|| prompt_name(p)))
         })
+}
+
+/// The model's name for work described by `prompt`, for the picker to
+/// offer as it is typed; None when the prompt isn't `nameable`, off the
+/// Mac, or when the model gives nothing `grounded`.
+#[must_use]
+pub fn suggest_name(prompt: &str) -> Option<String> {
+    let prompt = prompt.trim();
+    if nameable(prompt) {
+        suggest(prompt)
+    } else {
+        None
+    }
+}
+
+/// Have the on-device model loaded, so the first `suggest_name` answers
+/// sooner: one throwaway question, its answer ignored. Does nothing off
+/// the Mac.
+pub fn warm_up() {
+    if cfg!(target_os = "macos") {
+        let _ = bounded_output(
+            Command::new("fm").args(["respond", "--no-stream", "--greedy"]),
+            Some("ok"),
+            FM_TIMEOUT,
+        );
+    }
+}
+
+/// Whether `prompt` says enough to name work from: at least
+/// `MIN_PROSE_WORDS` words of its own (see `content_words`).
+#[must_use]
+pub fn nameable(prompt: &str) -> bool {
+    content_words(&prose(prompt)).len() >= MIN_PROSE_WORDS
+}
+
+/// `text`'s prose: its words with fenced code blocks, links, paths (any
+/// word with a slash), slash commands and `@file` mentions dropped, and
+/// backticks and leading list marks stripped.
+fn prose(text: &str) -> String {
+    let mut words = Vec::new();
+    let mut fenced = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        for word in line.split_whitespace() {
+            let word = word.trim_matches('`');
+            if word.contains('/') || word.contains('\\') || word.starts_with('@') {
+                continue;
+            }
+            if word.starts_with("www.") || word.contains("://") {
+                continue;
+            }
+            if word.chars().any(char::is_alphanumeric) {
+                words.push(word);
+            }
+        }
+    }
+    words.join(" ")
+}
+
+/// `text`'s words, lowercased and split at anything but letters and
+/// digits.
+fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+}
+
+/// The words in `text` that could say which work is meant: three letters
+/// or more, with a letter, and not `FILLER`.
+fn content_words(text: &str) -> Vec<String> {
+    words(text)
+        .filter(|w| w.chars().count() >= 3 && w.chars().any(char::is_alphabetic))
+        .filter(|w| !FILLER.contains(&w.as_str()))
+        .collect()
+}
+
+/// Whether two lowercase words are the same word: equal, or sharing their
+/// first `STEM_CHARS` letters (or all of the shorter, when that has three
+/// or more), so `hangs` and `hang` or `archive` and `archiving` match.
+fn same_word(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let n = a.chars().count().min(b.chars().count()).min(STEM_CHARS);
+    n >= 3 && a.chars().take(n).eq(b.chars().take(n))
+}
+
+/// Whether `name`'s slug shows the model read `text`: one of its words,
+/// other than prefixes, `FILLER` and `GENERIC` words, is a word of `text`.
+fn grounded(name: &str, text: &str) -> bool {
+    let slug = name.rsplit('/').next().unwrap_or(name);
+    let said: Vec<String> = words(text).collect();
+    content_words(slug)
+        .iter()
+        .filter(|w| !GENERIC.contains(&w.as_str()) && !PREFIXES.contains(&w.as_str()))
+        .any(|w| said.iter().any(|s| same_word(w, s)))
 }
 
 /// A work item's title: a Fizzy card's from the Fizzy CLI, a GitHub issue
@@ -138,7 +279,7 @@ fn suggest(text: &str) -> Option<String> {
     // The text goes in on stdin, so one starting with `-` stays text.
     let out = bounded_output(&mut cmd, Some(&text), FM_TIMEOUT);
     let _ = std::fs::remove_file(&schema);
-    parse(&out?)
+    parse(&out?).filter(|name| grounded(name, &text))
 }
 
 /// A work item's title as a feature name, for when the model can't name it.
@@ -146,10 +287,11 @@ fn title_name(title: &str) -> Option<String> {
     Some(slug(title)).filter(|s| !s.is_empty() && name_problem(s).is_none())
 }
 
-/// A prompt's first words as a feature name, for when the model can't
-/// name it. Line breaks separate words, rather than joining them.
+/// A prompt's first words of prose (see `prose`) as a feature name, for
+/// when the model can't name it. Line breaks separate words, rather than
+/// joining them.
 fn prompt_name(prompt: &str) -> Option<String> {
-    title_name(&prompt.split_whitespace().collect::<Vec<_>>().join(" "))
+    title_name(&prose(prompt))
 }
 
 /// The work name in `fm`'s JSON answer, cleaned up: a known prefix
@@ -265,6 +407,63 @@ mod tests {
     }
 
     #[test]
+    fn prompts_need_words_of_their_own_to_name_work() {
+        let slack = "- read this: https://example.slack.com/archives/C08/p17?thread_ts=1.5&cid=C08\n\
+                     - /agent-kit:issue-create";
+        assert!(!nameable(slack));
+        assert!(!nameable("hello"));
+        assert!(!nameable(
+            "```\nfn main() { panic!(\"tab picker\") }\n```\nlook"
+        ));
+        assert!(!nameable("@crates/core/src/lib.rs ~/notes/x.md"));
+        assert!(nameable("the tab picker hangs"));
+        assert!(nameable("fix login"));
+        assert!(nameable(
+            "```\n/home/x/session.jsonl\n```\n\non drummer -- what is this session's title?"
+        ));
+        assert_eq!(
+            name_work("personal", None, &Tracker::default(), slack),
+            None
+        );
+    }
+
+    #[test]
+    fn prompt_names_skip_links_paths_and_code() {
+        assert_eq!(
+            prompt_name("see https://x.y/z and `@a/b.rs`\n```\ncode here\n```\nthe picker hangs")
+                .as_deref(),
+            Some("see-and-the-picker-hangs")
+        );
+    }
+
+    #[test]
+    fn names_must_echo_the_text_not_the_instructions() {
+        let slack =
+            "- read this: https://example.slack.com/archives/C08\n- /agent-kit:issue-create";
+        assert!(!grounded("fix/crash-fix", slack));
+        assert!(!grounded("fix/login-timeout-issue", "hello"));
+        assert!(!grounded("fix/csv-report-export", "the tab picker hangs"));
+        assert!(grounded("fix/tab-picker-hangs", "the tab picker hangs"));
+        assert!(grounded("fix/picker-freeze", "the tab picker hangs"));
+        assert!(grounded(
+            "fix/archive-during-check",
+            "archiving while a check runs"
+        ));
+        assert!(grounded("fix/hang-on-archive", "it hangs"));
+        // A crash the text names is the text's own word.
+        assert!(grounded("fix/archive-crash", "a crash on archive"));
+        assert!(!grounded("fix/crash", "a crash on archive"));
+    }
+
+    #[test]
+    fn same_word_matches_stems() {
+        assert!(same_word("hangs", "hang"));
+        assert!(same_word("archive", "archiving"));
+        assert!(!same_word("crash", "create"));
+        assert!(!same_word("ab", "abc"));
+    }
+
+    #[test]
     fn long_slugs_are_cut_at_a_word() {
         let s = slug("one two three four five six seven eight nine ten");
         assert_eq!(s, "one-two-three-four-five-six-seven-eight");
@@ -286,6 +485,13 @@ mod tests {
             eprintln!("{prompt} -> {name:?}");
             assert!(name.is_some());
         }
+        // Nothing of its own to name it from: no name rather than a made-up one.
+        let slack = "- read this: https://example.slack.com/archives/C08/p17?thread_ts=1.5\n\
+                     - /agent-kit:issue-create";
+        assert_eq!(suggest_name(slack), None);
+        let named = suggest_name("the tab picker hangs when archiving a task");
+        eprintln!("suggested {named:?}");
+        assert!(named.is_some());
         let title = item_title("personal", "#1056", &fizzy);
         eprintln!(
             "#1056 -> {title:?} -> {:?}",

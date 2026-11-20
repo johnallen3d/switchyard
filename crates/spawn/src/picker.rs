@@ -38,6 +38,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Clear;
 use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
+use switchyard_core::autoname::{nameable, suggest_name, warm_up};
 use switchyard_core::commands::{self, SlashCommand};
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, compatible, dev_hosts, pool};
@@ -53,6 +54,10 @@ use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
 use switchyard_ui::prompt_box::{self, PromptBox, place_cursor, text_field, text_key};
 use switchyard_ui::protocol::{Title, clear_title, hex};
+
+/// How long the prompt must stay unchanged before the model is asked to
+/// name it (see `sync_suggestion`).
+const SUGGEST_AFTER: Duration = Duration::from_millis(500);
 
 const ICON_REPO: &str = "\u{f0ea0}"; // nf-md-source_repository
 const ICON_GROUP: &str = "\u{f024b}"; // nf-md-folder_multiple
@@ -190,6 +195,33 @@ struct ItemMenu {
     card: Option<(Rect, Rect)>,
 }
 
+/// The model's name for the typed prompt, asked for in the background
+/// once the prompt rests (core's `suggest_name`): the last answer and the
+/// prompt it is for, the prompt being asked about, the prompt as last seen
+/// and when it last changed.
+struct Suggestion {
+    answer: Option<(String, Option<String>)>,
+    asking: Option<String>,
+    seen: String,
+    changed: Instant,
+    tx: Sender<(String, Option<String>)>,
+    rx: Receiver<(String, Option<String>)>,
+}
+
+impl Default for Suggestion {
+    fn default() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Suggestion {
+            answer: None,
+            asking: None,
+            seen: String::new(),
+            changed: Instant::now(),
+            tx,
+            rx,
+        }
+    }
+}
+
 struct App {
     p: Palette,
     kind: Kind,
@@ -232,6 +264,8 @@ struct App {
     items_tx: Sender<(String, Result<OpenItems, String>)>,
     items_rx: Receiver<(String, Result<OpenItems, String>)>,
     item_menu: ItemMenu,
+    /// The model's name for the prompt (see `sync_suggestion`).
+    suggestion: Suggestion,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -312,6 +346,7 @@ impl App {
             items_tx,
             items_rx,
             item_menu: ItemMenu::default(),
+            suggestion: Suggestion::default(),
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -455,6 +490,78 @@ impl App {
             });
         }
         self.match_items();
+    }
+
+    /// Ask the model to name the prompt in the background once it has
+    /// rested for `SUGGEST_AFTER`, while the work has no name or work item
+    /// and the prompt is `nameable`; one question at a time, and only on
+    /// the Mac, where the model is. The answer is offered as the name (see
+    /// `suggested_name`) until the prompt changes.
+    fn sync_suggestion(&mut self) {
+        let unnamed =
+            self.kind == Kind::Agent && self.name_text().is_empty() && self.item_text().is_empty();
+        let prompt = self.prompt.text();
+        let sug = &mut self.suggestion;
+        while let Ok((prompt, name)) = sug.rx.try_recv() {
+            if sug.asking.as_deref() == Some(prompt.as_str()) {
+                sug.asking = None;
+            }
+            sug.answer = Some((prompt, name));
+        }
+        if prompt != sug.seen {
+            sug.seen.clone_from(&prompt);
+            sug.changed = Instant::now();
+        }
+        let wanted = cfg!(target_os = "macos")
+            && unnamed
+            && sug.changed.elapsed() >= SUGGEST_AFTER
+            && sug.asking.is_none()
+            && sug.answer.as_ref().is_none_or(|(p, _)| *p != prompt)
+            && nameable(&prompt);
+        if !wanted {
+            return;
+        }
+        sug.asking = Some(prompt.clone());
+        let tx = sug.tx.clone();
+        std::thread::spawn(move || {
+            let name = suggest_name(&prompt);
+            let _ = tx.send((prompt, name));
+        });
+    }
+
+    /// The model's name for the prompt as it is now, while the work has no
+    /// name or work item of its own.
+    fn suggested_name(&self) -> Option<&str> {
+        if !self.name_text().is_empty() || !self.item_text().is_empty() {
+            return None;
+        }
+        match &self.suggestion.answer {
+            Some((prompt, Some(name))) if *prompt == self.prompt_text() => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Whether the model is naming the prompt as it is now.
+    fn suggesting(&self) -> bool {
+        self.suggestion.asking.as_deref() == Some(self.prompt_text().as_str())
+    }
+
+    /// The name the work launches with: the typed one, else the model's
+    /// suggestion, else blank for launch to name it.
+    fn launch_name(&self) -> String {
+        match self.suggested_name() {
+            Some(name) => name.to_string(),
+            None => self.name_text(),
+        }
+    }
+
+    /// Whether the work must be named by hand: no name, no work item, and a
+    /// prompt that doesn't say enough to name it from.
+    fn needs_name(&self) -> bool {
+        self.name_text().is_empty()
+            && self.item_text().is_empty()
+            && !self.prompt_text().is_empty()
+            && !nameable(&self.prompt_text())
     }
 
     /// Whether the highlighted project's open items are being listed, for
@@ -812,13 +919,14 @@ impl App {
     }
 
     /// What a blank name is named from on Enter (see core's `autoname`):
-    /// the work item, else the prompt; None when the work must be named.
+    /// the work item, else a prompt that says enough (`nameable`); None
+    /// when the work must be named.
     fn names_from(&self) -> Option<&'static str> {
         if !self.name_text().is_empty() {
             None
         } else if !self.item_text().is_empty() {
             Some("work item")
-        } else if !self.prompt_text().is_empty() {
+        } else if nameable(&self.prompt_text()) {
             Some("prompt")
         } else {
             None
@@ -840,7 +948,7 @@ impl App {
         match self.kind {
             Kind::Session => format!("session/{}/{}", hex(self.listed()), hex(&path)),
             Kind::Agent => {
-                let name = self.name_text();
+                let name = self.launch_name();
                 // A blank name is fine when launch can name the work.
                 if name_problem(&name).is_some() && self.names_from().is_none() {
                     return String::new();
@@ -1508,12 +1616,36 @@ impl App {
             (name_row.width as usize).saturating_sub(label_w as usize + str_width(&name) + 2);
         let (candidates, color) = match name_problem(&name) {
             Some(problem) if !name.is_empty() => (vec![format!("{problem} ")], p.love),
-            Some(_) => match self.names_from() {
-                Some(from) => (
+            Some(_) if self.needs_name() => (
+                vec![
+                    "name it: the prompt doesn't say what the work is ".into(),
+                    "name it ".into(),
+                ],
+                p.gold,
+            ),
+            Some(_) => match (self.suggested_name(), self.names_from()) {
+                (Some(suggested), _) => {
+                    let (branch, _) = branch_and_slug(suggested);
+                    (
+                        vec![format!("⏎ spawns {branch} "), format!("{branch} ")],
+                        p.foam,
+                    )
+                }
+                (None, Some(from)) if self.suggesting() => {
+                    let spin = SPINNER[tick(self.started) % SPINNER.len()];
+                    (
+                        vec![
+                            format!("{spin} naming from the {from} "),
+                            format!("{spin} naming "),
+                        ],
+                        p.muted,
+                    )
+                }
+                (None, Some(from)) => (
                     vec![format!("named on ⏎ from the {from} "), "named on ⏎ ".into()],
                     p.muted,
                 ),
-                None => (vec![], p.muted),
+                (None, None) => (vec![], p.muted),
             },
             None => {
                 let (branch, slug) = branch_and_slug(&name);
@@ -1806,6 +1938,8 @@ impl App {
                         "spawn (prompt not saved)"
                     } else if self.target_path().is_none() {
                         "spawn (pick a folder)"
+                    } else if self.needs_name() {
+                        "spawn (name it)"
                     } else {
                         "spawn (name it, or add a prompt)"
                     };
@@ -1863,6 +1997,10 @@ pub fn run_picker(
         dev_hosts(),
     );
     app.standalone = standalone;
+    // The model's first answer is slower; have it ready for the prompt.
+    if cfg!(target_os = "macos") {
+        std::thread::spawn(warm_up);
+    }
     let mut term = ratatui::init();
     // Raw mode is on and nothing has read stdin yet: ask about graphics now.
     app.cell = chrome::detect(Duration::from_millis(300));
@@ -1942,8 +2080,8 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         app.note = Some(("pick a project or Git folder first".into(), true));
         return Ok(false);
     };
-    let name = app.name_text();
-    let names_from = app.names_from();
+    let name = app.launch_name();
+    let names_from = app.names_from().filter(|_| name.is_empty());
     if let Some(problem) = name_problem(&name).filter(|_| names_from.is_none()) {
         app.note = Some((problem.into(), true));
         return Ok(false);
@@ -2023,9 +2161,10 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.receive();
         app.sync_commands();
         app.sync_items();
+        app.sync_suggestion();
         term.draw(|f| app.draw(f))?;
         app.report()?;
-        let wait = if app.waiting() || app.listing_items() {
+        let wait = if app.waiting() || app.listing_items() || app.suggesting() {
             Duration::from_millis(90)
         } else {
             Duration::from_millis(250)
@@ -2239,7 +2378,7 @@ mod tests {
             hex("/repos/local"),
             HARNESSES[0]
         );
-        app.prompt.field.insert_str("do the work");
+        app.prompt.field.insert_str("fix the login page");
         app.prompt.file_ref = "picker-host:test-prompt".into();
         assert_eq!(app.names_from(), Some("prompt"));
         assert_eq!(app.pick(), format!("{base}/{}", hex(&app.prompt.file_ref)));
@@ -2251,6 +2390,49 @@ mod tests {
         );
         app.name.insert_str("typed");
         assert_eq!(app.names_from(), None, "a typed name wins");
+    }
+
+    #[test]
+    fn a_prompt_with_nothing_to_name_it_from_needs_a_name() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        app.name.clear();
+        app.prompt.field.insert_str(
+            "read this: https://example.slack.com/archives/C08/p17\n/agent-kit:issue-create",
+        );
+        app.prompt.file_ref = "picker-host:test-prompt".into();
+        assert!(app.needs_name());
+        assert_eq!(app.names_from(), None);
+        assert!(app.pick().is_empty(), "Enter waits for a name");
+        app.name.insert_str("slack-thread");
+        assert!(!app.needs_name());
+        assert_ne!(app.pick(), "");
+    }
+
+    #[test]
+    fn the_models_name_for_the_prompt_is_offered_until_it_changes() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        app.name.clear();
+        app.prompt.field.insert_str("the tab picker hangs");
+        app.prompt.file_ref = "picker-host:test-prompt".into();
+        app.suggestion.answer = Some((
+            "the tab picker hangs".into(),
+            Some("fix/tab-picker-hangs".into()),
+        ));
+        assert_eq!(app.suggested_name(), Some("fix/tab-picker-hangs"));
+        assert!(
+            app.pick()
+                .contains(&format!("/{}/", hex("fix/tab-picker-hangs")))
+        );
+        app.prompt.field.insert_str(" on archive");
+        assert_eq!(app.suggested_name(), None, "stale once the prompt changes");
+        assert!(app.pick().contains(&format!("/{}//", hex("/repos/local"))));
+        app.name.insert_str("typed");
+        app.suggestion.answer = Some((app.prompt_text(), Some("fix/other".into())));
+        assert_eq!(app.suggested_name(), None, "a typed name wins");
     }
 
     fn key(app: &mut App, code: KeyCode) {
