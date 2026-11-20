@@ -137,7 +137,7 @@ pub struct Row {
 enum ListLine {
     Row(usize),
     Gap,
-    Heading,
+    Heading(&'static str),
 }
 
 /// The project chooser Tab opens: a filter over the catalog.
@@ -513,9 +513,9 @@ impl Work {
         for url in started {
             self.starting.remove(&url);
         }
-        // Free items first, then those with a task; best match first in
+        // Items with a task first, then the free ones; best match first in
         // each while searching, else the tracker's order (stable).
-        scored.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
         self.rows = scored.into_iter().map(|(_, _, r)| r).collect();
         self.selected = if filtering {
             0
@@ -930,8 +930,8 @@ impl Work {
     }
 
     /// The list: a line naming the project and what it lists, then the
-    /// rows, free items first and those with a task dimmed under a
-    /// heading, and a blank line above the footer.
+    /// rows, those with a task dimmed under a heading first and the free
+    /// ones under another, and a blank line above the footer.
     fn draw_list(&mut self, f: &mut Frame, area: Rect, p: &Palette, tick: usize) {
         let head = Rect { height: 1, ..area };
         let list = Rect {
@@ -1015,16 +1015,17 @@ impl Work {
             f.render_widget(Line::styled(format!(" {msg}"), muted), area);
             return;
         }
-        // Lines: each row, with a gap and a heading before the first with
-        // a task.
-        let first_taken = self.rows.iter().position(|r| r.linked.is_some());
+        // Lines: each row, with a heading over those with a task and, when
+        // there are any, a gap and a heading over the free ones after them.
+        let first_free = self.rows.iter().position(|r| r.linked.is_none());
         let mut lines: Vec<ListLine> = Vec::new();
+        if self.rows.first().is_some_and(|r| r.linked.is_some()) {
+            lines.push(ListLine::Heading(" With a task"));
+        }
         for i in 0..self.rows.len() {
-            if Some(i) == first_taken {
-                if i > 0 {
-                    lines.push(ListLine::Gap);
-                }
-                lines.push(ListLine::Heading);
+            if Some(i) == first_free && i > 0 {
+                lines.push(ListLine::Gap);
+                lines.push(ListLine::Heading(" Without a task"));
             }
             lines.push(ListLine::Row(i));
         }
@@ -1033,7 +1034,7 @@ impl Work {
             .position(|l| *l == ListLine::Row(self.selected))
             .unwrap_or(0);
         let height = area.height as usize;
-        let header_above = at > 0 && lines[at - 1] == ListLine::Heading;
+        let header_above = at > 0 && matches!(lines[at - 1], ListLine::Heading(_));
         self.offset = keep_in_view(self.offset, at, height, header_above)
             .min(lines.len().saturating_sub(height));
         let width = area.width as usize;
@@ -1045,9 +1046,9 @@ impl Work {
                 ..area
             };
             match line {
-                ListLine::Heading => f.render_widget(
+                ListLine::Heading(title) => f.render_widget(
                     Line::styled(
-                        " With a task",
+                        *title,
                         Style::new().fg(p.subtle).add_modifier(Modifier::BOLD),
                     ),
                     r,
@@ -1471,7 +1472,7 @@ mod tests {
     }
 
     #[test]
-    fn items_with_a_task_follow_the_free_ones_and_enter_goes_to_the_task() {
+    fn items_with_a_task_lead_the_free_ones_and_enter_goes_to_the_task() {
         let mut w = work();
         let tasks = vec![
             task("on-two", "https://app.fizzy.do/1/cards/2", false),
@@ -1480,9 +1481,9 @@ mod tests {
         ];
         w.refilter("", &tasks);
         let order: Vec<u64> = w.rows.iter().map(|r| w.items()[r.index].number).collect();
-        assert_eq!(order, [3, 1, 2]);
-        assert!(w.rows[2].linked.is_some() && w.rows[1].linked.is_none());
-        w.selected = 2;
+        assert_eq!(order, [2, 3, 1]);
+        assert!(w.rows[0].linked.is_some() && w.rows[1].linked.is_none());
+        w.selected = 0;
         match w.key(key(KeyCode::Enter), 10) {
             Outcome::Go(to) => assert_eq!(to.label, "sy/on-two"),
             o => panic!("{o:?}"),
