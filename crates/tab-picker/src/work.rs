@@ -215,6 +215,9 @@ pub struct Work {
     pub armed: Option<(Action, String)>,
     /// The item to highlight once its listing comes (see `focus_on`).
     focus: Option<Link>,
+    /// Whether the pending focus has relisted, once, on not finding its
+    /// item in a listing that may predate it.
+    focus_relisted: bool,
     /// The last item to highlight that wasn't listed, for the footer.
     pub missed: Option<Link>,
 }
@@ -239,6 +242,7 @@ impl Default for Work {
             detail: Detail::default(),
             armed: None,
             focus: None,
+            focus_relisted: false,
             missed: None,
         }
     }
@@ -306,10 +310,12 @@ impl Work {
         }
         self.missed = None;
         self.focus = Some(link);
+        self.focus_relisted = false;
     }
 
     /// Highlight the pending focus if the listing has come: on its row, or
-    /// noting it as missed when it isn't one.
+    /// noting it as missed when it isn't one. Listings last the picker's
+    /// life, so a miss relists once first: the item may be newer.
     fn take_focus(&mut self) {
         let Some(link) = &self.focus else {
             return;
@@ -332,6 +338,11 @@ impl Work {
             (!link.url.is_empty() && item.url == link.url)
                 || link_key(&item.url) == Some(key.clone())
         });
+        if found.is_none() && !self.focus_relisted {
+            self.focus_relisted = true;
+            self.load(true);
+            return;
+        }
         let link = self.focus.take();
         match found {
             Some(i) => self.selected = i,
@@ -1454,16 +1465,21 @@ mod tests {
         w.refilter("", &[]);
         assert_eq!(w.selected_item().unwrap().number, 1);
         assert!(w.focus.is_none() && w.missed.is_none());
-        // A PR switches to pull requests; one not listed is missed.
+        // A PR switches to pull requests; one not listed relists once,
+        // then is missed.
         w.focus_on(link("pr", "https://github.com/o/r/pull/9"));
         assert_eq!(w.kind, Kind::Prs);
-        w.lists.insert(
-            ("sy".into(), Kind::Prs),
+        let none = || {
             Listing::Ready(OpenItems {
                 noun: "pull requests",
                 items: Vec::new(),
-            }),
-        );
+            })
+        };
+        w.lists.insert(("sy".into(), Kind::Prs), none());
+        w.refilter("", &[]);
+        assert!(w.missed.is_none() && w.focus.is_some());
+        assert!(matches!(w.listing(), Some(Listing::Loading)));
+        w.lists.insert(("sy".into(), Kind::Prs), none());
         w.refilter("", &[]);
         assert_eq!(
             w.missed.as_ref().map(|l| l.url.as_str()),
