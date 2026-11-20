@@ -27,7 +27,7 @@
 //! a dimmed item jumps to its task; ctrl-b opens it in the browser. On a
 //! pull request that isn't a draft, ctrl-g arms its approval, as ctrl-x
 //! arms an archive elsewhere: Enter then approves it (`gh pr review
-//! --approve`) and any other key disarms it. ctrl-s arms a squash-merge
+//! --approve`) and any other key disarms it. ctrl-m arms a squash-merge
 //! the same way, on a pull request that is approved with no failing or
 //! running checks (see core's `merge_blocker`); Enter asks GitHub again
 //! before merging (see core's `item_actions`). A row says what stands in
@@ -37,7 +37,7 @@
 //!
 //! With room, the view splits: the list on the left and the highlighted
 //! item on the right, its description and comments, and for a pull
-//! request its diff and commits with ctrl-l (see detail.rs). ctrl-e gives
+//! request its diff and commits with ctrl-l (see detail.rs). ctrl-s gives
 //! the right side the whole view, where the arrows scroll it; shift and
 //! the arrows scroll it beside the list. ctrl-v moves the keys into it as
 //! scrollback, giving it the whole view first when there is no room
@@ -167,7 +167,7 @@ pub enum Outcome {
     Scroll(Option<KeyEvent>),
     /// Open the URL in the browser here.
     Open(String),
-    /// ctrl-g or ctrl-s armed an action: the footer says what Enter will
+    /// ctrl-g or ctrl-m armed an action: the footer says what Enter will
     /// do.
     Arm,
     /// Approve or squash-merge (`action`) the pull request at `url`, named
@@ -210,7 +210,7 @@ pub struct Work {
     pub starting: HashSet<String>,
     /// The highlighted item's side (see detail.rs).
     pub detail: Detail,
-    /// What ctrl-g or ctrl-s armed (approve or squash-merge) and on which
+    /// What ctrl-g or ctrl-m armed (approve or squash-merge) and on which
     /// pull request, by URL, until the next key.
     pub armed: Option<(Action, String)>,
     /// The item to highlight once its listing comes (see `focus_on`).
@@ -600,7 +600,7 @@ impl Work {
                 },
                 None => Outcome::Stay,
             },
-            KeyCode::Char('e') if ctrl => {
+            KeyCode::Char('s') if ctrl => {
                 self.detail.expanded = !self.detail.expanded;
                 Outcome::Stay
             }
@@ -650,7 +650,7 @@ impl Work {
             },
             KeyCode::Char('g') if ctrl => self.arm(Action::Approve),
             KeyCode::Char('t') if ctrl => self.review(),
-            KeyCode::Char('s') if ctrl => self.arm(Action::Merge),
+            KeyCode::Char('m') if ctrl => self.arm(Action::Merge),
             // Searching brings back the list it searches.
             KeyCode::Char(_) if !ctrl => {
                 self.detail.expanded = false;
@@ -702,7 +702,7 @@ impl Work {
     fn actionable(&self, action: Action) -> Result<(Item, String, String), Outcome> {
         if self.kind != Kind::Prs {
             let key = if action == Action::Merge {
-                "ctrl-s squash-merges"
+                "ctrl-m squash-merges"
             } else {
                 "ctrl-g approves"
             };
@@ -729,7 +729,7 @@ impl Work {
         Ok((item, pr.url.clone(), name))
     }
 
-    /// ctrl-g or ctrl-s: arm `action` on the highlighted pull request,
+    /// ctrl-g or ctrl-m: arm `action` on the highlighted pull request,
     /// for Enter.
     fn arm(&mut self, action: Action) -> Outcome {
         match self.actionable(action) {
@@ -851,7 +851,7 @@ impl Work {
             h.push(("⌃G", "approve"));
         }
         if self.kind == Kind::Prs && self.actionable(Action::Merge).is_ok() {
-            h.push(("⌃S", "squash-merge"));
+            h.push(("⌃M", "squash-merge"));
         }
         if self.kind == Kind::Prs && self.selected_item().is_some() {
             h.push(("⌃T", "review"));
@@ -860,7 +860,7 @@ impl Work {
             h.push(("⌃L", self.detail.lens_for(&l).next().name()));
         }
         h.push((
-            "⌃E",
+            "⌃S",
             if self.detail.expanded {
                 "list"
             } else {
@@ -1639,12 +1639,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_squash_merges_only_an_approved_pr_with_passing_checks() {
+    fn ctrl_m_squash_merges_only_an_approved_pr_with_passing_checks() {
         let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-        let ctrl_s = || KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let ctrl_m = || KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL);
         let mut w = work();
         w.refilter("", &[]);
-        assert!(matches!(w.key(ctrl_s(), 10), Outcome::Refuse(_)));
+        assert!(matches!(w.key(ctrl_m(), 10), Outcome::Refuse(_)));
         w.kind = Kind::Prs;
         let pr = |n: u64, review: &str, checks: &str| OpenItem {
             number: n,
@@ -1667,8 +1667,8 @@ mod tests {
             }),
         );
         w.refilter("", &[]);
-        assert!(w.hints().contains(&("⌃S", "squash-merge")));
-        assert_eq!(w.key(ctrl_s(), 10), Outcome::Arm);
+        assert!(w.hints().contains(&("⌃M", "squash-merge")));
+        assert_eq!(w.key(ctrl_m(), 10), Outcome::Arm);
         assert_eq!(
             w.armed_pr(),
             Some((Action::Merge, "#5".into(), "PR 5".into()))
@@ -1686,12 +1686,12 @@ mod tests {
                 name: "#5".into(),
             }
         );
-        let refused = |w: &mut Work| match w.key(ctrl_s(), 10) {
+        let refused = |w: &mut Work| match w.key(ctrl_m(), 10) {
             Outcome::Refuse(why) => why,
             o => panic!("{o:?}"),
         };
         w.key(key(KeyCode::Down), 10);
-        assert!(!w.hints().contains(&("⌃S", "squash-merge")));
+        assert!(!w.hints().contains(&("⌃M", "squash-merge")));
         assert_eq!(refused(&mut w), "#4 isn't approved yet");
         w.key(key(KeyCode::Down), 10);
         assert_eq!(refused(&mut w), "#3 has failing checks");

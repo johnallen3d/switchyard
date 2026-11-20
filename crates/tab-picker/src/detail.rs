@@ -1,7 +1,7 @@
 //! The Work view's right side: the highlighted item's description and
 //! comments (core's `item_view`), and for a pull request its diff and
 //! commits (core's `changes::pull_request`), which ctrl-l cycles through
-//! (see `Lens`). ctrl-e gives it the whole view.
+//! (see `Lens`). ctrl-s gives it the whole view.
 //!
 //! Each item is fetched once the highlight has rested on it for `SETTLE`,
 //! in the background, and kept until ctrl-r lists the project again; its
@@ -91,7 +91,7 @@ struct Entry {
 
 pub struct Detail {
     lens: Lens,
-    /// The right side has the whole view (ctrl-e).
+    /// The right side has the whole view (ctrl-s).
     pub expanded: bool,
     cache: HashMap<String, Entry>,
     tx: Sender<(String, Got)>,

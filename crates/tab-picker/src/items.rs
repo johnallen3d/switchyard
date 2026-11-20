@@ -390,9 +390,9 @@ fn action_key(a: Action) -> (&'static str, &'static str) {
         Action::Comment => ("c", "comment"),
         Action::Close => ("x", "close"),
         Action::Ready => ("r", "mark ready"),
-        // The Work view's ctrl-g and ctrl-s; the float doesn't offer them.
+        // The Work view's ctrl-g and ctrl-m; the float doesn't offer them.
         Action::Approve => ("⌃G", "approve"),
-        Action::Merge => ("⌃S", "squash-merge"),
+        Action::Merge => ("⌃M", "squash-merge"),
     }
 }
 

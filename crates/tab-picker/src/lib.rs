@@ -46,9 +46,9 @@
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
 //!   work items and host over its whole status message, the agent's
-//!   transcript, live, and the reply box. ctrl-e collapses the sidebar, and
+//!   transcript, live, and the reply box. ctrl-s collapses the sidebar, and
 //!   typing to search brings it back. Narrower, a preview under the list
-//!   shows the transcript, and ctrl-e expands it over the list. ctrl-l
+//!   shows the transcript, and ctrl-s expands it over the list. ctrl-l
 //!   turns the transcript into the task's diff against its base branch,
 //!   then its commits, then back (see changes.rs). ctrl-u and ctrl-d go
 //!   into scrollback on it, half a page up or down, rather than paging the
@@ -87,7 +87,7 @@
 //! a new tab); in Inbox that's cmd+Enter, and Enter instead clears the
 //! search, keeping the row it found highlighted. ctrl-r pins or unpins
 //! the highlighted open task (`pinned` in the registry), which puts it
-//! in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens a prompt
+//! in a Pinned group at the top of Inbox. ctrl-z, in Inbox, opens a prompt
 //! for when to wake the task (see snooze.rs); Enter snoozes it
 //! into the Snoozed group until then (`snoozed_until`), and Enter on an
 //! empty prompt wakes a snoozed one. Task rows show their links as badges
@@ -472,7 +472,7 @@ impl Fold {
     }
 }
 
-/// The ctrl-s prompt: when to wake the highlighted task, typed (see
+/// The ctrl-z prompt: when to wake the highlighted task, typed (see
 /// snooze.rs). Empty, it wakes a snoozed task.
 struct Snooze {
     /// The task's tab, as (`session_id`, `window_id`), which stays highlighted.
@@ -667,7 +667,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("esc", "drop selection, search, then leave"),
                 ("q ⌃C ⌃V", "leave"),
                 ("⇥", "leave for the reply box"),
-                ("⌃E", "collapse or expand the sidebar"),
+                ("⌃S", "collapse or expand the sidebar"),
             ],
         ),
         Section::new(
@@ -683,7 +683,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⌃U ⌃D", "leave for scrollback, half a page"),
                 ("⌃X", "leave and arm an archive"),
                 ("⌃G", "edit in the editor"),
-                ("⌃E", "collapse or expand the sidebar"),
+                ("⌃S", "collapse or expand the sidebar"),
                 ("⌃C", "clear, then leave"),
                 ("esc", "leave"),
             ],
@@ -766,7 +766,7 @@ struct App {
     armed: Armed,
     /// The open ctrl-b work items float (see items.rs).
     items: Option<items::Items>,
-    /// The open ctrl-s snooze prompt; Enter snoozes, Escape closes it.
+    /// The open ctrl-z snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
     /// The reply box while Tab has moved into it; Enter sends, Escape
     /// leaves it. Unfocused, it is drawn from `idle`.
@@ -835,7 +835,7 @@ struct App {
     /// The first line of the changes shown, from the top, and the tab and
     /// lens that is for.
     changes_top: (usize, Option<(preview::Pane, changes::Lens)>),
-    /// The preview fills the picker (ctrl-e), for reading: with the
+    /// The preview fills the picker (ctrl-s), for reading: with the
     /// sidebar, it is collapsed.
     expanded: bool,
     /// Inbox is drawn as the sidebar and the highlighted row (see
@@ -1254,7 +1254,7 @@ impl App {
     }
 
     /// The highlighted open task, which ctrl-r can pin (not in the archive)
-    /// and ctrl-s snooze (in Inbox).
+    /// and ctrl-z snooze (in Inbox).
     fn selected_open_task(&self) -> Option<usize> {
         self.selected_item()
             .and_then(|i| self.task_index(i))
@@ -2403,8 +2403,8 @@ impl App {
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
             KeyCode::Char('c') if ctrl => self.close_reply(),
             KeyCode::Char('v') if ctrl => self.enter_scrollback(None),
-            // ctrl-e collapses or expands the sidebar, keeping the box.
-            KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
+            // ctrl-s collapses or expands the sidebar, keeping the box.
+            KeyCode::Char('s') if ctrl && self.view == View::Inbox => {
                 self.expanded = !self.expanded;
             }
             // ctrl-j and ctrl-k leave the box for the list and move in it;
@@ -2670,10 +2670,10 @@ impl App {
         let page = self.page();
         match k.code {
             // standalone_key acts on ctrl-r and ctrl-t.
-            KeyCode::Char('s') if ctrl => self.open_snooze(),
+            KeyCode::Char('z') if ctrl => self.open_snooze(),
             KeyCode::Char('b') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
-            KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
+            KeyCode::Char('s') if ctrl && self.view == View::Inbox => {
                 self.expanded = !self.expanded;
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
@@ -2884,9 +2884,9 @@ impl App {
             }
             return;
         }
-        // ctrl-e, in Inbox, still collapses or expands the sidebar, staying
+        // ctrl-s, in Inbox, still collapses or expands the sidebar, staying
         // in scrollback, even while a search is being typed.
-        if k.code == KeyCode::Char('e')
+        if k.code == KeyCode::Char('s')
             && k.modifiers.contains(KeyModifiers::CONTROL)
             && self.view == View::Inbox
         {
@@ -2991,7 +2991,7 @@ impl App {
     /// Inbox, with room: the sidebar of every open tab and agent on the left
     /// (search over its list), and the highlighted one on the right: its
     /// name and status message, its transcript, and the reply box under it.
-    /// ctrl-e collapses the sidebar, giving the right side the whole width.
+    /// ctrl-s collapses the sidebar, giving the right side the whole width.
     fn draw_split(&mut self, f: &mut Frame, area: Rect) {
         let p = self.p;
         let main = if self.expanded {
@@ -3231,7 +3231,7 @@ impl App {
 
     /// Inbox's list and the preview under it, when there is room for both:
     /// four fifths of the height for the preview, the transcript being
-    /// what John reads, and the rest for the list; expanded (ctrl-e), the
+    /// what John reads, and the rest for the list; expanded (ctrl-s), the
     /// preview alone. The preview stays while John moves, whatever the
     /// row, so the list doesn't change height under him.
     fn preview_split(&self, body: Rect) -> Option<(Rect, Rect)> {
@@ -3536,7 +3536,7 @@ impl App {
         f.render_widget(Line::from(left), chips);
     }
 
-    /// The ctrl-s prompt, when open: a small box over the list with the
+    /// The ctrl-z prompt, when open: a small box over the list with the
     /// typed text and when it means, or why it can't be read.
     fn draw_snooze(&self, f: &mut Frame, area: Rect) {
         let Some(prompt) = &self.snooze else { return };
@@ -4594,11 +4594,11 @@ impl App {
                     ("⌃U ⌃D", "scroll it, half a page"),
                     ("⌃G", "arm a pull request's approval: ⏎ approves it"),
                     (
-                        "⌃S",
+                        "⌃M",
                         "arm an approved, passing pull request's squash-merge: ⏎ merges it",
                     ),
                     ("⌃T", "review a pull request in tuicr; :submit sends it"),
-                    ("⌃E", "give the highlighted item the whole view"),
+                    ("⌃S", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "list the project again"),
                 ],
@@ -4697,7 +4697,7 @@ impl App {
         }
         if self.can_snooze() {
             row.push((
-                "⌃S",
+                "⌃Z",
                 if task.is_some_and(|t| t.is_snoozed(self.now)) {
                     "wake"
                 } else {
@@ -4775,7 +4775,7 @@ impl App {
         ];
         match self.view {
             View::Inbox if self.sidebar => views.push((
-                "⌃E",
+                "⌃S",
                 if self.expanded {
                     "show the sidebar"
                 } else {
@@ -4783,7 +4783,7 @@ impl App {
                 },
             )),
             View::Inbox => views.push((
-                "⌃E",
+                "⌃S",
                 if self.expanded {
                     "back to the list"
                 } else {
@@ -4964,7 +4964,7 @@ impl App {
         spans
     }
 
-    /// The footer while ctrl-g or ctrl-s has armed an approval or a
+    /// The footer while ctrl-g or ctrl-m has armed an approval or a
     /// squash-merge of the Work view's highlighted pull request.
     fn armed_pr_line(&self) -> Option<Line<'static>> {
         let (action, name, title) = self.work.armed_pr().filter(|_| self.view == View::Work)?;
@@ -6752,13 +6752,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_snoozes_until_a_typed_time_and_wakes() {
+    fn ctrl_z_snoozes_until_a_typed_time_and_wakes() {
         let mut app = inbox_with_lifecycle();
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         let target = app.pick().split_once(':').unwrap().1.to_string();
-        app.key(ctrl('s'));
+        app.key(ctrl('z'));
         assert!(app.snooze.as_ref().is_some_and(|z| z.until.is_err()));
         for c in "2x".chars() {
             app.key(plain(KeyCode::Char(c)));
@@ -6792,17 +6792,17 @@ mod tests {
         assert_eq!(app.selected_item(), Some(Item::Tab(3)));
         // On a snoozed task, an empty prompt wakes it.
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        app.key(ctrl('s'));
+        app.key(ctrl('z'));
         assert_eq!(app.snooze.as_ref().unwrap().until, Ok(0));
         app.key(plain(KeyCode::Enter));
         assert_eq!(app.tasks[2].snoozed_until, 0);
         assert_eq!(app.selected_item(), Some(Item::Tab(2)));
         // Escape closes the prompt; the archive doesn't snooze.
-        app.key(ctrl('s'));
+        app.key(ctrl('z'));
         app.key(plain(KeyCode::Esc));
         assert!(app.snooze.is_none());
         app.set_view(View::Archive);
-        app.key(ctrl('s'));
+        app.key(ctrl('z'));
         assert!(app.snooze.is_none());
     }
 
@@ -6974,7 +6974,7 @@ mod tests {
             text.contains("Tab to type a message") && text.contains("to /woke"),
             "{text}"
         );
-        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(app.expanded);
         let text = screen(&mut app);
         assert!(text.contains("Tab to type a message"), "{text}");
@@ -6989,12 +6989,12 @@ mod tests {
                 text.contains("Highlight an agent") && !text.contains("message it"),
                 "{text}"
             );
-            app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+            app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         }
     }
 
     #[test]
-    fn ctrl_e_toggles_the_sidebar_in_scrollback() {
+    fn ctrl_s_toggles_the_sidebar_in_scrollback() {
         let mut app = inbox_with_lifecycle();
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         app.scrollback = Some(scrollback::Scrollback::new(
@@ -7002,31 +7002,39 @@ mod tests {
             10,
             5,
         ));
-        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
-        app.key(ctrl_e);
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        app.key(ctrl_s);
         assert!(app.expanded && app.scrollback.is_some());
-        app.key(ctrl_e);
+        app.key(ctrl_s);
         assert!(!app.expanded && app.scrollback.is_some());
         // So does a search being typed, which keeps its query.
         app.scrollback.as_mut().unwrap().typing = Some(scrollback::Typing {
             forward: true,
             query: "x".into(),
         });
-        app.key(ctrl_e);
+        app.key(ctrl_s);
         let sb = app.scrollback.as_ref().unwrap();
         assert!(app.expanded && sb.typing.as_ref().is_some_and(|t| t.query == "x"));
     }
 
     #[test]
-    fn ctrl_e_toggles_the_sidebar_from_the_reply_box() {
+    fn ctrl_s_toggles_the_sidebar_from_the_reply_box() {
         let mut app = inbox_with_lifecycle();
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         app.open_reply();
-        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
-        app.key(ctrl_e);
+        let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        app.key(ctrl_s);
         assert!(app.expanded && app.reply.is_some());
-        app.key(ctrl_e);
+        app.key(ctrl_s);
         assert!(!app.expanded && app.reply.is_some());
+        // ctrl-e is the box's again: the end of the line.
+        let r = app.reply.as_mut().unwrap();
+        r.prompt.set_text("ab");
+        app.key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::from(KeyCode::Char('c')));
+        assert!(!app.expanded);
+        assert_eq!(&*app.reply.as_ref().unwrap().prompt.text(), "abc");
     }
 
     #[test]
@@ -7775,8 +7783,8 @@ mod tests {
                 .any(|r| r.contains("Tab to type a message") && r.contains('│')),
             "{rows:#?}"
         );
-        // ctrl-e collapses the sidebar; typing to search brings it back.
-        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        // ctrl-s collapses the sidebar; typing to search brings it back.
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 140);
         assert!(
             !rows
@@ -7784,7 +7792,7 @@ mod tests {
                 .any(|r| r.contains("Search") || r.contains("pinned")),
             "{rows:#?}"
         );
-        assert!(help_text(&app).contains("⌃E show the sidebar"));
+        assert!(help_text(&app).contains("⌃S show the sidebar"));
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
         // Too narrow, Inbox stacks the list over the reply box as before.
