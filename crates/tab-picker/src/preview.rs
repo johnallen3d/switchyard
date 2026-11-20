@@ -64,6 +64,9 @@ pub struct Preview {
     /// The prompt Claude Code suggests next, while its screen shows one
     /// (for the reply box's ghost text).
     pub suggestion: Option<String>,
+    /// The agent's session log, as a path on its host, when the
+    /// transcript says (ctrl-y copies it).
+    pub log: Option<String>,
     entries: Result<Vec<(String, String)>, String>,
     drawn: Option<(u16, Drawn)>,
 }
@@ -187,6 +190,11 @@ pub fn parse(body: &str) -> Option<Preview> {
         .ok()
         .and_then(|v| v["suggestion"].as_str())
         .map(String::from);
+    let log = v
+        .as_ref()
+        .ok()
+        .and_then(|v| v["log"].as_str())
+        .map(String::from);
     let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -210,6 +218,7 @@ pub fn parse(body: &str) -> Option<Preview> {
         tokens,
         model,
         suggestion,
+        log,
         entries,
         drawn: None,
     })

@@ -52,7 +52,9 @@
 //!   turns the transcript into the task's diff against its base branch,
 //!   then its commits, then back (see changes.rs). ctrl-u and ctrl-d go
 //!   into scrollback on it, half a page up or down, rather than paging the
-//!   list, which search moves through faster.
+//!   list, which search moves through faster. ctrl-y copies the
+//!   highlighted agent's host, harness session ID and session log path,
+//!   a line each.
 //! - Work: one catalog project's open cards or issues, or with ctrl-f its
 //!   open pull requests, the ones an open task links to dimmed; Enter starts a session from the highlighted
 //!   item, switching to Inbox and highlighting the session once it lists,
@@ -624,6 +626,14 @@ fn badge_budget(width: u16) -> usize {
     (width as usize / 3).clamp(16, 48)
 }
 
+/// The harness session ID a log is named for: Claude names its logs
+/// `ID.jsonl`, Pi `TIMESTAMP_ID.jsonl`.
+fn log_session_id(log: &str) -> &str {
+    let name = log.rsplit('/').next().unwrap_or(log);
+    let stem = name.strip_suffix(".jsonl").unwrap_or(name);
+    stem.rsplit_once('_').map_or(stem, |(_, id)| id)
+}
+
 /// The help float's sections for the transcript, scrollback and the
 /// floats, which say the same whatever is highlighted.
 fn help_float_sections() -> Vec<help::Section> {
@@ -636,6 +646,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⇧↑ ⇧PgUp", "scroll back from here"),
                 ("⌃L", "the task's diff, then commits, then back"),
                 ("⌃U ⌃D", "scroll back, half a page"),
+                ("⌃Y", "host, session ID and log path to the clipboard"),
                 ("⇥", "message the agent"),
             ],
         ),
@@ -2588,6 +2599,32 @@ impl App {
         };
     }
 
+    /// ctrl-y: copy where the highlighted agent's session log is, as
+    /// `host:`, `session:` (the harness's session ID) and `log:` (its path
+    /// on that host) lines, and say so in the footer; a note says why when
+    /// there's none.
+    fn copy_log(&mut self) {
+        let Some(want) = self.preview_want() else {
+            self.note = Some(("highlight an agent to copy its log path".into(), true));
+            return;
+        };
+        let Some(pv) = self.preview.as_ref().filter(|pv| pv.pane == want) else {
+            self.note = Some(("its transcript hasn't loaded yet".into(), true));
+            return;
+        };
+        let Some(log) = pv.log.clone() else {
+            self.note = Some(("no session log path for this agent".into(), true));
+            return;
+        };
+        let host = pv.agent.as_ref().map(|a| a.host.clone());
+        let id = log_session_id(&log);
+        let host_line = host.as_ref().map(|h| format!("host: {h}\n"));
+        let text = format!("{}session: {id}\nlog: {log}", host_line.unwrap_or_default());
+        let parts: Vec<&str> = host.as_deref().into_iter().chain([id]).collect();
+        self.note = Some((format!("copied {} and log path", parts.join(" · ")), false));
+        self.copied = Some(text);
+    }
+
     /// The Usage view's scrolling keys; false for keys it leaves to the
     /// list.
     fn usage_key(&mut self, k: KeyEvent) -> bool {
@@ -2631,6 +2668,7 @@ impl App {
             }
             KeyCode::Char('v') if ctrl && self.view == View::Inbox => self.enter_scrollback(None),
             KeyCode::Char('l') if ctrl && self.view == View::Inbox => self.lens = self.lens.next(),
+            KeyCode::Char('y') if ctrl && self.view == View::Inbox => self.copy_log(),
             // ctrl-u and ctrl-d scroll the transcript (or the changes) half
             // a page, in scrollback; search finds a row faster than paging
             // the list.
@@ -4665,6 +4703,7 @@ impl App {
                     changes::Lens::Commits => "show the commits",
                 },
             ));
+            row.push(("⌃Y", "host, session ID and log path to the clipboard"));
         }
         row
     }
@@ -6706,6 +6745,36 @@ mod tests {
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
         app.key(ctrl('j'));
         assert_eq!(app.selected, Some(first));
+    }
+
+    #[test]
+    fn ctrl_y_copies_the_highlighted_agents_log_path() {
+        let mut app = inbox_with_lifecycle();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(3));
+        // Before its transcript loads, there's nothing to copy.
+        app.key(ctrl('y'));
+        assert!(app.copied.is_none());
+        let want = app.preview_want().unwrap();
+        let body = |target: &str| {
+            format!(
+                "{target}/{}/{}\n{{\"entries\":[],\"log\":\"/l/x.jsonl\",\
+                 \"agent\":{{\"host\":\"box\",\"profile\":\"p\",\"harness\":\"claude\",\"dir\":\"/d\"}}}}",
+                want.session, want.window
+            )
+        };
+        app.preview = preview::parse(&body(&want.target));
+        app.key(ctrl('y'));
+        assert_eq!(
+            app.copied.as_deref(),
+            Some("host: box\nsession: x\nlog: /l/x.jsonl")
+        );
+        assert_eq!(
+            app.note,
+            Some(("copied box · x and log path".into(), false))
+        );
+        // Pi's logs carry a timestamp before the ID.
+        assert_eq!(log_session_id("/p/2026-11-20T09-00_abc-1.jsonl"), "abc-1");
     }
 
     #[test]

@@ -20,7 +20,8 @@
 //! calls and questions as `{harness, entries: [{kind, text}], tokens, model}`,
 //! where kind is `user`, `assistant`, `tool` or `ask` and tokens is the
 //! context the agent's last turn used and model the model it ran on (each
-//! absent when the log doesn't say), and `wake: {at, reason}` when a Claude
+//! absent when the log doesn't say), `log`, the log's path on the agent's
+//! host, and `wake: {at, reason}` when a Claude
 //! agent is waiting on a timer or background job to resume it, `at` 0 when
 //! its time isn't known (see `wake`); or `{error}`. `fetch` adds
 //! `agent: {host, profile, harness, dir}` once it knows them, and
@@ -314,6 +315,7 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
         Ok((entries, tokens, model, wake)) => {
             let mut v = json!({
                 "harness": harness,
+                "log": path.display().to_string(),
                 "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
             });
             if let Some(t) = tokens {
@@ -327,7 +329,10 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
             }
             v
         }
-        Err(e) => json!({ "error": format!("{}: {e}", path.display()) }),
+        Err(e) => json!({
+            "error": format!("{}: {e}", path.display()),
+            "log": path.display().to_string(),
+        }),
     }
 }
 
