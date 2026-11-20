@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::hosts::catalog;
 use switchyard_core::launch::{Parent, Placement, launch_text};
-use switchyard_core::naming::name_char;
+use switchyard_core::naming::{harness_spec, models, name_char};
 use switchyard_core::rex::local_label;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
@@ -424,6 +424,7 @@ fn tools() -> Value {
                     "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path." },
                     "name": { "type": "string", "description": "Task name, normalised as the picker does (lowercase, spaces become dashes); the branch is feature/NAME." },
                     "harness": { "type": "string", "enum": ["claude", "pi"], "default": "claude" },
+                    "model": { "type": "string", "description": model_help() },
                     "prompt": { "type": "string", "description": "The agent's first message." },
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
@@ -599,6 +600,7 @@ fn summary(task: &Value) -> Value {
         "title",
         "host",
         "harness",
+        "model",
         "branch",
         "worktree",
         "status",
@@ -720,13 +722,27 @@ fn normalise(name: &str) -> String {
     name.chars().filter_map(name_char).collect()
 }
 
+/// `spawn_task`'s model argument, listing each harness's models.
+fn model_help() -> String {
+    let list = |h| models(h)[1..].join(", ");
+    format!(
+        "Optional model for the harness; omit for its default. claude: {}. pi: {}.",
+        list("claude"),
+        list("pi")
+    )
+}
+
 fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
     let project = str_arg(args, "project")?;
     // As the picker takes typed names: `MCP smoke test` is `mcp-smoke-test`.
     let name = normalise(str_arg(args, "name")?);
     let name = name.as_str();
     let prompt = str_arg(args, "prompt")?;
-    let harness = opt_arg(args, "harness").unwrap_or("claude");
+    let harness = harness_spec(
+        opt_arg(args, "harness").unwrap_or("claude"),
+        opt_arg(args, "model"),
+    );
+    let harness = harness.as_str();
     let host = opt_arg(args, "host").unwrap_or("auto");
     // Catalog projects only: a folder outside it would need its host's
     // checkout, which a remote caller can't see.

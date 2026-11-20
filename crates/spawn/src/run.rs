@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use switchyard_core::naming::branch_and_slug;
+use switchyard_core::naming::{branch_and_slug, split_harness};
 use switchyard_core::rex::home;
 use switchyard_core::sessions::{new_session_id, session_exists_here, work_env};
 
@@ -189,7 +189,8 @@ fn trust_folders(env: &[(String, String)], repo: &Path, worktree: &Path) {
 
 /// `session` is the agent session to start (`mode` "new") or resume
 /// ("resume"); None when the command gave none. A new session
-/// starts on `prompt` when there is one.
+/// starts on `prompt` when there is one. `harness` is `HARNESS` or
+/// `HARNESS:MODEL` (see `split_harness`).
 pub fn run(
     profile: &str,
     path: &str,
@@ -208,7 +209,13 @@ pub fn run(
             // PI_CODING_AGENT_DIR); personal uses the login defaults. Read
             // the env rather than `mise -C … exec`, which would also run
             // the agent in ~/dev/src/amfaro instead of the worktree.
+            let (harness, model) = split_harness(harness);
             let mut agent = Command::new(harness);
+            // Both harnesses take --model (Claude an alias or ID, pi a
+            // pattern), on a resume too.
+            if let Some(model) = model {
+                agent.args(["--model", model]);
+            }
             // The inherited $PWD still names the tab's start directory.
             agent.env("PWD", &worktree);
             let mut env = Vec::new();

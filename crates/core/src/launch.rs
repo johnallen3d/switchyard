@@ -5,7 +5,7 @@ use crate::autoname::name_work;
 use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::images::carry;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
-use crate::naming::{HARNESSES, branch_and_slug, name_problem};
+use crate::naming::{HARNESSES, branch_and_slug, models, name_problem, split_harness};
 use crate::prompts::{PROMPT_DIR, discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, host_home, local_label, log, now, rex_json, sh_quote};
 use crate::sessions::new_session_id;
@@ -120,8 +120,9 @@ fn work_item_problem(item: &str) -> Option<&'static str> {
 /// resumes that agent session with its recorded profile instead of starting
 /// a new one, and `host` is used as is (never `auto`: the session lives there).
 /// An empty `name` is named here (see `autoname`), from the work item or the
-/// prompt; with neither, the launch fails. A failure after the prompt was
-/// read says where its file is kept.
+/// prompt; with neither, the launch fails. `harness` is `HARNESS` or
+/// `HARNESS:MODEL`, MODEL one of `naming::models`. A failure after the
+/// prompt was read says where its file is kept.
 ///
 /// # Errors
 ///
@@ -238,6 +239,9 @@ fn launch_with(
 ) -> Result<(String, String, String), String> {
     let project = launch_project(host, path, resume)?;
     let work_item = check_request(name, harness, work_item, resume.is_some())?;
+    // `task run` takes the whole spec; the registry keeps its parts.
+    let spec = harness;
+    let (harness, model) = split_harness(spec);
     let (typed, prompt_ref) = match prompt {
         Prompt::Ref(text, r) => (text.to_string(), r),
         Prompt::Text(text) => (text.to_string(), None),
@@ -287,7 +291,7 @@ fn launch_with(
         &project.profile,
         &project.path,
         name,
-        harness,
+        spec,
         &project.clone_url,
         &agent_session,
         mode,
@@ -314,6 +318,7 @@ fn launch_with(
         // branch already had one elsewhere.
         "worktree": format!("{cwd}/.worktrees/{slug}"),
         "harness": harness,
+        "model": model,
         "agent_session": agent_session,
         // Work items (issues, cards, PRs); see `links`.
         "links": links,
@@ -355,8 +360,10 @@ fn launch_project(host: &str, path: &str, resume: Option<(&str, &str)>) -> Resul
     Ok(project)
 }
 
-/// Check a launch's name, harness and work item before anything starts,
-/// and return the work item trimmed (None when blank).
+/// Check a launch's name, harness (`HARNESS[:MODEL]`, see `split_harness`)
+/// and work item before anything starts, and return the work item trimmed
+/// (None when blank). A resume keeps whatever model the task recorded, even
+/// one since dropped from the list.
 fn check_request<'a>(
     name: &str,
     harness: &str,
@@ -369,8 +376,12 @@ fn check_request<'a>(
     {
         return Err(format!("{name}: {problem}"));
     }
+    let (harness, model) = split_harness(harness);
     if !HARNESSES.contains(&harness) {
         return Err(format!("unknown harness {harness}"));
+    }
+    if let Some(model) = model.filter(|m| !resume && !models(harness).contains(m)) {
+        return Err(format!("unknown {harness} model {model}"));
     }
     let work_item = work_item.map(str::trim).filter(|i| !i.is_empty());
     if let Some(problem) = work_item.and_then(work_item_problem) {

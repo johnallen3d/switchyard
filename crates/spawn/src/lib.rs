@@ -22,7 +22,7 @@
 //!   The picker reports the choice in the terminal title as
 //!   `rex-new:session/HOST/PATH` or
 //!   `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]` (fields
-//!   hex encoded); the config's `new` mode turns Enter into the action, as
+//!   hex encoded; HARNESS is `HARNESS:MODEL` once ctrl-l picks a model); the config's `new` mode turns Enter into the action, as
 //!   with the tab picker. Escape reaches the picker, which exits (closing the
 //!   float) but asks first when the prompt has text. Titles are capped at
 //!   about 1 KiB, too little for a prompt, so the optional prompt lives in a

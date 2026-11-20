@@ -6,7 +6,8 @@
 -- and reports its pick in the terminal title, hex encoded:
 --   rex-new:session/HOST/PATH
 --   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]
--- (PROMPT_REF is empty when only a work item follows; NAME is empty when
+-- (HARNESS is HARNESS:MODEL when the picker chose a model; PROMPT_REF is
+-- empty when only a work item follows; NAME is empty when
 -- `task launch` names the work from the work item or prompt).
 -- Enter acts from this config host, the only one that can reach every Rex
 -- host: a session opens with `switchyard task open`, and agent work launches
@@ -158,18 +159,19 @@ rex.action{
     if kind == "agent" then
       -- NAME is empty when `task launch` is to name the work from its work
       -- item or prompt (the picker reports that only when one is there).
-      local host, path, name, harness = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)$")
+      -- HARNESS is `claude` or `claude:MODEL` (pi likewise), hex like the rest.
+      local host, path, name, harness = rest:match("^(%x+)/(%x+)/(%x*)/(%x+)$")
       local prompt_ref, work_item
       if host == nil then
-        host, path, name, harness, prompt_ref = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)/(%x+)$")
+        host, path, name, harness, prompt_ref = rest:match("^(%x+)/(%x+)/(%x*)/(%x+)/(%x+)$")
       end
       if host == nil then
-        host, path, name, harness, prompt_ref, work_item = rest:match("^(%x+)/(%x+)/(%x*)/(%a+)/(%x*)/(%x+)$")
+        host, path, name, harness, prompt_ref, work_item = rest:match("^(%x+)/(%x+)/(%x*)/(%x+)/(%x*)/(%x+)$")
       end
       -- An incomplete form reports nothing; keep the float open.
       if host == nil then return end
       close_picker(ctx)
-      local argv = { "switchyard", "task", "launch", util.unhex(host), util.unhex(path), util.unhex(name), harness }
+      local argv = { "switchyard", "task", "launch", util.unhex(host), util.unhex(path), util.unhex(name), util.unhex(harness) }
       if prompt_ref ~= nil then table.insert(argv, util.unhex(prompt_ref)) end
       if work_item ~= nil then table.insert(argv, util.unhex(work_item)) end
       local r, err = rex.exec(argv, { env = env })

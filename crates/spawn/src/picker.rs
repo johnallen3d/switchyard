@@ -2,7 +2,7 @@
 //! projects and the zoxide folders of one host, and reports a pick in the
 //! terminal title: a plain session in the highlighted folder or project
 //! (kind `session`), or agent work in a catalog project or Git folder (kind `agent`) with
-//! a name, harness, optional work item and optional prompt. Titles are
+//! a name, harness (ctrl-t) and model (ctrl-l), optional work item and optional prompt. Titles are
 //! `rex-new:session/HOST/PATH` and
 //! `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`, the
 //! fields hex encoded; `PROMPT_REF` is empty when only a work item follows.
@@ -44,7 +44,9 @@ use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, compatible, dev_hosts, pool};
 use switchyard_core::items::{self, OpenItem, OpenItems};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
-use switchyard_core::naming::{HARNESSES, branch_and_slug, name_char, name_problem};
+use switchyard_core::naming::{
+    HARNESSES, branch_and_slug, harness_spec, models, name_char, name_problem,
+};
 use switchyard_core::prompts::prune_prompts;
 use switchyard_core::rex::{local_label, log, select};
 use switchyard_ui::Palette;
@@ -241,6 +243,8 @@ struct App {
     tx: Sender<(String, Result<String, String>)>,
     rx: Receiver<(String, Result<String, String>)>,
     harness: usize,
+    /// The model, an index into the harness's `models`; 0 is its default.
+    model: usize,
     focus: Focus,
     query: String,
     /// The name, work item and prompt fields: readline-style editors (see
@@ -332,6 +336,7 @@ impl App {
             tx,
             rx,
             harness: 0,
+            model: 0,
             focus: Focus::Project,
             query: String::new(),
             name: text_field(),
@@ -412,6 +417,19 @@ impl App {
             h => h.to_string(),
         };
         Some((host, profile, HARNESSES[self.harness].to_string(), dir))
+    }
+
+    /// The chosen model, or None for the harness's default.
+    fn chosen_model(&self) -> Option<&'static str> {
+        models(HARNESSES[self.harness])
+            .get(self.model)
+            .copied()
+            .filter(|m| !m.is_empty())
+    }
+
+    /// The harness with its chosen model, as `task launch` takes it.
+    fn harness_spec(&self) -> String {
+        harness_spec(HARNESSES[self.harness], self.chosen_model())
     }
 
     /// Give the prompt the slash commands of where the work would run,
@@ -958,7 +976,7 @@ impl App {
                     hex(self.agent_host()),
                     hex(&path),
                     hex(&name),
-                    HARNESSES[self.harness]
+                    hex(&self.harness_spec())
                 );
                 let Some(prompt_ref) = self.prompt.saved_ref() else {
                     return String::new();
@@ -1080,11 +1098,16 @@ impl App {
             }
             KeyCode::Tab => self.next_focus(true),
             KeyCode::BackTab => self.next_focus(false),
-            // Overrides for the defaults: host starts at auto, harness at claude.
+            // Overrides for the defaults: host starts at auto, harness at
+            // claude, and model at the harness's own.
             KeyCode::Char('o') if ctrl => self.next_host(),
             KeyCode::Char('s') if ctrl => self.toggle_kind(),
             KeyCode::Char('t') if ctrl && self.kind == Kind::Agent => {
                 self.harness = (self.harness + 1) % HARNESSES.len();
+                self.model = 0;
+            }
+            KeyCode::Char('l') if ctrl && self.kind == Kind::Agent => {
+                self.model = (self.model + 1) % models(HARNESSES[self.harness]).len();
             }
             KeyCode::Char('p') if ctrl && list_key => self.step(-1),
             KeyCode::Char('n') if ctrl && list_key => self.step(1),
@@ -1856,15 +1879,17 @@ impl App {
             fill,
         );
         if self.kind == Kind::Agent {
+            let mut harness = vec![Span::styled(
+                HARNESSES[self.harness].to_string(),
+                changed(self.harness != 0),
+            )];
+            if let Some(model) = self.chosen_model() {
+                // Pi's provider makes the chip long and says little.
+                let short = model.rsplit('/').next().unwrap_or(model);
+                harness.push(Span::styled(format!(" {short}"), changed(true)));
+            }
             left.push(Span::raw(" "));
-            left.extend(pill(
-                vec![Span::styled(
-                    HARNESSES[self.harness].to_string(),
-                    changed(self.harness != 0),
-                )],
-                chip_bg,
-                fill,
-            ));
+            left.extend(pill(harness, chip_bg, fill));
         }
         if let Some(project) = self.project() {
             let color = if project.profile == "work" {
@@ -1949,6 +1974,7 @@ impl App {
                         hints.push(("⌃G", "editor", p.subtle));
                     }
                     hints.push(("⌃T", "harness", p.subtle));
+                    hints.push(("⌃L", "model", p.subtle));
                     hints.push(("⌃S", "plain session", p.subtle));
                 }
                 Kind::Session => {
@@ -2109,7 +2135,7 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         &host,
         &path,
         &name,
-        HARNESSES[app.harness],
+        &app.harness_spec(),
         prompt_ref.as_deref(),
         Some(item.as_str()).filter(|i| !i.is_empty()),
         None,
@@ -2274,7 +2300,7 @@ mod tests {
                 hex("picker-host"),
                 hex("/repos/local"),
                 hex("folder-work"),
-                HARNESSES[0]
+                hex(HARNESSES[0])
             )
         );
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -2285,6 +2311,37 @@ mod tests {
         app.standalone = true;
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.request, Some(Request::Launch));
+    }
+
+    #[test]
+    fn ctrl_l_picks_a_model_that_a_new_harness_resets() {
+        let mut app = app();
+        app.query = "local".into();
+        app.refilter();
+        let pick = |spec: &str| {
+            format!(
+                "agent/{}/{}/{}/{}",
+                hex("picker-host"),
+                hex("/repos/local"),
+                hex("folder-work"),
+                hex(spec)
+            )
+        };
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.key(ctrl('l'));
+        assert_eq!(app.pick(), pick("claude:fable"));
+        app.key(ctrl('l'));
+        assert_eq!(app.pick(), pick("claude:opus"));
+        app.key(ctrl('t'));
+        assert_eq!(
+            app.pick(),
+            pick("pi"),
+            "a new harness starts on its default"
+        );
+        for _ in 0..models("pi").len() {
+            app.key(ctrl('l'));
+        }
+        assert_eq!(app.pick(), pick("pi"), "the list wraps to the default");
     }
 
     #[test]
@@ -2302,7 +2359,7 @@ mod tests {
                 hex("folder-host"),
                 hex("/repos/remote"),
                 hex("folder-work"),
-                HARNESSES[0],
+                hex(HARNESSES[0]),
                 hex(&app.prompt.file_ref)
             )
         );
@@ -2320,7 +2377,7 @@ mod tests {
             hex("picker-host"),
             hex("/repos/local"),
             hex("folder-work"),
-            HARNESSES[0]
+            hex(HARNESSES[0])
         );
         app.focus = Focus::Item;
         app.paste(" #42 x");
@@ -2376,7 +2433,7 @@ mod tests {
             "agent/{}/{}//{}",
             hex("picker-host"),
             hex("/repos/local"),
-            HARNESSES[0]
+            hex(HARNESSES[0])
         );
         app.prompt.field.insert_str("fix the login page");
         app.prompt.file_ref = "picker-host:test-prompt".into();
@@ -2480,7 +2537,7 @@ mod tests {
             "agent/{}/{}//{}",
             hex(AUTO),
             hex("~/catalog/repo"),
-            HARNESSES[0]
+            hex(HARNESSES[0])
         );
         let url = "https://app.fizzy.do/1/cards/1157";
         assert_eq!(

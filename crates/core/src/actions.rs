@@ -184,9 +184,10 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
             crate::folders::home_relative(&p.path) == crate::folders::home_relative(&field("repo"))
         })
         .map_or_else(|| field("repo"), |p| p.path);
+    // The model it was started on, so the resumed agent stays on it.
     let harness = match field("harness").as_str() {
         "" => "claude".to_string(),
-        h => h.to_string(),
+        h => crate::naming::harness_spec(h, Some(&field("model"))),
     };
     // The branch head it resumes at: auto-archive waits for work landed
     // after it, so a merged task resumed for a follow-up isn't archived again

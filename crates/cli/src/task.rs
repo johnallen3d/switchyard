@@ -26,7 +26,9 @@ WORK_ITEM (a work project's /agent-kit:issue-implement, otherwise the
 item's URL), opens the work's tab on HOST (auto: the catalog project's
 least busy host; Git folders use their listed host and primary
 checkout), records the task, and prints HOST<TAB>SESSION_ID<TAB>WINDOW_ID.
-run sets up the worktree and runs the harness in the current tab,
+HARNESS is claude or pi, or HARNESS:MODEL to start it on MODEL (launch
+takes the models the new-agent picker offers). run sets up the worktree
+and runs the harness in the current tab,
 starting AGENT_SESSION with PROMPT as its first message or resuming it.
 list checks recorded tasks against their hosts and prints them as JSON
 with live agent status; with --live it only adds the status, without
