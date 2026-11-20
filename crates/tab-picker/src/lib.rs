@@ -4593,6 +4593,10 @@ impl App {
                     ("⌃L", "show a pull request's description, diff or commits"),
                     ("⌃U ⌃D", "scroll it, half a page"),
                     ("⌃G", "arm a pull request's approval: ⏎ approves it"),
+                    (
+                        "⌃S",
+                        "arm an approved, passing pull request's squash-merge: ⏎ merges it",
+                    ),
                     ("⌃E", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "list the project again"),
@@ -4956,6 +4960,21 @@ impl App {
         spans
     }
 
+    /// The footer while ctrl-g or ctrl-s has armed an approval or a
+    /// squash-merge of the Work view's highlighted pull request.
+    fn armed_pr_line(&self) -> Option<Line<'static>> {
+        let (action, name, title) = self.work.armed_pr().filter(|_| self.view == View::Work)?;
+        let p = &self.p;
+        let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
+        let verb = action.verb();
+        Some(Line::from(vec![
+            Span::raw(" "),
+            Span::styled("⏎", key),
+            Span::styled(format!(" {verb} {name} {title}"), Style::new().fg(p.love)),
+            Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
+        ]))
+    }
+
     /// The footer while ctrl-c has armed an interrupt of the highlighted
     /// agent.
     fn armed_interrupt_line(&self) -> Line<'static> {
@@ -5039,14 +5058,7 @@ impl App {
             f.render_widget(self.armed_interrupt_line(), area);
             return;
         }
-        if let (View::Work, Some((name, title))) = (self.view, self.work.armed_approval()) {
-            let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
-            let line = Line::from(vec![
-                Span::raw(" "),
-                Span::styled("⏎", key),
-                Span::styled(format!(" approve {name} {title}"), Style::new().fg(p.love)),
-                Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
-            ]);
+        if let Some(line) = self.armed_pr_line() {
             f.render_widget(line, area);
             return;
         }
@@ -5366,7 +5378,12 @@ impl App {
             work::Outcome::Stay => {}
             work::Outcome::Refuse(why) => self.note = Some((why, true)),
             work::Outcome::Arm => self.note = None,
-            work::Outcome::Approve { item, url, name } => self.approve_pr(&item, &url, &name, term),
+            work::Outcome::Act {
+                action,
+                item,
+                url,
+                name,
+            } => self.act_on_pr(action, &item, &url, &name, term),
             work::Outcome::Open(url) => {
                 self.note = Some(match standalone::open_url(&url) {
                     Ok(()) => (format!("opened {url}"), false),
@@ -5403,10 +5420,12 @@ impl App {
         true
     }
 
-    /// Approve a pull request the Work view lists, under its project's
-    /// profile, then list the project's pull requests again to show it.
-    fn approve_pr(
+    /// Approve or squash-merge a pull request the Work view lists, under
+    /// its project's profile, then list the project's pull requests again
+    /// to show it.
+    fn act_on_pr(
         &mut self,
+        action: switchyard_core::item_actions::Action,
         item: &switchyard_core::item_actions::Item,
         url: &str,
         name: &str,
@@ -5417,13 +5436,16 @@ impl App {
             .current()
             .map(|p| p.profile.clone())
             .unwrap_or_default();
-        self.busy(term, format!("Approving {name}…"));
-        let action = switchyard_core::item_actions::Action::Approve;
+        let doing = match action {
+            switchyard_core::item_actions::Action::Merge => "Squash-merging",
+            _ => "Approving",
+        };
+        self.busy(term, format!("{doing} {name}…"));
         self.note = Some(
             match standalone::item_action(action, item, "", &profile, url) {
-                Ok(_) => {
+                Ok(done) => {
                     self.work.load(true);
-                    (format!("approved {name}"), false)
+                    (done, false)
                 }
                 Err(e) => (e, true),
             },

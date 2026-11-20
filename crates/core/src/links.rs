@@ -90,7 +90,7 @@ pub struct Pr {
 
 /// Summarize gh's statusCheckRollup: any failure fails, then anything not
 /// finished is pending, else pass; empty for no checks.
-fn checks_summary(rollup: &Value) -> String {
+pub(crate) fn checks_summary(rollup: &Value) -> String {
     let Some(items) = rollup.as_array().filter(|a| !a.is_empty()) else {
         return String::new();
     };

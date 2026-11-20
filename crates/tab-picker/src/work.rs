@@ -27,7 +27,11 @@
 //! a dimmed item jumps to its task; ctrl-b opens it in the browser. On a
 //! pull request that isn't a draft, ctrl-g arms its approval, as ctrl-x
 //! arms an archive elsewhere: Enter then approves it (`gh pr review
-//! --approve`) and any other key disarms it.
+//! --approve`) and any other key disarms it. ctrl-s arms a squash-merge
+//! the same way, on a pull request that is approved with no failing or
+//! running checks (see core's `merge_blocker`); Enter asks GitHub again
+//! before merging (see core's `item_actions`). A row says what stands in
+//! the way: failing or running checks, or changes requested.
 //!
 //! With room, the view splits: the list on the left and the highlighted
 //! item on the right, its description and comments, and for a pull
@@ -50,7 +54,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use switchyard_core::hosts::Project;
-use switchyard_core::item_actions::Item;
+use switchyard_core::item_actions::{Action, Item, merge_blocker};
 use switchyard_core::items::{OpenItem, OpenItems};
 use switchyard_core::links::{Tracker, parse_ref};
 use switchyard_ui::Palette;
@@ -161,10 +165,13 @@ pub enum Outcome {
     Scroll(Option<KeyEvent>),
     /// Open the URL in the browser here.
     Open(String),
-    /// ctrl-g armed an approval: the footer says what Enter will do.
+    /// ctrl-g or ctrl-s armed an action: the footer says what Enter will
+    /// do.
     Arm,
-    /// Approve the pull request at `url`, named `name` (`#57`).
-    Approve {
+    /// Approve or squash-merge (`action`) the pull request at `url`, named
+    /// `name` (`#57`).
+    Act {
+        action: Action,
         item: Item,
         url: String,
         name: String,
@@ -194,8 +201,9 @@ pub struct Work {
     pub starting: HashSet<String>,
     /// The highlighted item's side (see detail.rs).
     pub detail: Detail,
-    /// The pull request ctrl-g armed to approve, by URL, until the next key.
-    pub approving: Option<String>,
+    /// What ctrl-g or ctrl-s armed (approve or squash-merge) and on which
+    /// pull request, by URL, until the next key.
+    pub armed: Option<(Action, String)>,
     /// The item to highlight once its listing comes (see `focus_on`).
     focus: Option<Link>,
     /// The last item to highlight that wasn't listed, for the footer.
@@ -220,7 +228,7 @@ impl Default for Work {
             chooser: None,
             starting: HashSet::new(),
             detail: Detail::default(),
-            approving: None,
+            armed: None,
             focus: None,
             missed: None,
         }
@@ -545,9 +553,9 @@ impl Work {
 
     /// A key in the view, `page` rows a page.
     pub fn key(&mut self, k: KeyEvent, page: usize) -> Outcome {
-        // Enter approves an armed pull request; any other key but ctrl-g
-        // disarms it.
-        let approving = self.approving.take();
+        // Enter runs what's armed on a pull request; any other key but
+        // the one that armed it disarms it.
+        let armed = self.armed.take();
         if self.chooser.is_some() {
             return self.chooser_key(k);
         }
@@ -615,7 +623,7 @@ impl Work {
             KeyCode::PageDown => self.step((self.selected + page).min(last)),
             KeyCode::Home => self.step(0),
             KeyCode::End => self.step(last),
-            KeyCode::Enter if approving.is_some() => self.approve(approving.as_deref()),
+            KeyCode::Enter if armed.is_some() => self.act(armed.as_ref()),
             KeyCode::Enter => self.enter(),
             KeyCode::Char('v') if ctrl => match self.selected_item() {
                 Some(_) => Outcome::Scroll(None),
@@ -631,7 +639,8 @@ impl Work {
                 Some(item) => Outcome::Open(item.url.clone()),
                 None => Outcome::Stay,
             },
-            KeyCode::Char('g') if ctrl => self.arm_approval(),
+            KeyCode::Char('g') if ctrl => self.arm(Action::Approve),
+            KeyCode::Char('s') if ctrl => self.arm(Action::Merge),
             // Searching brings back the list it searches.
             KeyCode::Char(_) if !ctrl => {
                 self.detail.expanded = false;
@@ -661,18 +670,30 @@ impl Work {
         }
     }
 
-    /// The highlighted pull request, when it can be approved: as an item,
-    /// with its URL and `#N`; else why not.
-    fn approvable(&self) -> Result<(Item, String, String), Outcome> {
+    /// The highlighted pull request, when `action` (approve or
+    /// squash-merge) can be taken on it: as an item, with its URL and `#N`;
+    /// else why not. A merge waits for an approval and passing checks, as
+    /// the listing last saw them.
+    fn actionable(&self, action: Action) -> Result<(Item, String, String), Outcome> {
         if self.kind != Kind::Prs {
-            return Err(Outcome::Refuse(
-                "ctrl-g approves pull requests; ctrl-f lists them".into(),
-            ));
+            let key = if action == Action::Merge {
+                "ctrl-s squash-merges"
+            } else {
+                "ctrl-g approves"
+            };
+            return Err(Outcome::Refuse(format!(
+                "{key} pull requests; ctrl-f lists them"
+            )));
         }
         let pr = self.selected_item().ok_or(Outcome::Stay)?;
         let name = format!("#{}", pr.number);
         if pr.draft {
             return Err(Outcome::Refuse(format!("{name} is a draft")));
+        }
+        if action == Action::Merge
+            && let Some(why) = merge_blocker("OPEN", pr.draft, &pr.review, &pr.checks)
+        {
+            return Err(Outcome::Refuse(format!("{name} {why}")));
         }
         let item = link_key(&pr.url)
             .and_then(|(kind, system, reference)| {
@@ -683,35 +704,42 @@ impl Work {
         Ok((item, pr.url.clone(), name))
     }
 
-    /// ctrl-g: arm the highlighted pull request's approval, for Enter.
-    fn arm_approval(&mut self) -> Outcome {
-        match self.approvable() {
+    /// ctrl-g or ctrl-s: arm `action` on the highlighted pull request,
+    /// for Enter.
+    fn arm(&mut self, action: Action) -> Outcome {
+        match self.actionable(action) {
             Ok((_, url, _)) => {
-                self.approving = Some(url);
+                self.armed = Some((action, url));
                 Outcome::Arm
             }
             Err(why) => why,
         }
     }
 
-    /// Enter on an armed approval: approve the highlighted pull request if
-    /// it is the one `armed` (the highlight can't move while armed).
-    fn approve(&self, armed: Option<&str>) -> Outcome {
-        match self.approvable() {
-            Ok((item, url, name)) if armed == Some(url.as_str()) => {
-                Outcome::Approve { item, url, name }
-            }
+    /// Enter on an armed action: take it on the highlighted pull request
+    /// if it is the one armed (the highlight can't move while armed).
+    fn act(&self, armed: Option<&(Action, String)>) -> Outcome {
+        let Some((action, armed_url)) = armed else {
+            return Outcome::Stay;
+        };
+        match self.actionable(*action) {
+            Ok((item, url, name)) if *armed_url == url => Outcome::Act {
+                action: *action,
+                item,
+                url,
+                name,
+            },
             Ok(_) => Outcome::Stay,
             Err(why) => why,
         }
     }
 
-    /// The armed approval's pull request, `#N` and its title, for the
+    /// The armed action and its pull request, `#N` and its title, for the
     /// footer.
-    pub fn armed_approval(&self) -> Option<(String, String)> {
+    pub fn armed_pr(&self) -> Option<(Action, String, String)> {
         let pr = self.selected_item()?;
-        (self.approving.as_deref() == Some(pr.url.as_str()))
-            .then(|| (format!("#{}", pr.number), pr.title.clone()))
+        let (action, url) = self.armed.as_ref()?;
+        (*url == pr.url).then(|| (*action, format!("#{}", pr.number), pr.title.clone()))
     }
 
     fn step(&mut self, to: usize) -> Outcome {
@@ -796,6 +824,9 @@ impl Work {
         }
         if self.kind == Kind::Prs && self.selected_item().is_some_and(|i| !i.draft) {
             h.push(("⌃G", "approve"));
+        }
+        if self.kind == Kind::Prs && self.actionable(Action::Merge).is_ok() {
+            h.push(("⌃S", "squash-merge"));
         }
         if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
             h.push(("⌃L", self.detail.lens_for(&l).next().name()));
@@ -1189,15 +1220,19 @@ fn person(item: &OpenItem) -> String {
     }
 }
 
-/// A pull request's state worth a word on its row, and its colour: draft,
-/// or a review decision other than none yet.
+/// A pull request's state worth a word on its row, and its colour, what
+/// most stands in the way of merging it first: draft, failing checks,
+/// changes requested, running checks; else approved (ready to merge) or
+/// nothing.
 fn pr_state(item: &OpenItem, p: &Palette) -> Option<(String, ratatui::style::Color)> {
     if item.draft {
         return Some(("draft".into(), p.muted));
     }
-    match item.review.as_str() {
-        "APPROVED" => Some(("approved".into(), p.foam)),
-        "CHANGES_REQUESTED" => Some(("changes requested".into(), p.love)),
+    match (item.review.as_str(), item.checks.as_str()) {
+        (_, "fail") => Some(("checks failing".into(), p.love)),
+        ("CHANGES_REQUESTED", _) => Some(("changes requested".into(), p.love)),
+        (_, "pending") => Some(("checks running".into(), p.muted)),
+        ("APPROVED", _) => Some(("approved".into(), p.foam)),
         _ => None,
     }
 }
@@ -1539,10 +1574,13 @@ mod tests {
         );
         w.refilter("", &[]);
         assert_eq!(w.key(ctrl_g(), 10), Outcome::Arm);
-        assert_eq!(w.armed_approval(), Some(("#5".into(), "PR 5".into())));
+        assert_eq!(
+            w.armed_pr(),
+            Some((Action::Approve, "#5".into(), "PR 5".into()))
+        );
         // Any other key disarms it, and Enter goes back to launching.
         w.key(key(KeyCode::Home), 10);
-        assert_eq!(w.armed_approval(), None);
+        assert_eq!(w.armed_pr(), None);
         assert!(matches!(
             w.key(key(KeyCode::Enter), 10),
             Outcome::Launch { .. }
@@ -1552,7 +1590,8 @@ mod tests {
         assert_eq!(w.key(ctrl_g(), 10), Outcome::Arm);
         assert_eq!(
             w.key(key(KeyCode::Enter), 10),
-            Outcome::Approve {
+            Outcome::Act {
+                action: Action::Approve,
                 item: Item::Pr {
                     repo: "o/r".into(),
                     number: "5".into(),
@@ -1562,12 +1601,74 @@ mod tests {
                 name: "#5".into(),
             }
         );
-        assert_eq!(w.approving, None);
+        assert_eq!(w.armed, None);
         // Moving disarms; a draft can't be armed.
         w.key(ctrl_g(), 10);
         w.key(key(KeyCode::Down), 10);
-        assert_eq!(w.armed_approval(), None);
+        assert_eq!(w.armed_pr(), None);
         assert_eq!(w.key(ctrl_g(), 10), Outcome::Refuse("#4 is a draft".into()));
+    }
+
+    #[test]
+    fn ctrl_s_squash_merges_only_an_approved_pr_with_passing_checks() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl_s = || KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let mut w = work();
+        w.refilter("", &[]);
+        assert!(matches!(w.key(ctrl_s(), 10), Outcome::Refuse(_)));
+        w.kind = Kind::Prs;
+        let pr = |n: u64, review: &str, checks: &str| OpenItem {
+            number: n,
+            title: format!("PR {n}"),
+            url: format!("https://github.com/o/r/pull/{n}"),
+            review: review.into(),
+            checks: checks.into(),
+            ..OpenItem::default()
+        };
+        w.lists.insert(
+            ("sy".into(), Kind::Prs),
+            Listing::Ready(OpenItems {
+                noun: "pull requests",
+                items: vec![
+                    pr(5, "APPROVED", "pass"),
+                    pr(4, "", "pass"),
+                    pr(3, "APPROVED", "fail"),
+                    pr(2, "APPROVED", "pending"),
+                ],
+            }),
+        );
+        w.refilter("", &[]);
+        assert!(w.hints().contains(&("⌃S", "squash-merge")));
+        assert_eq!(w.key(ctrl_s(), 10), Outcome::Arm);
+        assert_eq!(
+            w.armed_pr(),
+            Some((Action::Merge, "#5".into(), "PR 5".into()))
+        );
+        assert_eq!(
+            w.key(key(KeyCode::Enter), 10),
+            Outcome::Act {
+                action: Action::Merge,
+                item: Item::Pr {
+                    repo: "o/r".into(),
+                    number: "5".into(),
+                    draft: false,
+                },
+                url: "https://github.com/o/r/pull/5".into(),
+                name: "#5".into(),
+            }
+        );
+        let refused = |w: &mut Work| match w.key(ctrl_s(), 10) {
+            Outcome::Refuse(why) => why,
+            o => panic!("{o:?}"),
+        };
+        w.key(key(KeyCode::Down), 10);
+        assert!(!w.hints().contains(&("⌃S", "squash-merge")));
+        assert_eq!(refused(&mut w), "#4 isn't approved yet");
+        w.key(key(KeyCode::Down), 10);
+        assert_eq!(refused(&mut w), "#3 has failing checks");
+        w.key(key(KeyCode::Down), 10);
+        assert_eq!(refused(&mut w), "#2 has checks still running");
+        assert_eq!(w.armed, None);
     }
 
     #[test]

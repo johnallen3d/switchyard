@@ -23,7 +23,7 @@ in every list view.
 | ⌃N ⌃P     | next, previous                      | —                                  | next, previous                           | next, previous                | scroll | —                | next, previous; reader: a line |
 | ⌃O        | profile filter                      | —                                  | profile filter                           | profile filter                | profile filter | —        | —                      |
 | ⌃R        | —                                   | —                                  | list the project again                   | —                             | —      | —                | —                      |
-| ⌃S        | snooze or wake                      | —                                  | —                                        | —                             | —      | —                | —                      |
+| ⌃S        | snooze or wake                      | —                                  | arm an approved pull request's squash-merge | —                             | —      | —                | —                      |
 | ⌃T        | pin or unpin                        | —                                  | —                                        | —                             | —      | —                | —                      |
 | ⌃U        | scrollback, half a page up          | leave for scrollback, half a page up | scrollback on the item, half a page up | half a page up                | clear the search | half a page up | reader: half a page up |
 | ⌃V        | scrollback                          | scrollback, then back here         | scrollback on the item                   | —                             | —      | leave            | —                      |
@@ -36,7 +36,7 @@ Free everywhere: ⌃H, ⌃Y, ⌃Q, ⌃Z. ⌃I and ⌃M arrive as Tab and Enter.
 
 | Key          | Inbox list                         | Reply box                     | Work list                                        | Archive          | Scrollback                         | Work items float       |
 | ------------ | ---------------------------------- | ----------------------------- | ------------------------------------------------ | ---------------- | ---------------------------------- | ---------------------- |
-| ⏎            | go to the tab, or resume           | send                          | start a session, or go to its task; approve if armed | resume       | copy and leave                     | open; confirm          |
+| ⏎            | go to the tab, or resume           | send                          | start a session, or go to its task; approve or merge if armed | resume       | copy and leave                     | open; confirm          |
 | ⇥            | into the reply box                 | leave (while empty); take the suggestion | choose the project                    | choose the project | leave for the reply box (Inbox) | —                      |
 | esc          | —                                  | leave                         | —                                                | —                | drop selection, search, then leave | back; dismiss          |
 | ↑↓           | move                               | earlier messages              | move                                             | move             | a line                             | move; reader: a line   |

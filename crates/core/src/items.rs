@@ -43,9 +43,36 @@ pub struct OpenItem {
     pub author: String,
     /// A pull request is a draft.
     pub draft: bool,
-    /// A pull request's review decision as GitHub gives it (`APPROVED`,
-    /// `CHANGES_REQUESTED`, `REVIEW_REQUIRED`), or empty.
+    /// A pull request's review decision (`APPROVED`, `CHANGES_REQUESTED`,
+    /// `REVIEW_REQUIRED`), or empty; see `review_decision`.
     pub review: String,
+    /// A pull request's checks: `pass`, `fail`, `pending`, or empty for
+    /// none (see links' `checks_summary`).
+    pub checks: String,
+}
+
+/// A pull request's review decision from gh's JSON: GitHub's own
+/// `reviewDecision` when it gives one (a branch protection rule asks for
+/// reviews), else what reviewers' latest reviews say: `CHANGES_REQUESTED`
+/// when any asks for changes, `APPROVED` when any approves, else empty.
+#[must_use]
+pub fn review_decision(pr: &Value) -> String {
+    if let Some(d) = pr["reviewDecision"].as_str().filter(|d| !d.is_empty()) {
+        return d.to_string();
+    }
+    let states: Vec<&str> = pr["latestReviews"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r["state"].as_str())
+        .collect();
+    if states.contains(&"CHANGES_REQUESTED") {
+        "CHANGES_REQUESTED".into()
+    } else if states.contains(&"APPROVED") {
+        "APPROVED".into()
+    } else {
+        String::new()
+    }
 }
 
 /// A project's open items and what they are (`cards` or `issues`).
@@ -148,7 +175,8 @@ pub fn list_prs(project: &Project) -> Result<OpenItems, String> {
             "--limit",
             &limit,
             "--json",
-            "number,title,url,createdAt,labels,assignees,author,isDraft,reviewDecision",
+            "number,title,url,createdAt,labels,assignees,author,isDraft,reviewDecision,\
+             latestReviews,statusCheckRollup",
         ],
     )
     .ok_or("gh pr list failed")?;
@@ -216,7 +244,8 @@ fn parse(json: &str) -> Result<Vec<OpenItem>, String> {
                 assignees: names(&i["assignees"]),
                 author: i["author"]["login"].as_str().unwrap_or("").to_string(),
                 draft: i["isDraft"].as_bool().unwrap_or(false),
-                review: i["reviewDecision"].as_str().unwrap_or("").to_string(),
+                review: review_decision(i),
+                checks: crate::links::checks_summary(&i["statusCheckRollup"]),
             })
         })
         .take(LIST_LIMIT)
@@ -279,6 +308,22 @@ mod tests {
             (pr[0].author.as_str(), pr[0].draft, pr[0].review.as_str()),
             ("octo", true, "APPROVED")
         );
+        // Without a decision GitHub gives, reviewers' latest reviews say,
+        // and checks are summarized.
+        let pr = parse(
+            r#"[{"number": 6, "title": "t", "url": "u", "reviewDecision": "",
+                 "latestReviews": [{"state": "COMMENTED"}, {"state": "APPROVED"}],
+                 "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": ""}]}]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (pr[0].review.as_str(), pr[0].checks.as_str()),
+            ("APPROVED", "pending")
+        );
+        let changes = serde_json::json!({"latestReviews": [
+            {"state": "APPROVED"}, {"state": "CHANGES_REQUESTED"}]});
+        assert_eq!(review_decision(&changes), "CHANGES_REQUESTED");
+        assert_eq!(review_decision(&serde_json::json!({})), "");
         assert_eq!(parse("[]").unwrap(), [] as [OpenItem; 0]);
         assert!(parse("{\"ok\": false}").is_err());
         assert!(parse("not json").is_err());

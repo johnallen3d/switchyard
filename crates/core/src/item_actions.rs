@@ -1,7 +1,12 @@
 //! Actions on a task's linked work items, for the tab picker: comment on
 //! a Fizzy card or a GitHub issue or PR, close a card or an issue, and mark
-//! a draft PR ready for review, and approve a PR. (A PR isn't closed from
-//! here.)
+//! a draft PR ready for review, and approve or squash-merge a PR. (A PR
+//! isn't closed from here.)
+//!
+//! A squash-merge asks GitHub first, at once, whether the PR may merge
+//! (see `merge_blocker`: open, not a draft, approved, no failing or running
+//! checks), and merges only the head it checked (`--match-head-commit`),
+//! so a push in between doesn't merge unchecked commits.
 //! (Opening an item in the browser needs only its URL; editing items stays
 //! in the CLIs.)
 //!
@@ -32,6 +37,10 @@ pub enum Action {
     Ready,
     /// Approve a PR: the Work view's, not offered by `Item::actions`.
     Approve,
+    /// Squash-merge a PR once `merge_blocker` finds nothing in its way:
+    /// the Work view's, not offered by `Item::actions`. Its branch stays,
+    /// for the task's archive to settle.
+    Merge,
 }
 
 impl Action {
@@ -43,6 +52,7 @@ impl Action {
             Action::Close => "close",
             Action::Ready => "mark ready",
             Action::Approve => "approve",
+            Action::Merge => "squash-merge",
         }
     }
 }
@@ -149,6 +159,9 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
     if action == Action::Comment && body.trim().is_empty() {
         return Err("an empty comment: nothing to post".into());
     }
+    if action == Action::Merge && body.is_empty() {
+        return Err("no head commit checked: nothing to merge".into());
+    }
     match (action, item) {
         (Action::Comment, Item::Card { account, number }) => {
             let args = s(&[
@@ -180,6 +193,17 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
         (Action::Approve, Item::Pr { repo, number, .. }) => {
             Ok(gh(s(&["pr", "review", number, "-R", repo, "--approve"])))
         }
+        // `body` is the head commit the merge was checked at.
+        (Action::Merge, Item::Pr { repo, number, .. }) => Ok(gh(s(&[
+            "pr",
+            "merge",
+            number,
+            "-R",
+            repo,
+            "--squash",
+            "--match-head-commit",
+            body,
+        ]))),
         (action, item) => Err(format!("can't {} {}", action.verb(), item.name())),
     }
 }
@@ -192,14 +216,17 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
 /// Fails when `action` doesn't apply to `item`, the work environment can't
 /// be loaded, or the CLI fails or times out.
 pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<String, String> {
+    let head;
+    let body = match (action, item) {
+        (Action::Merge, Item::Pr { repo, number, .. }) => {
+            head = mergeable_head(repo, number, profile)?;
+            head.as_str()
+        }
+        _ => body,
+    };
     let (program, args, env) = plan(action, item, body)?;
-    let mut cmd = Command::new(program);
+    let mut cmd = command(program, profile)?;
     cmd.args(&args).envs(env);
-    // Not under a checkout, so no repo's `.fizzy.yaml` steers the CLI.
-    cmd.current_dir(home());
-    if program == "gh" && profile == "work" {
-        cmd.envs(work_env()?);
-    }
     run_bounded(&mut cmd, program, TIMEOUT)?;
     let name = item.name();
     Ok(match action {
@@ -207,7 +234,71 @@ pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<Str
         Action::Close => format!("closed {name}"),
         Action::Ready => format!("marked {name} ready for review"),
         Action::Approve => format!("approved {name}"),
+        Action::Merge => format!("squash-merged {name}"),
     })
+}
+
+/// `program`, run from home (not under a checkout, so no repo's
+/// `.fizzy.yaml` steers it), gh with `profile`'s environment.
+fn command(program: &str, profile: &str) -> Result<Command, String> {
+    let mut cmd = Command::new(program);
+    cmd.current_dir(home());
+    if program == "gh" {
+        cmd.env("GH_PROMPT_DISABLED", "1");
+        if profile == "work" {
+            cmd.envs(work_env()?);
+        }
+    }
+    Ok(cmd)
+}
+
+/// Why a PR can't be squash-merged, from what GitHub reports of it: its
+/// state (`OPEN`, ...), whether it's a draft, its review decision (see
+/// items' `review_decision`) and its checks (see links' `checks_summary`;
+/// none is no CI to wait for). None when it can merge.
+#[must_use]
+pub fn merge_blocker(state: &str, draft: bool, review: &str, checks: &str) -> Option<String> {
+    Some(
+        match (state, draft, review, checks) {
+            (s, ..) if s != "OPEN" => "isn't open",
+            (_, true, ..) => "is a draft",
+            (_, _, "CHANGES_REQUESTED", _) => "has changes requested",
+            (_, _, r, _) if r != "APPROVED" => "isn't approved yet",
+            (.., "fail") => "has failing checks",
+            (.., "pass" | "") => return None,
+            _ => "has checks still running",
+        }
+        .into(),
+    )
+}
+
+/// The head commit of PR `number` in `repo`, as GitHub reports it now,
+/// when `merge_blocker` finds nothing in the way; else why not.
+fn mergeable_head(repo: &str, number: &str, profile: &str) -> Result<String, String> {
+    let fields = "state,isDraft,reviewDecision,latestReviews,statusCheckRollup,headRefOid";
+    let mut cmd = command("gh", profile)?;
+    cmd.args(["pr", "view", number, "-R", repo, "--json", fields]);
+    let out = run_bounded(&mut cmd, "gh", TIMEOUT)?;
+    let pr: Value = serde_json::from_str(out.trim()).map_err(|e| format!("gh pr view: {e}"))?;
+    mergeable(&pr).map_err(|why| format!("PR {repo}#{number} {why}"))
+}
+
+/// The head of a PR from gh's `pr view --json`, when it can merge.
+fn mergeable(pr: &Value) -> Result<String, String> {
+    let blocker = merge_blocker(
+        pr["state"].as_str().unwrap_or(""),
+        pr["isDraft"].as_bool().unwrap_or(false),
+        &crate::items::review_decision(pr),
+        &crate::links::checks_summary(&pr["statusCheckRollup"]),
+    );
+    if let Some(why) = blocker {
+        return Err(why);
+    }
+    pr["headRefOid"]
+        .as_str()
+        .filter(|h| !h.is_empty())
+        .map(String::from)
+        .ok_or_else(|| "has no head commit GitHub reports".into())
 }
 
 /// Run `cmd` with stdin closed, giving up after `timeout`. Its stdout, or
@@ -400,6 +491,23 @@ mod tests {
         assert_eq!(program, "gh");
         assert_eq!(args, ["pr", "review", "57", "-R", "o/r", "--approve"]);
         assert!(plan(Action::Approve, &issue, "").is_err());
+        let (program, args, _) = plan(Action::Merge, &pr, "abc123").unwrap();
+        assert_eq!(program, "gh");
+        assert_eq!(
+            args,
+            [
+                "pr",
+                "merge",
+                "57",
+                "-R",
+                "o/r",
+                "--squash",
+                "--match-head-commit",
+                "abc123"
+            ]
+        );
+        assert!(plan(Action::Merge, &pr, "").is_err());
+        assert!(plan(Action::Merge, &issue, "abc").is_err());
         let (_, args, _) = plan(Action::Comment, &pr, "lgtm").unwrap();
         assert_eq!(args, ["pr", "comment", "57", "-R", "o/r", "--body", "lgtm"]);
         assert!(plan(Action::Comment, &issue, " ").is_err());
@@ -410,6 +518,47 @@ mod tests {
             "can't mark ready card 1041"
         );
         assert!(plan(Action::Close, &pr, "").is_err());
+    }
+
+    #[test]
+    fn merges_wait_for_an_approval_and_passing_checks() {
+        let ok = |s, d, r, c| merge_blocker(s, d, r, c);
+        assert_eq!(ok("OPEN", false, "APPROVED", "pass"), None);
+        // No checks is no CI to wait for.
+        assert_eq!(ok("OPEN", false, "APPROVED", ""), None);
+        assert_eq!(
+            ok("MERGED", false, "APPROVED", "pass").unwrap(),
+            "isn't open"
+        );
+        assert_eq!(ok("OPEN", true, "APPROVED", "pass").unwrap(), "is a draft");
+        assert_eq!(ok("OPEN", false, "", "pass").unwrap(), "isn't approved yet");
+        assert_eq!(
+            ok("OPEN", false, "REVIEW_REQUIRED", "pass").unwrap(),
+            "isn't approved yet"
+        );
+        assert_eq!(
+            ok("OPEN", false, "CHANGES_REQUESTED", "pass").unwrap(),
+            "has changes requested"
+        );
+        assert_eq!(
+            ok("OPEN", false, "APPROVED", "fail").unwrap(),
+            "has failing checks"
+        );
+        assert_eq!(
+            ok("OPEN", false, "APPROVED", "pending").unwrap(),
+            "has checks still running"
+        );
+
+        let pr = serde_json::json!({
+            "state": "OPEN", "isDraft": false, "reviewDecision": "",
+            "latestReviews": [{"state": "APPROVED"}],
+            "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            "headRefOid": "abc123",
+        });
+        assert_eq!(mergeable(&pr).unwrap(), "abc123");
+        let mut running = pr.clone();
+        running["statusCheckRollup"][0]["status"] = "IN_PROGRESS".into();
+        assert_eq!(mergeable(&running).unwrap_err(), "has checks still running");
     }
 
     #[test]

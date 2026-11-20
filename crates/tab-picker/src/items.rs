@@ -390,8 +390,9 @@ fn action_key(a: Action) -> (&'static str, &'static str) {
         Action::Comment => ("c", "comment"),
         Action::Close => ("x", "close"),
         Action::Ready => ("r", "mark ready"),
-        // The Work view's ctrl-g; the float doesn't offer it.
+        // The Work view's ctrl-g and ctrl-s; the float doesn't offer them.
         Action::Approve => ("⌃G", "approve"),
+        Action::Merge => ("⌃S", "squash-merge"),
     }
 }
 
@@ -514,6 +515,7 @@ impl Items {
                 Action::Ready if e.link.kind == "pr" => format!("{} isn't a draft", e.name()),
                 Action::Ready => format!("{} isn't a PR: r marks a draft PR ready", e.name()),
                 Action::Approve => format!("{}: approve PRs from the Work view", e.name()),
+                Action::Merge => format!("{}: squash-merge PRs from the Work view", e.name()),
             };
             Outcome::Refuse(why)
         };
@@ -682,6 +684,7 @@ impl Items {
             Action::Close => format!("Close {name}?"),
             Action::Ready => format!("Mark {name} ready for review?"),
             Action::Approve => format!("Approve {name}?"),
+            Action::Merge => format!("Squash-merge {name}?"),
         })
     }
 
