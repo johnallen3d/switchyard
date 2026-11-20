@@ -683,6 +683,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⌃U ⌃D", "leave for scrollback, half a page"),
                 ("⌃X", "leave and arm an archive"),
                 ("⌃G", "edit in the editor"),
+                ("⌃E", "collapse or expand the sidebar"),
                 ("⌃C", "clear, then leave"),
                 ("esc", "leave"),
             ],
@@ -2402,6 +2403,10 @@ impl App {
             KeyCode::Char('c') if ctrl && !r.prompt.is_empty() => r.prompt.clear(),
             KeyCode::Char('c') if ctrl => self.close_reply(),
             KeyCode::Char('v') if ctrl => self.enter_scrollback(None),
+            // ctrl-e collapses or expands the sidebar, keeping the box.
+            KeyCode::Char('e') if ctrl && self.view == View::Inbox => {
+                self.expanded = !self.expanded;
+            }
             // ctrl-j and ctrl-k leave the box for the list and move in it;
             // ctrl-u and ctrl-d leave it for scrollback, half a page along.
             KeyCode::Char(c @ ('j' | 'k')) if ctrl => {
@@ -2880,15 +2885,10 @@ impl App {
             return;
         }
         // ctrl-e, in Inbox, still collapses or expands the sidebar, staying
-        // in scrollback; a search being typed keeps its keys.
-        let typing = self
-            .scrollback
-            .as_ref()
-            .is_some_and(|sb| sb.typing.is_some());
+        // in scrollback, even while a search is being typed.
         if k.code == KeyCode::Char('e')
             && k.modifiers.contains(KeyModifiers::CONTROL)
             && self.view == View::Inbox
-            && !typing
         {
             self.expanded = !self.expanded;
             return;
@@ -6902,7 +6902,7 @@ mod tests {
         assert_eq!(app.note, Some(("sent to /woke".into(), false)));
         // Tab leaves an empty box, but not one with a message.
         app.key(plain(KeyCode::Tab));
-        app.key(plain(KeyCode::Char('x')));
+        app.key(KeyEvent::from(KeyCode::Char('x')));
         app.key(plain(KeyCode::Tab));
         assert!(app.reply.is_some());
         app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
@@ -6976,6 +6976,26 @@ mod tests {
         assert!(app.expanded && app.scrollback.is_some());
         app.key(ctrl_e);
         assert!(!app.expanded && app.scrollback.is_some());
+        // So does a search being typed, which keeps its query.
+        app.scrollback.as_mut().unwrap().typing = Some(scrollback::Typing {
+            forward: true,
+            query: "x".into(),
+        });
+        app.key(ctrl_e);
+        let sb = app.scrollback.as_ref().unwrap();
+        assert!(app.expanded && sb.typing.as_ref().is_some_and(|t| t.query == "x"));
+    }
+
+    #[test]
+    fn ctrl_e_toggles_the_sidebar_from_the_reply_box() {
+        let mut app = inbox_with_lifecycle();
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        app.open_reply();
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        app.key(ctrl_e);
+        assert!(app.expanded && app.reply.is_some());
+        app.key(ctrl_e);
+        assert!(!app.expanded && app.reply.is_some());
     }
 
     #[test]
@@ -7118,7 +7138,7 @@ mod tests {
         app.key(ctrl_b);
         assert!(app.items.is_some());
         // Its letters don't search, and x asks first, naming the card.
-        app.key(plain(KeyCode::Char('x')));
+        app.key(KeyEvent::from(KeyCode::Char('x')));
         assert_eq!(app.query, "");
         assert_eq!(
             app.items
