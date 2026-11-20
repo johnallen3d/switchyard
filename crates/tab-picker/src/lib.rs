@@ -85,7 +85,7 @@
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
 //! a new tab); in Inbox that's cmd+Enter, and Enter instead clears the
-//! search, keeping the row it found highlighted. ctrl-t pins or unpins
+//! search, keeping the row it found highlighted. ctrl-r pins or unpins
 //! the highlighted open task (`pinned` in the registry), which puts it
 //! in a Pinned group at the top of Inbox. ctrl-s, in Inbox, opens a prompt
 //! for when to wake the task (see snooze.rs); Enter snoozes it
@@ -1253,7 +1253,7 @@ impl App {
         }
     }
 
-    /// The highlighted open task, which ctrl-t can pin (not in the archive)
+    /// The highlighted open task, which ctrl-r can pin (not in the archive)
     /// and ctrl-s snooze (in Inbox).
     fn selected_open_task(&self) -> Option<usize> {
         self.selected_item()
@@ -2669,7 +2669,7 @@ impl App {
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let page = self.page();
         match k.code {
-            // standalone_key acts on ctrl-t.
+            // standalone_key acts on ctrl-r and ctrl-t.
             KeyCode::Char('s') if ctrl => self.open_snooze(),
             KeyCode::Char('b') if ctrl => self.open_items(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
@@ -4597,6 +4597,7 @@ impl App {
                         "⌃S",
                         "arm an approved, passing pull request's squash-merge: ⏎ merges it",
                     ),
+                    ("⌃T", "review a pull request in tuicr; :submit sends it"),
                     ("⌃E", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "list the project again"),
@@ -4678,12 +4679,15 @@ impl App {
         if task.is_some_and(|t| !chooser_links(&t.links).is_empty()) {
             row.push(("⌃B", "work items: open, read, comment, close, mark ready"));
         }
+        if self.preview_want().is_some() {
+            row.push(("⌃T", "review its changes in tuicr; y sends the review"));
+        }
         if self.view == View::Inbox && self.interruptible() {
             row.push(("⌃C", "interrupt the agent (asks first)"));
         }
         if self.can_pin() {
             row.push((
-                "⌃T",
+                "⌃R",
                 if task.is_some_and(|t| t.pinned) {
                     "unpin"
                 } else {
@@ -5234,7 +5238,7 @@ impl App {
         }
     }
 
-    /// The keys that act: Enter, ctrl-t, and Enter in the
+    /// The keys that act: Enter, ctrl-r, ctrl-t, and Enter in the
     /// snooze prompt and reply box; false for other keys.
     fn standalone_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
         // The keys float and scrollback have every key while they last.
@@ -5267,8 +5271,12 @@ impl App {
             return self.save_snooze(k);
         }
         // Pin or unpin in the registry, then here.
-        if matches!(k.code, KeyCode::Char('t') if ctrl) {
+        if matches!(k.code, KeyCode::Char('r') if ctrl) {
             self.pin_selected();
+            return true;
+        }
+        if matches!(k.code, KeyCode::Char('t') if ctrl) && self.view == View::Inbox {
+            self.review_task();
             return true;
         }
         if !matches!(k.code, KeyCode::Enter) {
@@ -5348,6 +5356,23 @@ impl App {
         true
     }
 
+    /// ctrl-t in Inbox: review the highlighted agent's changes in tuicr, in
+    /// a float over the picker (see the CLI's review.rs), which sends the
+    /// review to the agent once John says so.
+    fn review_task(&mut self) {
+        let Some(want) = self.preview_want() else {
+            self.note = Some(("highlight an agent to review its changes".into(), true));
+            return;
+        };
+        let label = self.selected_label();
+        self.note = Some(
+            match standalone::review_float(&["task", &want.target, &want.session, &want.window]) {
+                Ok(()) => (format!("reviewing {label} in tuicr"), false),
+                Err(e) => (e, true),
+            },
+        );
+    }
+
     /// Enter on an armed interrupt: press Escape in the agent's tab; the
     /// outcome to show.
     fn interrupt(&mut self, pick: &standalone::Pick, label: &str) -> (String, bool) {
@@ -5416,6 +5441,12 @@ impl App {
                 }
             }
             work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
+            work::Outcome::Review { profile, url, name } => {
+                self.note = Some(match standalone::review_float(&["pr", &profile, &url]) {
+                    Ok(()) => (format!("reviewing {name} in tuicr"), false),
+                    Err(e) => (e, true),
+                });
+            }
         }
         true
     }
@@ -5631,7 +5662,7 @@ impl App {
         }
     }
 
-    /// ctrl-t: pin or unpin the selected row in the registry, then here.
+    /// ctrl-r: pin or unpin the selected row in the registry, then here.
     fn pin_selected(&mut self) {
         if !self.can_pin() {
             return;
@@ -6693,10 +6724,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_t_pins_and_unpins_and_holds_over_stale_data() {
+    fn ctrl_r_pins_and_unpins_and_holds_over_stale_data() {
         let mut app = inbox_with_lifecycle();
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
-        // ctrl-t saves the pin in the registry (standalone_key), then shows it.
+        // ctrl-r saves the pin in the registry (standalone_key), then shows it.
         assert!(app.can_pin());
         app.toggle_pin();
         assert!(app.tasks[2].pinned);

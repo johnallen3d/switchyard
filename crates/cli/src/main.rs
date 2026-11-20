@@ -5,12 +5,14 @@
 //! new-session picker, switchyard-spawn), `link` and `unlink` (link.rs),
 //! `usage` and `server` (switchyard-server).
 //!
-//! `float new`, `float feed`, `task` (task.rs), `transcript --local` and
-//! `diff --local` are plumbing for
+//! `float new`, `float feed`, `task` (task.rs), `review` (review.rs, the
+//! tab picker's review float), `transcript --local` and `diff --local` are
+//! plumbing for
 //! the Rex config's Lua, core, and other hosts, so they stay out of the
 //! top-level help.
 
 mod link;
+mod review;
 mod task;
 
 use std::io::{self, IsTerminal};
@@ -38,8 +40,8 @@ const USAGE: &str =
 Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-b (work item actions: open, read, comment on or close a card
-or issue, mark a draft PR ready, each mutation confirmed first), ctrl-t
-(pin) and ctrl-s (snooze), staying open until its tab is closed. cmd+1-4 on its tab pick the views: Inbox, Work (one
+or issue, mark a draft PR ready, each mutation confirmed first), ctrl-r
+(pin), ctrl-t (review in tuicr) and ctrl-s (snooze), staying open until its tab is closed. cmd+1-4 on its tab pick the views: Inbox, Work (one
 project's open cards or issues, or with ctrl-f its open pull requests,
 to start a session from), Usage, Archive.
 --current highlights that tab (cmd+i and cmd+k pass the tab they were
@@ -184,6 +186,11 @@ fn main() -> ExitCode {
         ["float", "feed", session, block] => done(switchyard_tabs::feed_float(session, block)),
         ["float", ..] => usage_error(FLOAT_USAGE),
         ["task", rest @ ..] => task::main(rest),
+        ["review", "-h" | "--help"] => {
+            println!("{}", review::USAGE);
+            ExitCode::SUCCESS
+        }
+        ["review", rest @ ..] => review::main(rest),
         // The highlighted agent's transcript for the picker's preview, read
         // on the agent's host by what the config host found (see core's
         // transcript).

@@ -52,21 +52,7 @@ pub fn fetch(target: &str, session: &str, window: &str) -> Value {
 }
 
 fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String> {
-    let worktree = load_tasks().ok().and_then(|tasks| {
-        tasks
-            .into_iter()
-            .find(|t| t["ended_at"].is_null() && in_window(t, window))
-            .and_then(|t| t["worktree"].as_str().map(String::from))
-            .filter(|w| !w.is_empty())
-    });
-    let dir = match worktree {
-        Some(w) => w,
-        None => agent_pane(host, session, window)?["cwd"]
-            .as_str()
-            .filter(|d| !d.is_empty())
-            .ok_or("no folder known for this tab")?
-            .to_string(),
-    };
+    let dir = task_dir(host, session, window)?;
     if host == local_label() {
         return Ok(local(&dir));
     }
@@ -78,6 +64,30 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
         ));
     }
     serde_json::from_slice(&out.stdout).map_err(|_| format!("unreadable diff from {host}"))
+}
+
+/// The checkout of the task in the tab (`window` in `session` on `host`):
+/// the task registry's worktree for it, else the agent pane's directory.
+///
+/// # Errors
+///
+/// Fails when neither is known, or the agent pane can't be looked up.
+pub fn task_dir(host: &str, session: &str, window: &str) -> Result<String, String> {
+    let worktree = load_tasks().ok().and_then(|tasks| {
+        tasks
+            .into_iter()
+            .find(|t| t["ended_at"].is_null() && in_window(t, window))
+            .and_then(|t| t["worktree"].as_str().map(String::from))
+            .filter(|w| !w.is_empty())
+    });
+    match worktree {
+        Some(w) => Ok(w),
+        None => Ok(agent_pane(host, session, window)?["cwd"]
+            .as_str()
+            .filter(|d| !d.is_empty())
+            .ok_or("no folder known for this tab")?
+            .to_string()),
+    }
 }
 
 /// How long one gh call for a pull request may take.

@@ -83,7 +83,20 @@ pub fn host_bash(host: &str, script: &str) -> Option<std::process::Output> {
 /// on its own. Like any ssh, it exits 255 when it can't connect.
 #[must_use]
 pub fn ssh(host: &str) -> Command {
+    ssh_with(host, false)
+}
+
+/// `ssh`, with a terminal on `host` for an interactive program (`-t`).
+#[must_use]
+pub fn ssh_tty(host: &str) -> Command {
+    ssh_with(host, true)
+}
+
+fn ssh_with(host: &str, tty: bool) -> Command {
     let mut cmd = Command::new("ssh");
+    if tty {
+        cmd.arg("-t");
+    }
     cmd.args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=3"]);
     if let Some(dir) = runtime_dir() {
         // %C is a hash of the connection's host, port and user.

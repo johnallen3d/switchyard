@@ -31,7 +31,9 @@
 //! the same way, on a pull request that is approved with no failing or
 //! running checks (see core's `merge_blocker`); Enter asks GitHub again
 //! before merging (see core's `item_actions`). A row says what stands in
-//! the way: failing or running checks, or changes requested.
+//! the way: failing or running checks, or changes requested. ctrl-t
+//! reviews a pull request in tuicr, in a float over the picker (`tuicr
+//! pr`, whose `:submit` sends the review to GitHub).
 //!
 //! With room, the view splits: the list on the left and the highlighted
 //! item on the right, its description and comments, and for a pull
@@ -173,6 +175,13 @@ pub enum Outcome {
     Act {
         action: Action,
         item: Item,
+        url: String,
+        name: String,
+    },
+    /// Review the pull request at `url`, named `name` (`#57`), in tuicr
+    /// under `profile`'s account, in a float.
+    Review {
+        profile: String,
         url: String,
         name: String,
     },
@@ -640,6 +649,7 @@ impl Work {
                 None => Outcome::Stay,
             },
             KeyCode::Char('g') if ctrl => self.arm(Action::Approve),
+            KeyCode::Char('t') if ctrl => self.review(),
             KeyCode::Char('s') if ctrl => self.arm(Action::Merge),
             // Searching brings back the list it searches.
             KeyCode::Char(_) if !ctrl => {
@@ -647,6 +657,21 @@ impl Work {
                 Outcome::Pass
             }
             _ => Outcome::Pass,
+        }
+    }
+
+    /// ctrl-t: review the highlighted pull request in tuicr.
+    fn review(&self) -> Outcome {
+        if self.kind != Kind::Prs {
+            return Outcome::Refuse("ctrl-t reviews pull requests; ctrl-f lists them".into());
+        }
+        let (Some(pr), Some(project)) = (self.selected_item(), self.current()) else {
+            return Outcome::Stay;
+        };
+        Outcome::Review {
+            profile: project.profile.clone(),
+            url: pr.url.clone(),
+            name: format!("#{}", pr.number),
         }
     }
 
@@ -827,6 +852,9 @@ impl Work {
         }
         if self.kind == Kind::Prs && self.actionable(Action::Merge).is_ok() {
             h.push(("⌃S", "squash-merge"));
+        }
+        if self.kind == Kind::Prs && self.selected_item().is_some() {
+            h.push(("⌃T", "review"));
         }
         if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
             h.push(("⌃L", self.detail.lens_for(&l).next().name()));

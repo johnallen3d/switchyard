@@ -7,8 +7,8 @@
 //! and the tasks from the registry through switchyard-core (live status
 //! first, then the worktree check), and the highlighted agent's transcript
 //! for the preview (see preview.rs), or its changes (see changes.rs). It acts on Enter, ctrl-b's work
-//! item actions (see items.rs), ctrl-t
-//! (pin), the snooze prompt's Enter and the
+//! item actions (see items.rs), ctrl-r
+//! (pin), ctrl-t (review in tuicr, in a float), the snooze prompt's Enter and the
 //! "ask" confirm through core's actions and `rex do session.select`, then
 //! stays open, showing the outcome and the data after
 //! it; closing its tab quits it. The registry is on the Mac; elsewhere it
@@ -57,9 +57,15 @@ if not listed then error(failed, 0) end
 return table.concat(rows)
 "#;
 
+/// The picker's own Rex session, kept from `REX_SESSION` before
+/// `detach_env` clears it, for the review float to open over.
+static OWN_SESSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
 /// Clear the Rex session variables a shell in Rex carries, so rex CLI calls
-/// name their own targets. Call before any thread starts.
+/// name their own targets, keeping the picker's own session first. Call
+/// before any thread starts.
 pub fn detach_env() {
+    let _ = OWN_SESSION.set(std::env::var("REX_SESSION").ok().filter(|s| !s.is_empty()));
     for var in ["REX_SERVER", "REX_CLIENT", "REX_SESSION", "REX_BLOCK"] {
         // SAFETY: called from main before any thread starts.
         unsafe { std::env::remove_var(var) };
@@ -392,6 +398,75 @@ pub fn open_url(url: &str) -> Result<(), String> {
         .map_err(|e| format!("{opener}: {e}"))?;
     if !status.success() {
         return Err(format!("{opener} {url} failed ({status})"));
+    }
+    Ok(())
+}
+
+/// Opens the review float: a floating layer over most of the picker's
+/// session (`session`), running `command` (a JSON array) in a pane
+/// labeled `label`. A script attaches to the session first, as only an
+/// attached connection may add to it.
+const REVIEW_FLOAT: &str = r#"
+local session = rex.args.session
+-- rex do decodes a JSON argument itself; a string is decoded here.
+local command = rex.args.command
+if type(command) == "string" then command = rex.json.decode(command) end
+if type(command) ~= "table" then error("no command for the review float", 0) end
+local _, attach_err = rex.session.attach{ session_id = session }
+if attach_err ~= nil then error(attach_err, 0) end
+local _, err = rex.session.new_layer{
+  session_id = session,
+  bounds     = { 0.03, 0.03, 0.94, 0.94 },
+  focus      = true,
+  layout     = rex.layout.block{
+    flavor  = "com.superlogical.terminal.shell",
+    label   = rex.args.label,
+    options = { command = command },
+  },
+}
+if err ~= nil then error(err, 0) end
+"#;
+
+/// Open a float over the picker's own tab running `switchyard review
+/// ARGS...` (see the CLI's review.rs), with this build's binary, so the
+/// review is the picker's own version. It closes when the review ends.
+///
+/// # Errors
+///
+/// Fails outside Rex, or when Rex refuses the float.
+pub fn review_float(args: &[&str]) -> Result<(), String> {
+    let session = OWN_SESSION
+        .get()
+        .cloned()
+        .flatten()
+        .or_else(|| std::env::var("REX_SESSION").ok().filter(|s| !s.is_empty()))
+        .ok_or("reviews open in a float over the picker's Rex tab")?;
+    let exe = std::env::current_exe().map_err(|e| format!("can't find switchyard: {e}"))?;
+    let mut command = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!(
+            "{}; exec \"$0\" \"$@\"",
+            switchyard_core::review::PATH_SETUP
+        ),
+        exe.display().to_string(),
+        "review".to_string(),
+    ];
+    command.extend(args.iter().map(ToString::to_string));
+    let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
+    let out = std::process::Command::new("rex")
+        .args(["do", "-e", REVIEW_FLOAT])
+        .arg(format!("session={session}"))
+        .arg(format!("label={}", switchyard_core::review::LABEL))
+        .arg(format!("command={command}"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("rex: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "can't open the review float: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }
