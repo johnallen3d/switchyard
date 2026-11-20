@@ -4600,7 +4600,7 @@ impl App {
                     ("⌃T", "review a pull request in tuicr; :submit sends it"),
                     ("⌃S", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
-                    ("⌃R", "list the project again"),
+                    ("⌃R", "refresh: list the project again"),
                 ],
             ));
             sections.push(Section::new(
