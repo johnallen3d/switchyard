@@ -37,7 +37,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::hosts::catalog;
 use switchyard_core::launch::{Parent, Placement, launch_text};
-use switchyard_core::naming::{harness_spec, models, name_char};
+use switchyard_core::naming::{HARNESSES, harness_spec, models, name_char};
 use switchyard_core::rex::local_label;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
@@ -59,7 +59,7 @@ const TAILSCALE_RETRY: Duration = Duration::from_secs(30);
 const READ_DEFAULT: usize = 20;
 const READ_MAX: usize = 150;
 
-const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claude or pi) in a Rex tab, \
+const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claude, pi or agy, the Antigravity CLI) in a Rex tab, \
 working in a Git worktree of a catalog project on one of John's hosts. Tasks are named PROJECT/NAME. \
 list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
 spawn_task starts one with a first prompt; read_task shows what its agent has been saying; \
@@ -423,7 +423,7 @@ fn tools() -> Value {
                 "properties": {
                     "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path." },
                     "name": { "type": "string", "description": "Task name, normalised as the picker does (lowercase, spaces become dashes); the branch is feature/NAME." },
-                    "harness": { "type": "string", "enum": ["claude", "pi"], "default": "claude" },
+                    "harness": { "type": "string", "enum": HARNESSES, "default": HARNESSES[0] },
                     "model": { "type": "string", "description": model_help() },
                     "prompt": { "type": "string", "description": "The agent's first message." },
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
@@ -726,9 +726,10 @@ fn normalise(name: &str) -> String {
 fn model_help() -> String {
     let list = |h| models(h)[1..].join(", ");
     format!(
-        "Optional model for the harness; omit for its default. claude: {}. pi: {}.",
+        "Optional model for the harness; omit for its default. claude: {}. pi: {}. agy: {}.",
         list("claude"),
-        list("pi")
+        list("pi"),
+        list("agy")
     )
 }
 

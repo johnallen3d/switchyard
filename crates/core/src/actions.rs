@@ -120,9 +120,13 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<Adopted, String> {
             "{top} is on a detached HEAD; check out its branch to archive it"
         ));
     }
-    // Rex names Claude Code `claude-code`; spawned tasks record `claude`.
+    // Rex names Claude Code `claude-code` and Antigravity's CLI
+    // `antigravity`; spawned tasks record `claude` and `agy`.
     let app = pane["app"].as_str().unwrap_or("");
-    let harness = app.strip_suffix("-code").unwrap_or(app);
+    let harness = match app {
+        "antigravity" => "agy",
+        app => app.strip_suffix("-code").unwrap_or(app),
+    };
     Ok(Adopted::Task(serde_json::json!({
         "host": host,
         "session_id": session,

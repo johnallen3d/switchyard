@@ -11,6 +11,12 @@
 //!   starts and, with `--no-session-persistence`, no session is saved.
 //! - Pi: the RPC `get_commands` call, which lists extension commands,
 //!   prompt templates and skills (as `skill:NAME`) but not the TUI's own.
+//! - Antigravity (`agy`): an Agent Client Protocol `session/new`, after
+//!   which `agy acp` announces the session's commands. No model turn starts,
+//!   but the session is saved, so the probe deletes it again. The list has
+//!   no built-in flag: the probe also prints the names of the skills
+//!   Antigravity ships (its `builtin` folder), and `AGY_BUILTINS` names its
+//!   own commands.
 //!
 //! The probe is a Bash script run through `host_bash`, so it needs no
 //! Switchyard of the same version on the agent's host.
@@ -29,11 +35,52 @@ pub struct SlashCommand {
 }
 
 /// What a harness's commands take in a message: Claude runs a `/command` or
-/// names a skill anywhere, Pi only at the start.
+/// names a skill anywhere, Pi and Antigravity only at the start.
 #[must_use]
 pub fn anywhere(harness: &str) -> bool {
-    harness != "pi"
+    !matches!(harness, "pi" | "agy")
 }
+
+/// Antigravity's own commands, which it lists among John's: they have no
+/// file to find them by, unlike the skills it ships.
+const AGY_BUILTINS: [&str; 7] = [
+    "browser", "compact", "goal", "grill-me", "learn", "plan", "schedule",
+];
+
+/// The line prefix the Antigravity probe names a shipped skill with.
+const AGY_SHIPPED: &str = "switchyard-builtin ";
+
+/// The Antigravity probe (see the module doc). The FIFO, opened read-write
+/// so opening it never blocks, holds `agy acp`'s input open until the
+/// commands arrive (at most 15 s); closing it ends `agy`. The session it
+/// made, and that alone, is then removed: its conversation, artifact
+/// folder, presence lock and index rows. Without sqlite3 to drop the index
+/// rows, everything stays, so the index never names a missing conversation.
+const AGY_PROBE: &str = r#"command -v agy >/dev/null || exit 1
+c=~/.gemini/antigravity-cli
+d=$(mktemp -d) || exit 1
+mkfifo "$d/in" || exit 1
+exec 3<>"$d/in"
+$t agy acp <"$d/in" >"$d/out" 2>/dev/null 3>&- &
+p=$!
+w=$(printf '%s' "$PWD" | sed 's/[\\"]/\\&/g')
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"'"$w"'","mcpServers":[]}}' >&3
+i=0
+while [ $i -lt 150 ] && ! grep -q available_commands_update "$d/out"; do sleep 0.1; i=$((i+1)); done
+exec 3>&-
+wait $p
+grep available_commands_update "$d/out"
+id=$(grep -o '"sessionId":"[0-9a-f-]*"' "$d/out" | head -1 | cut -d'"' -f4)
+rm -rf "$d"
+for f in "$c"/builtin/skills/*/SKILL.md "$c"/builtin/plugins/*/skills/*/SKILL.md; do
+  [ -f "$f" ] && sed -n 's/^name:[[:space:]]*//p' "$f" | head -1 | tr -d "\"'" | sed 's/^/switchyard-builtin /'
+done
+if [ -n "$id" ] && command -v sqlite3 >/dev/null &&
+  sqlite3 "$c/conversation_summaries.db" "delete from conversation_summaries where conversation_id='$id'; delete from conversations_fts where conversation_id='$id';" 2>/dev/null; then
+  rm -rf "$c/conversations/$id.db" "$c/brain/$id" "$c/presence/$id.lock"
+fi
+"#;
 
 /// The probe's request id, which picks its response out of the output.
 const REQUEST: &str = "switchyard-commands";
@@ -53,6 +100,9 @@ pub fn fetch(
     let out = host_bash(host, &script(profile, harness, dir))
         .ok_or_else(|| format!("can't reach {host}"))?;
     let text = String::from_utf8_lossy(&out.stdout);
+    if harness == "agy" {
+        return parse_agy(&text).ok_or_else(|| format!("agy on {host} listed no commands"));
+    }
     let line = text
         .lines()
         .find(|l| l.contains(REQUEST) || l.contains("\"get_commands\""));
@@ -68,6 +118,7 @@ pub fn fetch(
 /// print its response line.
 fn script(profile: &str, harness: &str, dir: &str) -> String {
     let probe = match harness {
+        "agy" => AGY_PROBE.to_string(),
         "pi" => format!(
             "printf '%s\\n' '{{\"type\":\"get_commands\",\"id\":\"{REQUEST}\"}}' \
              | $t pi --mode rpc --no-session 2>/dev/null"
@@ -134,6 +185,41 @@ fn parse(harness: &str, v: &Value) -> Result<Vec<SlashCommand>, String> {
     Ok(out)
 }
 
+/// John's own commands in the Antigravity probe's output (see `AGY_PROBE`):
+/// the session's commands less Antigravity's own and the skills it ships,
+/// each name once, by name. None when the output has no command list.
+fn parse_agy(text: &str) -> Option<Vec<SlashCommand>> {
+    let shipped: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix(AGY_SHIPPED))
+        .map(str::trim)
+        .collect();
+    let v: Value = text
+        .lines()
+        .filter(|l| l.contains("available_commands_update"))
+        .find_map(|l| serde_json::from_str(l).ok())?;
+    let list = v["params"]["update"]["availableCommands"].as_array()?;
+    let s = |c: &Value, k: &str| c[k].as_str().unwrap_or("").trim().to_string();
+    let mut out: Vec<SlashCommand> = Vec::new();
+    for c in list {
+        let name = s(c, "name");
+        if name.is_empty()
+            || AGY_BUILTINS.contains(&name.as_str())
+            || shipped.contains(&name.as_str())
+            || out.iter().any(|o| o.name == name)
+        {
+            continue;
+        }
+        out.push(SlashCommand {
+            name,
+            description: s(c, "description"),
+            hint: c["input"]["hint"].as_str().unwrap_or("").trim().to_string(),
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Some(out)
+}
+
 /// A command's name without Pi's `skill:` prefix.
 #[must_use]
 pub fn bare(name: &str) -> &str {
@@ -178,6 +264,41 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert_eq!(names, ["skill:fizzy", "implement", "issue-create"]);
+    }
+
+    #[test]
+    fn agy_lists_only_johns_commands() {
+        // Trimmed from a real `agy acp` 1.5.12 run, with a workspace skill.
+        let out = concat!(
+            r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"9eee5a90-4754-48d4-a121-ca1c849c6c7e","update":{"sessionUpdate":"available_commands_update","availableCommands":["#,
+            r#"{"name":"goal","description":"Run until the specified goal is completely finished."},"#,
+            r#"{"name":"compact","description":"Compact the conversation now."},"#,
+            r#"{"name":"grill-me","description":"Interview me to align on a plan."},"#,
+            r#"{"name":"antigravity-guide","description":"Provides a comprehensive guide."},"#,
+            r#"{"name":"sw-probe","description":"Probe skill for switchyard"},"#,
+            r#"{"name":"fizzy","description":"Fizzy CLI","input":{"hint":"[action]"}},"#,
+            r#"{"name":"swarm","description":"(Preview & Quota Heavy) Run a swarm."}"#,
+            "]}}}\n",
+            "switchyard-builtin antigravity-guide\n",
+            "switchyard-builtin swarm\n",
+        );
+        let got = parse_agy(out).unwrap();
+        let names: Vec<&str> = got.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["fizzy", "sw-probe"]);
+        assert_eq!(got[0].hint, "[action]");
+        assert_eq!(got[1].description, "Probe skill for switchyard");
+        assert!(parse_agy("switchyard-builtin swarm\n").is_none());
+        assert!(!anywhere("agy"));
+    }
+
+    #[test]
+    fn the_agy_probe_runs_acp_and_removes_its_session() {
+        let s = script("work", "agy", "/w");
+        assert!(s.starts_with("cd '/w'"), "{s}");
+        assert!(s.contains("mise -C ~/dev/src/amfaro env -s bash"));
+        assert!(s.contains("$t agy acp"));
+        assert!(s.contains("\"method\":\"session/new\""));
+        assert!(s.contains("rm -rf \"$c/conversations/$id.db\""));
     }
 
     #[test]

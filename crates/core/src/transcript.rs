@@ -15,6 +15,9 @@
 //!   its current session (which changes on /clear); failing that, the
 //!   task's agent session, then the newest session for the directory.
 //! - Pi: the newest session for the directory, which follows /new.
+//! - Antigravity (`agy`): the conversation it last used in the directory,
+//!   else the task's agent session; its log is
+//!   `brain/ID/.system_generated/logs/transcript_full.jsonl`.
 //!
 //! It reads only the end of the log and returns its last messages, tool
 //! calls and questions as `{harness, entries: [{kind, text}], tokens, model}`,
@@ -37,7 +40,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::rex::{host_bash, local_label, rex_json, sh_quote};
-use crate::sessions::session_dir;
+use crate::sessions::{newest_session_here, session_dir};
 use crate::tasks::{in_window, load_tasks, rfc3339_secs};
 
 /// How much of the end of a log to read.
@@ -245,6 +248,8 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
     let harness = match (f("harness").as_str(), app) {
         ("", "claude-code" | "claude") => "claude".to_string(),
         ("", "pi") => "pi".to_string(),
+        // Rex names Antigravity's CLI `antigravity`; tasks record `agy`.
+        ("", "antigravity" | "agy") => "agy".to_string(),
         ("", "") if task.is_some() => "claude".to_string(),
         ("", "") => return Err("no agent in this tab".into()),
         ("", other) => return Err(format!("no transcript for {other}")),
@@ -343,7 +348,7 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
 /// When the running Claude agent `pid` started (Unix seconds), from its
 /// `CONFIG/sessions/PID.json`; 0 when unknown.
 fn started(profile: &str, harness: &str, dir: &str, pid: u64) -> u64 {
-    if harness == "pi" || pid == 0 {
+    if harness != "claude" || pid == 0 {
         return 0;
     }
     let sessions = session_dir(profile, harness, dir);
@@ -358,6 +363,9 @@ fn started(profile: &str, harness: &str, dir: &str, pid: u64) -> u64 {
 }
 
 fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Option<PathBuf> {
+    if harness == "agy" {
+        return agy_log(profile, dir, agent_session);
+    }
     let sessions = session_dir(profile, harness, dir);
     let newest = || newest_log(&sessions);
     if harness == "pi" {
@@ -390,6 +398,26 @@ fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) 
         .and_then(named)
         .or_else(|| named(agent_session))
         .or_else(newest)
+}
+
+/// Antigravity's log for the conversation it last used in `dir`, else for
+/// `agent_session`. Its data folder has no profile variable, so both
+/// profiles share it.
+fn agy_log(profile: &str, dir: &str, agent_session: &str) -> Option<PathBuf> {
+    let logs = |id: &str| {
+        crate::rex::home()
+            .join(".gemini/antigravity-cli/brain")
+            .join(id)
+            .join(".system_generated/logs")
+    };
+    let id = newest_session_here(profile, "agy", dir)
+        .into_iter()
+        .chain((!agent_session.is_empty()).then(|| agent_session.to_string()))
+        .find(|id| !id.contains('/') && logs(id).is_dir())?;
+    ["transcript_full.jsonl", "transcript.jsonl"]
+        .into_iter()
+        .map(|name| logs(&id).join(name))
+        .find(|p| p.is_file())
 }
 
 fn newest_log(dir: &Path) -> Option<PathBuf> {
@@ -437,11 +465,11 @@ fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
 }
 
 /// A Claude session's title: the last one given with `/rename`, else the
-/// last Claude made up for it. None for Pi, whose logs have none, or
-/// before Claude has titled the session.
+/// last Claude made up for it. None for Pi and Antigravity, whose logs
+/// have none, or before Claude has titled the session.
 #[must_use]
 pub fn title(log: &str, harness: &str) -> Option<String> {
-    if harness == "pi" {
+    if harness != "claude" {
         return None;
     }
     let mut made_up = None;
@@ -478,7 +506,12 @@ pub fn title(log: &str, harness: &str) -> Option<String> {
 pub fn model(log: &str, harness: &str) -> Option<String> {
     log.lines().rev().find_map(|line| {
         let v = serde_json::from_str::<Value>(line).ok()?;
-        let m = if harness == "pi" {
+        let m = if harness == "agy" {
+            if v["type"] != "PLANNER_RESPONSE" {
+                return None;
+            }
+            &v["model"]
+        } else if harness == "pi" {
             match v["type"].as_str()? {
                 "model_change" => &v["modelId"],
                 "message" if v["message"]["role"] == "assistant" => &v["message"]["model"],
@@ -506,7 +539,14 @@ pub fn tokens(log: &str, harness: &str) -> Option<u64> {
     log.lines().rev().find_map(|line| {
         let v = serde_json::from_str::<Value>(line).ok()?;
         let n = |u: &Value, k: &str| u[k].as_u64().unwrap_or(0);
-        if harness == "pi" {
+        if harness == "agy" {
+            // Each response counts its own input apart from cached input.
+            if v["type"] != "PLANNER_RESPONSE" {
+                return None;
+            }
+            let sum = n(&v, "input_tokens") + n(&v, "cache_read_tokens") + n(&v, "output_tokens");
+            (sum > 0).then_some(sum)
+        } else if harness == "pi" {
             let m = &v["message"];
             if v["type"] != "message" || m["role"] != "assistant" {
                 return None;
@@ -550,9 +590,9 @@ const WAKEUP_TOOL: &str = "ScheduleWakeup";
 ///
 /// Calls before `since` (the agent process's start; 0 when unknown) are
 /// ignored: a resumed session's old timers and jobs died with its process.
-/// None for Pi, which has neither.
+/// None for Pi and Antigravity, whose logs say neither.
 pub fn wake(log: &str, harness: &str, since: u64) -> Option<(u64, String)> {
-    if harness == "pi" {
+    if harness != "claude" {
         return None;
     }
     let mut pending = Pending::default();
@@ -717,7 +757,9 @@ pub fn entries(log: &str, harness: &str) -> Vec<(&'static str, String)> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if harness == "pi" {
+        if harness == "agy" {
+            agy_entry(&v, &mut out);
+        } else if harness == "pi" {
             pi_entry(&v, &mut out);
         } else {
             claude_entry(&v, &mut out);
@@ -782,6 +824,51 @@ fn pi_entry(v: &Value, out: &mut Vec<(&'static str, String)>) {
             _ => {}
         }
     }
+}
+
+/// An Antigravity step: John's request (without the metadata Antigravity
+/// wraps it in), or a response's text and tool calls. Tool results and
+/// errors are left out, as for the other harnesses.
+fn agy_entry(v: &Value, out: &mut Vec<(&'static str, String)>) {
+    let content = v["content"].as_str().unwrap_or("");
+    match v["type"].as_str() {
+        Some("USER_INPUT") => {
+            let request = content
+                .split_once("<USER_REQUEST>")
+                .and_then(|(_, rest)| rest.split_once("</USER_REQUEST>"))
+                .map_or(content, |(request, _)| request);
+            push_text(out, "user", request);
+        }
+        Some("PLANNER_RESPONSE") => {
+            push_text(out, "assistant", content);
+            for call in v["tool_calls"].as_array().into_iter().flatten() {
+                push_tool(
+                    out,
+                    call["name"].as_str().unwrap_or("tool"),
+                    &agy_input(&call["args"]),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// An Antigravity tool call's arguments under the names `push_tool` looks
+/// for: its own summary as the description, `CommandLine` as the command,
+/// and the rest (`Path`, `Query`, `Url`, ...) lowercased.
+fn agy_input(args: &Value) -> Value {
+    let Some(args) = args.as_object() else {
+        return Value::Null;
+    };
+    let renamed = args.iter().map(|(k, v)| {
+        let key = match k.as_str() {
+            "toolSummary" => "description".to_string(),
+            "CommandLine" => "command".to_string(),
+            k => k.to_lowercase(),
+        };
+        (key, v.clone())
+    });
+    Value::Object(renamed.collect())
 }
 
 /// Text John or the agent wrote; not the harness's own markup (command
@@ -874,6 +961,40 @@ mod tests {
         assert_eq!(suggestion("no prompt here"), None);
         // A 2 inside a colour isn't dim.
         assert_eq!(suggestion(&claude_screen("\x1b[38;2;2;2;2mtyped")), None);
+    }
+
+    /// Steps of a real Antigravity `transcript_full.jsonl`.
+    const AGY_LOG: &str = concat!(
+        r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-21T14:39:11Z","content":"<USER_REQUEST>\nRun 'ls' with the shell tool, then reply with one word.\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nThe current local time is: 2026-11-21T09:39:11-05:00.\n</ADDITIONAL_METADATA>"}"#,
+        "\n",
+        r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-21T14:39:11Z","model":"gemini-3.8-flash-low","input_tokens":8761,"cache_read_tokens":0,"output_tokens":34,"tool_calls":[{"name":"run_command","args":{"CommandLine":"ls","WaitMsBeforeAsync":5000,"toolSummary":"Run ls"}},{"name":"read_file","args":{"Path":"/r/a.txt"}}]}"#,
+        "\n",
+        r#"{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-21T14:39:13Z","content":"Command exited with code 0.\n\nCommand output:\na.txt\r\n"}"#,
+        "\n",
+        r#"{"step_index":3,"source":"SYSTEM","type":"ERROR_MESSAGE","status":"DONE","created_at":"2026-11-21T14:39:13Z","error":"UNAVAILABLE"}"#,
+        "\n",
+        r#"{"step_index":4,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-21T14:39:13Z","model":"claude-sonnet-4-6","input_tokens":2164,"cache_read_tokens":6720,"output_tokens":1,"content":"Done"}"#,
+        "\n",
+    );
+
+    #[test]
+    fn agy_logs_give_requests_responses_and_tool_calls() {
+        assert_eq!(
+            entries(AGY_LOG, "agy"),
+            vec![
+                (
+                    "user",
+                    "Run 'ls' with the shell tool, then reply with one word.".to_string()
+                ),
+                ("tool", "run_command: Run ls".to_string()),
+                ("tool", "read_file: /r/a.txt".to_string()),
+                ("assistant", "Done".to_string()),
+            ]
+        );
+        assert_eq!(tokens(AGY_LOG, "agy"), Some(2164 + 6720 + 1));
+        assert_eq!(model(AGY_LOG, "agy").as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(title(AGY_LOG, "agy"), None);
+        assert_eq!(wake(AGY_LOG, "agy", 0), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Agent sessions. Each task records its agent's session ID
-//! (`agent_session`) so an ended task can be resumed in a new tab. Both
-//! harnesses keep sessions per working directory, which is why a resume
+//! (`agent_session`) so an ended task can be resumed in a new tab. Every
+//! harness keeps sessions per working directory, which is why a resume
 //! recreates the worktree at the same path.
 
 use std::fmt::Write as _;
@@ -74,9 +74,34 @@ pub(crate) fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathB
     }
 }
 
+/// Antigravity's data folder on this host. It has no profile variable, so
+/// both profiles share it.
+fn agy_dir() -> PathBuf {
+    home().join(".gemini/antigravity-cli")
+}
+
+/// The conversation Antigravity last used in `worktree`, from its
+/// `cache/last_conversations.json` (folder, by real path, to conversation
+/// ID).
+fn agy_last_conversation(worktree: &str) -> Option<String> {
+    let text = std::fs::read_to_string(agy_dir().join("cache/last_conversations.json")).ok()?;
+    let map: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let real = std::fs::canonicalize(worktree).ok();
+    let real = real.as_ref().and_then(|p| p.to_str());
+    [real, Some(worktree.trim_end_matches('/'))]
+        .into_iter()
+        .flatten()
+        .find_map(|key| map[key].as_str().filter(|id| !id.is_empty()))
+        .map(String::from)
+}
+
 /// The newest agent session for `worktree` on this host, by file time:
-/// Claude names its files `ID.jsonl`, Pi `TIMESTAMP_ID.jsonl`.
+/// Claude names its files `ID.jsonl`, Pi `TIMESTAMP_ID.jsonl`; Antigravity
+/// says which it last used there.
 pub fn newest_session_here(profile: &str, harness: &str, worktree: &str) -> Option<String> {
+    if harness == "agy" {
+        return agy_last_conversation(worktree);
+    }
     let dir = session_dir(profile, harness, worktree);
     let newest = std::fs::read_dir(dir)
         .ok()?
@@ -92,6 +117,10 @@ pub fn newest_session_here(profile: &str, harness: &str, worktree: &str) -> Opti
 /// Whether this host has the agent session for `worktree`.
 #[must_use]
 pub fn session_exists_here(profile: &str, harness: &str, worktree: &str, id: &str) -> bool {
+    // Antigravity keeps conversations in one folder, not per directory.
+    if harness == "agy" {
+        return !id.contains('/') && agy_dir().join(format!("conversations/{id}.db")).is_file();
+    }
     let dir = session_dir(profile, harness, worktree);
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|e| {

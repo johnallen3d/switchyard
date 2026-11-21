@@ -9,7 +9,7 @@ use switchyard_core::naming::{branch_and_slug, split_harness};
 use switchyard_core::rex::home;
 use switchyard_core::sessions::{new_session_id, session_exists_here, work_env};
 
-use crate::trust::{claude_config, trust_at};
+use crate::trust::{agy_settings, agy_trust_at, claude_config, trust_at};
 
 fn expand(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
@@ -211,8 +211,8 @@ pub fn run(
             // the agent in ~/dev/src/amfaro instead of the worktree.
             let (harness, model) = split_harness(harness);
             let mut agent = Command::new(harness);
-            // Both harnesses take --model (Claude an alias or ID, pi a
-            // pattern), on a resume too.
+            // Every harness takes --model (Claude an alias or ID, pi a
+            // pattern, Antigravity an ID from `agy models`), on a resume too.
             if let Some(model) = model {
                 agent.args(["--model", model]);
             }
@@ -226,6 +226,16 @@ pub fn run(
                 }
             }
             agent.envs(env.iter().map(|(k, v)| (k, v)));
+            let branch = branch_and_slug(name).0;
+            agent
+                .env("SWITCHYARD_TASK_WORKTREE", &worktree)
+                .env("SWITCHYARD_TASK_BRANCH", &branch);
+            if harness == "agy" {
+                agy_args(&mut agent, profile, &worktree, &branch, session, prompt);
+                let e = agent.current_dir(&worktree).exec();
+                eprintln!("\x1b[31m{harness}: {e}\x1b[0m");
+                fail(&worktree);
+            }
             // Spawned Claude tasks always run without permission prompts,
             // and in folders they trust.
             if harness == "claude" {
@@ -233,15 +243,9 @@ pub fn run(
                 trust_folders(&env, &expand(path), &worktree);
             }
             // On resume too: an older session never had the note.
-            let branch = branch_and_slug(name).0;
             agent
                 .arg("--append-system-prompt")
                 .arg(task_note(&worktree, &branch));
-            // `switchyard link` run from another branch also links these
-            // (see the cli's `link`).
-            agent
-                .env("SWITCHYARD_TASK_WORKTREE", &worktree)
-                .env("SWITCHYARD_TASK_BRANCH", &branch);
             let mut resuming = false;
             if let Some((id, mode)) = session {
                 let here = worktree.display().to_string();
@@ -282,12 +286,65 @@ pub fn run(
             dir
         }
     };
-    // Only reached on failure: keep a shell so the error stays readable.
+    fail(&dir)
+}
+
+/// Antigravity's arguments. It takes no system prompt, so the task note
+/// leads a new task's first message; with no prompt it waits for John's.
+/// It picks its own conversation IDs (`--conversation` resumes one), so a
+/// new task starts without one and the registry learns it later (see
+/// `sessions::newest_session_here`).
+fn agy_args(
+    agent: &mut Command,
+    profile: &str,
+    worktree: &Path,
+    branch: &str,
+    session: Option<(&str, &str)>,
+    prompt: &str,
+) {
+    agent.arg("--dangerously-skip-permissions");
+    if let Err(e) = agy_trust_at(&agy_settings(), worktree) {
+        eprintln!("\x1b[33mswitchyard: trusting the folder: {e}\x1b[0m");
+    }
+    let here = worktree.display().to_string();
+    match session {
+        Some((id, "resume")) if session_exists_here(profile, "agy", &here, id) => {
+            agent.args(["--conversation", id]);
+        }
+        Some((id, "resume")) => {
+            eprintln!("\x1b[33mswitchyard: agent session {id} is gone; starting a new one\x1b[0m");
+        }
+        _ if !prompt.is_empty() => {
+            // `=` keeps a prompt starting with - as the flag's value.
+            let rex = |k| std::env::var(k).unwrap_or_default();
+            let note = agy_note(worktree, branch, &rex("REX_SESSION"), &rex("REX_BLOCK"));
+            agent.arg(format!("--prompt-interactive={note}\n\n{prompt}"));
+        }
+        _ => {}
+    }
+}
+
+/// The task note for Antigravity, which sends no `X-Rex-*` headers to MCP
+/// servers (it doesn't expand variables in them): with the tab's Rex
+/// session and block known, it tells the agent to pass them to Switchyard's
+/// tools itself, so `message_parent` finds its task and `spawn_task` nests
+/// children under it.
+fn agy_note(worktree: &Path, branch: &str, session: &str, block: &str) -> String {
+    let note = task_note(worktree, branch);
+    if session.is_empty() || block.is_empty() {
+        return note;
+    }
+    format!(
+        "{note} Your Rex session is {session} and your Rex block is {block}. Your MCP client \
+         doesn't send them to Switchyard, so pass them yourself: as session and block to \
+         message_parent, and as parent_session and parent_block to spawn_task."
+    )
+}
+
+/// Keep a shell in `dir` so a failure stays readable; never returns.
+fn fail(dir: &Path) -> ! {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".into());
-    let err = Command::new(&shell)
-        .current_dir(&dir)
-        .env("PWD", &dir)
-        .exec();
+    let err = Command::new(&shell).current_dir(dir).env("PWD", dir).exec();
     eprintln!("switchyard: {shell}: {err}");
     std::process::exit(1);
 }
@@ -295,6 +352,15 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agy_note_adds_the_rex_location_when_known() {
+        let wt = Path::new("/r/.worktrees/x");
+        let note = agy_note(wt, "fix/x", "session:s", "block:b");
+        assert!(note.starts_with(&task_note(wt, "fix/x")));
+        assert!(note.contains("Rex session is session:s and your Rex block is block:b"));
+        assert_eq!(agy_note(wt, "fix/x", "", "block:b"), task_note(wt, "fix/x"));
+    }
 
     #[test]
     fn task_note_names_the_worktree_and_branch() {

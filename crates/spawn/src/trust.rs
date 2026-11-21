@@ -2,7 +2,8 @@
 //! so a new task doesn't stop on Claude's workspace trust dialog. That dialog
 //! comes before Claude runs hooks, so the task would show no status while it
 //! waits there. Spawned tasks already run with `--dangerously-skip-permissions`,
-//! so trusting their folder grants nothing more.
+//! so trusting their folder grants nothing more. Antigravity (`agy`) asks
+//! the same at start, and its tasks skip permissions too.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -71,8 +72,64 @@ pub fn trust_at(path: &Path, dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     if marked.is_empty() {
         return Ok(marked);
     }
-    let out = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    let tmp = path.with_file_name(format!(".claude.json.switchyard-{}", std::process::id()));
+    replace(path, &config)?;
+    Ok(marked)
+}
+
+/// Antigravity's settings: `~/.gemini/antigravity-cli/settings.json`. It
+/// has no profile variable, so both profiles share it.
+pub fn agy_settings() -> PathBuf {
+    home().join(".gemini/antigravity-cli/settings.json")
+}
+
+/// Add `dir`, by real path, to `trustedWorkspaces` in the Antigravity
+/// settings at `path` unless it is there already. Antigravity trusts only
+/// the folder it starts in, so a repository trusted doesn't cover its
+/// worktrees. Like `trust_at`, a missing or non-JSON settings file is left
+/// alone and the file is replaced atomically. Returns whether it marked it.
+///
+/// # Errors
+///
+/// Fails when the settings can't be read, or the new ones can't be written.
+pub fn agy_trust_at(path: &Path, dir: &Path) -> Result<bool, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Err(format!("{}: not JSON; left alone", path.display()));
+    };
+    if !settings.is_object() {
+        return Err(format!("{}: not a JSON object; left alone", path.display()));
+    }
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let Some(key) = dir.to_str() else {
+        return Ok(false);
+    };
+    if !settings["trustedWorkspaces"].is_array() {
+        settings["trustedWorkspaces"] = serde_json::json!([]);
+    }
+    let list = settings["trustedWorkspaces"]
+        .as_array_mut()
+        .ok_or("trustedWorkspaces isn't a list")?;
+    if list.iter().any(|d| d.as_str() == Some(key)) {
+        return Ok(false);
+    }
+    list.push(key.into());
+    replace(path, &settings)?;
+    Ok(true)
+}
+
+/// Replace the JSON file at `path` with `value` atomically, keeping its
+/// permissions, so a running agent never reads it half written.
+fn replace(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let out = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let tmp = path.with_file_name(format!(".{name}.switchyard-{}", std::process::id()));
     let write = || -> std::io::Result<()> {
         std::fs::write(&tmp, out)?;
         let mode = std::fs::metadata(path)?.permissions().mode();
@@ -82,8 +139,7 @@ pub fn trust_at(path: &Path, dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     write().map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("{}: {e}", path.display())
-    })?;
-    Ok(marked)
+    })
 }
 
 #[cfg(test)]
@@ -100,6 +156,26 @@ mod tests {
 
     fn read(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn agy_trusts_a_worktree_once_keeping_other_settings() {
+        let dir = scratch("agy");
+        let wt = dir.join("repo/.worktrees/x");
+        std::fs::create_dir_all(&wt).unwrap();
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, r#"{"theme":"dark","trustedWorkspaces":["/a"]}"#).unwrap();
+
+        assert!(agy_trust_at(&settings, &wt).unwrap());
+        assert!(!agy_trust_at(&settings, &wt).unwrap());
+
+        let v = read(&settings);
+        assert_eq!(v["theme"], "dark");
+        assert_eq!(
+            v["trustedWorkspaces"],
+            serde_json::json!(["/a", wt.to_str().unwrap()])
+        );
+        assert!(!agy_trust_at(&dir.join("missing.json"), &wt).unwrap());
     }
 
     #[test]

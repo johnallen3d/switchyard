@@ -31,7 +31,8 @@ pub struct Settings {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionSource {
-    /// claude, pi, or codex. Path is the sessions/projects directory.
+    /// claude, pi, codex, or agy. Path is the sessions/projects directory
+    /// (Antigravity's `brain`).
     pub harness: String,
     pub path: String,
     pub account: String,
@@ -204,6 +205,8 @@ fn defaults() -> Vec<SessionSource> {
             "sessions",
         ),
         ("codex", active("CODEX_HOME", "~/.codex"), "sessions"),
+        // Antigravity has no profile variable; both profiles share it.
+        ("agy", expand("~/.gemini/antigravity-cli"), "brain"),
     ]
     .into_iter()
     .map(|(harness, dir, sub)| SessionSource {
@@ -288,7 +291,7 @@ impl Collector {
         snap: &mut Snapshot,
         seen: &mut Vec<PathBuf>,
     ) {
-        if !matches!(source.harness.as_str(), "claude" | "pi" | "codex") {
+        if !matches!(source.harness.as_str(), "claude" | "pi" | "codex" | "agy") {
             snap.warnings
                 .push(format!("{host}: unsupported harness {}", source.harness));
             return;
@@ -303,6 +306,11 @@ impl Collector {
                 ));
             }
             _ => {}
+        }
+        // Antigravity writes each conversation's steps to several logs and
+        // chunks; `transcript.jsonl` has every step's usage once.
+        if source.harness == "agy" {
+            paths.retain(|p| p.file_name().is_some_and(|n| n == "transcript.jsonl"));
         }
         let mut malformed = 0;
         for path in paths {
@@ -530,10 +538,17 @@ fn parse_log(
     host: &str,
 ) -> std::io::Result<(Vec<Sample>, Vec<Quota>, usize)> {
     let file = fs::File::open(path)?;
+    // Antigravity's log is `brain/CONVERSATION/.system_generated/logs/transcript.jsonl`.
+    let named = if source.harness == "agy" {
+        path.ancestors().nth(3)
+    } else {
+        Some(path)
+    };
     let mut parser = LogParser::new(
         source,
         host,
-        path.file_stem()
+        named
+            .and_then(|p| p.file_stem())
             .unwrap_or_default()
             .to_string_lossy()
             .to_string(),
@@ -584,6 +599,10 @@ impl<'a> LogParser<'a> {
             self.push_codex(v);
             return;
         }
+        if harness == "agy" {
+            self.push_agy(v);
+            return;
+        }
         let m = &v["message"];
         let u = &m["usage"];
         if m["role"] != "assistant" || !u.is_object() || m["model"] == "<synthetic>" {
@@ -627,6 +646,35 @@ impl<'a> LogParser<'a> {
             timestamp(&v["timestamp"]),
             tokens,
             cost,
+        );
+    }
+
+    /// An Antigravity step: a model response with its own token counts,
+    /// numbered within the conversation. It runs every model under the
+    /// Antigravity plan, so that is the provider.
+    fn push_agy(&mut self, v: &Value) {
+        if v["type"] != "PLANNER_RESPONSE" {
+            return;
+        }
+        let Some(step) = v["step_index"].as_u64() else {
+            return;
+        };
+        let tokens = Tokens {
+            input: number(v, "input_tokens"),
+            output: number(v, "output_tokens"),
+            cache_read: number(v, "cache_read_tokens"),
+            cache_write: 0,
+        };
+        if tokens.total() == 0 {
+            return;
+        }
+        self.sample(
+            format!("{}:{step}", self.session),
+            v["model"].as_str().unwrap_or("unknown").into(),
+            "antigravity".into(),
+            timestamp(&v["created_at"]),
+            tokens,
+            None,
         );
     }
 
@@ -948,6 +996,34 @@ mod tests {
         assert_eq!(timestamp(&json!("2026-11-10T19:14:46.503Z")), 1_794_338_086);
         assert_eq!(timestamp(&json!(1_794_338_086_503_u64)), 1_794_338_086);
         assert_eq!(timestamp(&json!("not a date")), 0);
+    }
+
+    #[test]
+    fn agy_steps_count_once_per_model_response() {
+        let src = source("agy");
+        let mut parser = LogParser::new(&src, "mac", "conversation".into());
+        for line in [
+            r#"{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-21T14:39:11Z","content":"<USER_REQUEST>\nPRIVATE\n</USER_REQUEST>"}"#,
+            r#"{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-21T14:39:11Z","model":"gemini-3.8-flash-low","input_tokens":8761,"cache_read_tokens":0,"output_tokens":34,"tool_calls":[{"name":"run_command","args":{"CommandLine":"\"ls\""}}]}"#,
+            r#"{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-11-21T14:39:13Z","content":"Command exited with code 0."}"#,
+            r#"{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-21T14:39:13Z","model":"gemini-3.8-flash-low","input_tokens":2164,"cache_read_tokens":6720,"output_tokens":1,"content":"Done"}"#,
+        ] {
+            parser.push(&serde_json::from_str(line).unwrap());
+        }
+        let s = &parser.samples;
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[1].id, "conversation:3");
+        assert_eq!(s[1].model, "gemini-3.8-flash-low");
+        assert_eq!(s[1].provider, "antigravity");
+        assert_eq!(
+            (
+                s[1].tokens.input,
+                s[1].tokens.cache_read,
+                s[1].tokens.output
+            ),
+            (2164, 6720, 1)
+        );
+        assert_eq!(s[1].at, 1_795_271_953);
     }
 
     #[test]

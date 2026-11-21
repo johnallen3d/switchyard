@@ -4,11 +4,12 @@
 //! replacing `/` with `-`.
 
 /// The agent harnesses work can run in; the first is the default.
-pub const HARNESSES: [&str; 2] = ["claude", "pi"];
+pub const HARNESSES: [&str; 3] = ["claude", "pi", "agy"];
 
 /// The models work can pick for `harness`; the first, empty, is the
 /// harness's own default. Claude's are its aliases for the latest of each
-/// family; pi's name their provider so the pattern is unambiguous.
+/// family; pi's name their provider so the pattern is unambiguous;
+/// Antigravity's (`agy`) are IDs from `agy models`.
 #[must_use]
 pub fn models(harness: &str) -> &'static [&'static str] {
     match harness {
@@ -20,6 +21,14 @@ pub fn models(harness: &str) -> &'static [&'static str] {
             "subscription-codex/gpt-6-luna",
             "anthropic/claude-opus-5-5",
             "anthropic/claude-sonnet-5-5",
+        ],
+        "agy" => &[
+            "",
+            "gemini-3.8-flash-high",
+            "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-low",
+            "claude-opus-4-6-thinking",
+            "claude-sonnet-4-6",
         ],
         _ => &[""],
     }

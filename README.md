@@ -184,6 +184,17 @@ claude mcp add --transport http switchyard \
   --header 'X-Rex-Block: ${REX_BLOCK}'
 ```
 
+To add it to the Antigravity CLI (`agy`):
+
+```bash
+agy mcp add switchyard http://johns-macbook-pro.taila14c2.ts.net:7391/mcp
+```
+
+Antigravity sends header values as written, without expanding variables, so
+it can't send its Rex location. Spawned `agy` tasks are told their session
+and block in their first message, and pass them to `message_parent` and
+`spawn_task` themselves.
+
 `[mcp]` in the config sets `enabled` (default: on macOS only) and `port`.
 
 Development conventions and the source map are in [AGENTS.md](AGENTS.md).

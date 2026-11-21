@@ -138,7 +138,7 @@ in {
               Read-only Usage tab inputs, configured separately on each host.
               `quotas` is a list of llm-usage schema-v2 JSON paths with account
               and optional profile labels. `sessions` lists projects/sessions
-              directories with harness (claude, pi, codex), path, account and
+              directories with harness (claude, pi, codex, agy), path, account and
               optional profile. Paths may start with `~/`. Use the same account
               label on hosts sharing a login; different logins need different
               labels. Quota snapshots and copied session events are deduplicated,

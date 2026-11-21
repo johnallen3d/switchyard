@@ -262,7 +262,12 @@ fn launch_with(
     let existing = project_session(host, &project)?;
     // The agent's own session ID, chosen here so the registry knows it from
     // the start; an archive later records the newest one (after /clear).
-    let agent_session = resume.map_or_else(new_session_id, |(id, _)| id.to_string());
+    // Antigravity picks its own; the registry learns it when the task ends.
+    let agent_session = match resume {
+        Some((id, _)) => id.to_string(),
+        None if harness == "agy" => String::new(),
+        None => new_session_id(),
+    };
     let mode = if resume.is_some() { "resume" } else { "new" };
     // Work items the prompt names (`#42`, `fizzy:123`, issue and card
     // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
