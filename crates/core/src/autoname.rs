@@ -91,19 +91,14 @@ const SCHEMA: &str = r#"{
   }
 }"#;
 
-/// A name for work that has none: from `item`'s title when it can be
-/// looked up (the model's name, or the title itself slugged), otherwise
-/// from `prompt` (likewise) when it is `nameable`. None when neither gives
-/// one.
+/// A name for work that has none: from its work item's `title` when it has
+/// one (the model's name, or the title itself slugged; see `item_title`),
+/// otherwise from `prompt` (likewise) when it is `nameable`. None when
+/// neither gives one.
 #[must_use]
-pub fn name_work(
-    profile: &str,
-    item: Option<&str>,
-    tracker: &Tracker,
-    prompt: &str,
-) -> Option<String> {
-    item.and_then(|i| item_title(profile, i, tracker))
-        .and_then(|title| suggest(&title).or_else(|| title_name(&title)))
+pub fn name_work(title: Option<&str>, prompt: &str) -> Option<String> {
+    title
+        .and_then(|title| suggest(title).or_else(|| title_name(title)))
         .or_else(|| {
             Some(prompt.trim())
                 .filter(|p| nameable(p))
@@ -216,7 +211,8 @@ fn grounded(name: &str, text: &str) -> bool {
 /// A work item's title: a Fizzy card's from the Fizzy CLI, a GitHub issue
 /// or PR's from gh under the project's profile. None for refs no tracker
 /// places (a Linear key, say) or when the lookup fails.
-fn item_title(profile: &str, item: &str, tracker: &Tracker) -> Option<String> {
+#[must_use]
+pub fn item_title(profile: &str, item: &str, tracker: &Tracker) -> Option<String> {
     link_title(profile, &parse_ref(item, tracker)?, tracker)
 }
 
@@ -421,10 +417,7 @@ mod tests {
         assert!(nameable(
             "```\n/home/x/session.jsonl\n```\n\non drummer -- what is this session's title?"
         ));
-        assert_eq!(
-            name_work("personal", None, &Tracker::default(), slack),
-            None
-        );
+        assert_eq!(name_work(None, slack), None);
     }
 
     #[test]
@@ -481,7 +474,7 @@ mod tests {
             "the tab picker crashes when you archive a task while its check is still running",
             "-n starts with a dash",
         ] {
-            let name = name_work("personal", None, &fizzy, prompt);
+            let name = name_work(None, prompt);
             eprintln!("{prompt} -> {name:?}");
             assert!(name.is_some());
         }
@@ -495,7 +488,7 @@ mod tests {
         let title = item_title("personal", "#1056", &fizzy);
         eprintln!(
             "#1056 -> {title:?} -> {:?}",
-            name_work("personal", Some("#1056"), &fizzy, "")
+            name_work(title.as_deref(), "")
         );
         assert!(title.is_some());
     }

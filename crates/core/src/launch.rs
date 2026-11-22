@@ -1,7 +1,7 @@
 //! `switchyard task launch`: open a work's tab on its host and record the task.
 //! Runs on the config host (the Mac), which can reach every Rex host.
 
-use crate::autoname::name_work;
+use crate::autoname::{item_title, name_work};
 use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::images::carry;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
@@ -69,17 +69,29 @@ pub const WORK_ITEM_COMMAND: &str = "/agent-kit:issue-implement";
 /// The prompt that starts work on `item` ahead of the typed `prompt`: a
 /// work project hands it to `WORK_ITEM_COMMAND`, which knows its tracker;
 /// otherwise the agent is told the item, as its URL when the tracker can
-/// place it. A prompt that starts with a slash command keeps it first, since
+/// place it, after its `title` when that is known: the agent's own session
+/// title is made from this first message, and a bare URL makes it "Fizzy
+/// card 1052". A prompt that starts with a slash command keeps it first, since
 /// Pi runs a command only at the start of a message; the item follows.
 #[must_use]
-pub fn work_item_prompt(profile: &str, item: &str, tracker: &Tracker, prompt: &str) -> String {
+pub fn work_item_prompt(
+    profile: &str,
+    item: &str,
+    title: Option<&str>,
+    tracker: &Tracker,
+    prompt: &str,
+) -> String {
     let lead = if profile == "work" {
         format!("{WORK_ITEM_COMMAND} {item}")
     } else {
         let url = parse_ref(item, tracker)
             .and_then(|l| l["url"].as_str().map(String::from))
             .unwrap_or_default();
-        format!("Let's work on {}", if url.is_empty() { item } else { &url })
+        let item = if url.is_empty() { item } else { &url };
+        match title {
+            Some(title) => format!("Let's work on \"{title}\": {item}"),
+            None => format!("Let's work on {item}"),
+        }
     };
     match prompt {
         "" => lead,
@@ -282,11 +294,7 @@ fn launch_with(
         &tracker_or_fizzy(&project.tracker, &board),
         &project.clone_url,
     );
-    let prompt = match work_item {
-        Some(item) => work_item_prompt(&project.profile, item, &tracker, typed.trim()),
-        None => typed.clone(),
-    };
-    let name = task_name(name, &project, work_item, &tracker, typed.trim())?;
+    let (prompt, name) = prompt_and_name(name, &project, work_item, &tracker, &typed)?;
     let name = name.as_str();
     let (branch, slug) = branch_and_slug(name);
     let mut run = vec![
@@ -395,26 +403,57 @@ fn check_request<'a>(
     Ok(work_item)
 }
 
-/// `name`, or when it is empty a name made from the work item or prompt
-/// (see `autoname`), logged.
-fn task_name(
+/// The agent's first prompt and the task's name: `name`, or one made from
+/// the work item's title or the typed prompt. The title, looked up once,
+/// leads the prompt too (see `work_item_prompt`).
+fn prompt_and_name(
     name: &str,
     project: &Project,
     work_item: Option<&str>,
     tracker: &Tracker,
     typed: &str,
+) -> Result<(String, String), String> {
+    let title = work_item.and_then(|item| item_title(&project.profile, item, tracker));
+    let prompt = match work_item {
+        Some(item) => work_item_prompt(
+            &project.profile,
+            item,
+            title.as_deref(),
+            tracker,
+            typed.trim(),
+        ),
+        None => typed.to_string(),
+    };
+    let name = task_name(
+        name,
+        project,
+        work_item.is_some(),
+        title.as_deref(),
+        typed.trim(),
+    )?;
+    Ok((prompt, name))
+}
+
+/// `name`, or when it is empty a name made from the work item's title or
+/// the prompt (see `autoname`), logged.
+fn task_name(
+    name: &str,
+    project: &Project,
+    has_item: bool,
+    title: Option<&str>,
+    typed: &str,
 ) -> Result<String, String> {
     if !name.is_empty() {
         return Ok(name.to_string());
     }
-    let named = name_work(&project.profile, work_item, tracker, typed).ok_or(
+    let named = name_work(title, typed).ok_or(
         "couldn't name the work: neither its work item's title nor its prompt says enough \
          to name it from; name it yourself",
     )?;
     log(&format!(
         "named {}/{named} from its {}",
         project.name,
-        if work_item.is_some() {
+        if has_item {
             "work item or prompt"
         } else {
             "prompt"
@@ -634,28 +673,36 @@ mod tests {
     fn work_item_leads_the_prompt() {
         let fizzy = Tracker::new("fizzy:6284043/board", "");
         assert_eq!(
-            work_item_prompt("work", "ENG-12", &fizzy, ""),
+            work_item_prompt("work", "ENG-12", None, &fizzy, ""),
             "/agent-kit:issue-implement ENG-12",
         );
         assert_eq!(
-            work_item_prompt("work", "#7", &fizzy, "keep it small"),
+            work_item_prompt("work", "#7", None, &fizzy, "keep it small"),
             "/agent-kit:issue-implement #7\n\nkeep it small",
         );
-        let personal = work_item_prompt("personal", "#1045", &fizzy, "");
+        let personal = work_item_prompt("personal", "#1045", None, &fizzy, "");
         assert_eq!(
             personal,
             "Let's work on https://app.fizzy.do/6284043/cards/1045"
         );
         // The prompt's links pick the item up as a spawn link.
         assert_eq!(refs_in_text(&personal, &fizzy)[0]["ref"], "1045");
+        // Its title leads, so the agent's session title says what the work is.
+        let titled = work_item_prompt("personal", "#1052", Some("Spawn defaults"), &fizzy, "");
         assert_eq!(
-            work_item_prompt("personal", "ENG-12", &Tracker::default(), "go"),
+            titled,
+            "Let's work on \"Spawn defaults\": https://app.fizzy.do/6284043/cards/1052"
+        );
+        assert_eq!(refs_in_text(&titled, &fizzy)[0]["ref"], "1052");
+        assert_eq!(
+            work_item_prompt("personal", "ENG-12", None, &Tracker::default(), "go"),
             "Let's work on ENG-12\n\ngo"
         );
         assert_eq!(
             work_item_prompt(
                 "personal",
                 "ENG-12",
+                None,
                 &Tracker::default(),
                 "/issue-plan fast"
             ),
