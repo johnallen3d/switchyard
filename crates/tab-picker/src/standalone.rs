@@ -353,13 +353,22 @@ pub fn interrupt(p: &Pick) -> Result<String, String> {
 
 /// Resume an ended task in a new tab and show it.
 pub fn resume(p: &Pick) -> Result<(), String> {
+    let (host, session, window) = resume_here(p)?;
+    select(&host, &session, &window)
+}
+
+/// Resume an ended task in a new tab without showing it. Ok is where it
+/// opened: host, session and window.
+pub fn resume_here(p: &Pick) -> Result<(String, String, String), String> {
     let out = logged(
         "resume",
         actions::act("resume", &p.host, &p.session, &p.window),
     )?;
     let mut fields = out.trim_end().splitn(3, '\t');
     match (fields.next(), fields.next(), fields.next()) {
-        (Some(host), Some(session), Some(window)) => select(host, session, window),
+        (Some(host), Some(session), Some(window)) => {
+            Ok((host.to_string(), session.to_string(), window.to_string()))
+        }
         _ => Err(format!("resume printed no tab: {out}")),
     }
 }

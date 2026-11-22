@@ -87,7 +87,8 @@
 //! tab (see core's actions); one waiting on a prompt or idle is refused.
 //!
 //! Enter jumps to the highlighted tab (or resumes an ended task's agent in
-//! a new tab); in Inbox that's cmd+Enter, and Enter instead clears the
+//! a new tab, staying in the picker: Inbox highlights it once it lists);
+//! in Inbox that's cmd+Enter, and Enter instead clears the
 //! search, keeping the row it found highlighted. ctrl-r pins or unpins
 //! the highlighted open task (`pinned` in the registry), which puts it
 //! in a Pinned group at the top of Inbox. ctrl-z, in Inbox, opens a prompt
@@ -5398,9 +5399,19 @@ impl App {
                 note
             }
             "interrupt" => self.interrupt(&pick, &label),
+            // The picker stays: on to Inbox, highlighting the resumed task
+            // once it lists, as for a session started from Work.
             "resume" => {
                 self.busy(term, format!("Resuming {label}…"));
-                done(standalone::resume(&pick), format!("resumed {label}"))
+                match standalone::resume_here(&pick) {
+                    Ok((host, session, window)) => {
+                        self.query.clear();
+                        self.set_view(View::Inbox);
+                        self.launched = Some(((session, window), Instant::now()));
+                        (format!("resumed {label} on {host}"), false)
+                    }
+                    Err(e) => (e, true),
+                }
             }
             _ => {
                 let r = standalone::go(&pick);
