@@ -17,7 +17,7 @@
 //!
 //!   switchyard-server archives a task on its own once its work lands
 //!   upstream (its PR merged, or its commits pushed to the default branch)
-//!   and its agent has gone quiet; see `auto_archive`.
+//!   and its agent has gone quiet, or its tab was closed; see `auto_archive`.
 //!
 //!   Both also work on an ended task whose tab was closed without an
 //!   archive, which leaves its worktree behind: they remove the worktree
@@ -778,14 +778,15 @@ fn archive_worktree(
 pub const AUTO_ARCHIVE_IDLE_SECS: u64 = 300;
 
 /// Whether reconciled task `t` (as `reconcile_tasks` returns it, with its
-/// unsaved fields) is due to be archived on its own at `now`: it is open
-/// and not pinned, has its own clean worktree, its work has landed (a PR
-/// GitHub reported merged with the branch head as its head, or the branch
-/// head in the default branch, local or origin's, as after a direct push),
-/// the branch head has moved since a resume (`resume_head`), and its agent is neither working,
+/// unsaved fields) is due to be archived on its own at `now`: it is open,
+/// or ended with only its tab closed, and not pinned, has its own clean
+/// worktree, its work has landed (a PR GitHub reported merged with the
+/// branch head as its head, or the branch head in the default branch, local
+/// or origin's, as after a direct push), the branch head has moved since a
+/// resume (`resume_head`), and, when open, its agent is neither working,
 /// blocked nor scheduled, and hasn't changed state for
-/// `AUTO_ARCHIVE_IDLE_SECS`. Closed cards alone don't count: only the work
-/// itself landing does.
+/// `AUTO_ARCHIVE_IDLE_SECS`. A closed tab has no agent left to wait for.
+/// Closed cards alone don't count: only the work itself landing does.
 #[must_use]
 pub fn auto_archivable(t: &serde_json::Value, now: u64) -> bool {
     let s = |k: &str| t[k].as_str().unwrap_or("");
@@ -796,9 +797,11 @@ pub fn auto_archivable(t: &serde_json::Value, now: u64) -> bool {
     // A resumed task: only work landed since the resume counts.
     let moved =
         s("resume_head").is_empty() || (!head.is_empty() && !s("resume_head").starts_with(head));
-    let quiet = !matches!(s("status"), "working" | "blocked" | "scheduled")
-        && now.saturating_sub(t["status_at"].as_u64().unwrap_or(0)) >= AUTO_ARCHIVE_IDLE_SECS;
-    t["ended_at"].is_null()
+    let open = t["ended_at"].is_null();
+    let quiet = !open
+        || !matches!(s("status"), "working" | "blocked" | "scheduled")
+            && now.saturating_sub(t["status_at"].as_u64().unwrap_or(0)) >= AUTO_ARCHIVE_IDLE_SECS;
+    (open || s("ended_reason") == "tab closed")
         && !t["pinned"].as_bool().unwrap_or(false)
         && own_worktree
         && t["dirty_count"].as_u64() == Some(0)
@@ -1175,6 +1178,22 @@ mod tests {
         assert!(!auto_archivable(&pr, now));
         pr["links"][0]["head"] = serde_json::Value::Null;
         assert!(!auto_archivable(&pr, now));
+        // A task whose tab was closed has no agent to wait for: its stale
+        // status doesn't matter, but the rest still does.
+        let closed = |reason: &str, status: &str| {
+            let mut t = with("ended_at", 1.into());
+            t["ended_reason"] = reason.into();
+            t["status"] = status.into();
+            t["status_at"] = now.into();
+            t
+        };
+        assert!(auto_archivable(&closed("tab closed", "working"), now));
+        let mut dirty = closed("tab closed", "idle");
+        dirty["dirty_count"] = 1.into();
+        assert!(!auto_archivable(&dirty, now));
+        let mut unmerged = closed("tab closed", "idle");
+        unmerged["branch_merged"] = "unmerged".into();
+        assert!(!auto_archivable(&unmerged, now));
         // A resumed task waits for its head to move from where it resumed.
         assert!(auto_archivable(
             &with("resume_head", "0000aaaa".into()),
@@ -1192,6 +1211,8 @@ mod tests {
             with("worktree", "/r".into()),
             with("pinned", true.into()),
             with("ended_at", 1.into()),
+            closed("worktree removed", "idle"),
+            closed("archived", "idle"),
             with("status", "working".into()),
             with("status", "blocked".into()),
             with("status", "scheduled".into()),
