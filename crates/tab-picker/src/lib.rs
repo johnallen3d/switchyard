@@ -47,7 +47,7 @@
 //!   compact rows), and the right side shows the highlighted row: its name,
 //!   work items and host over its whole status message, the agent's
 //!   transcript, live, and the reply box. ctrl-s collapses the sidebar, and
-//!   typing to search brings it back. Narrower, a preview under the list
+//!   `/` to search brings it back. Narrower, a preview under the list
 //!   shows the transcript, and ctrl-s expands it over the list. ctrl-l
 //!   turns the transcript into the task's diff against its base branch,
 //!   then its commits, then back (see changes.rs). ctrl-u and ctrl-d go
@@ -748,6 +748,9 @@ struct App {
     /// The Archive's open project chooser; Enter picks, Escape closes it.
     projects: Option<projects::Chooser>,
     query: String,
+    /// Whether `/` has focused the search box, so letters type into it;
+    /// Escape or Enter leaves it. The quick float is always searching.
+    searching: bool,
     matcher: Matcher,
     rows: Vec<Item>,
     hits: HashMap<Item, Hits>,
@@ -885,6 +888,7 @@ impl App {
             project: None,
             projects: None,
             query: String::new(),
+            searching: false,
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
             rows: Vec::new(),
             hits: HashMap::new(),
@@ -1042,14 +1046,16 @@ impl App {
         }
         self.follow = true;
         self.query.clear();
+        self.searching = false;
         // cmd+i shows Inbox, where the tab is a row: from Archive or Usage,
         // switch there first, or the highlight lands on nothing visible.
         self.set_view(View::Inbox);
         self.refilter_to(Some(self.current.clone()));
     }
 
-    /// Empty the search, keeping the highlighted row.
+    /// Empty and leave the search, keeping the highlighted row.
     fn clear_search(&mut self) {
+        self.searching = false;
         if !self.query.is_empty() {
             self.query.clear();
             self.refilter();
@@ -2066,6 +2072,8 @@ impl App {
         self.close_reply();
         self.view = view;
         self.usage.offset = 0;
+        // A search typed here carries over; an empty one ends.
+        self.searching &= !self.query.is_empty();
         self.refilter();
     }
 
@@ -2497,6 +2505,7 @@ impl App {
     // ------------------------------------------------------------ keys
 
     fn key(&mut self, k: KeyEvent) {
+        let k = self.list_letter(k);
         if let Some(h) = &mut self.help {
             if h.key(k) == help::Outcome::Close {
                 self.help = None;
@@ -2549,6 +2558,27 @@ impl App {
             return;
         }
         self.list_key(k);
+    }
+
+    /// Plain `j` and `k` act as ctrl-j and ctrl-k while the list has the
+    /// keys: no search focused, and no float, prompt or reply box open.
+    fn list_letter(&self, k: KeyEvent) -> KeyEvent {
+        let plain = k.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        if !plain
+            || !matches!(k.code, KeyCode::Char('j' | 'k'))
+            || self.searching
+            || self.quick
+            || self.help.is_some()
+            || self.scrollback.is_some()
+            || self.items.is_some()
+            || self.projects.is_some()
+            || self.snooze.is_some()
+            || self.reply.is_some()
+            || (self.view == View::Work && self.work.chooser.is_some())
+        {
+            return k;
+        }
+        KeyEvent::new(k.code, KeyModifiers::CONTROL)
     }
 
     /// ctrl-x: arm the selected task's archive, or move an armed archive of
@@ -2723,10 +2753,15 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
+            KeyCode::Esc if self.searching => self.clear_search(),
             KeyCode::Char('?') if !ctrl && !alt => self.help = Some(help::Help::default()),
-            KeyCode::Char(c) if !ctrl && !alt => {
+            // `/` focuses the search box; until then, letters do nothing.
+            KeyCode::Char('/') if !ctrl && !alt && !self.searching => {
                 // Searching brings back the list it searches.
                 self.expanded = false;
+                self.searching = true;
+            }
+            KeyCode::Char(c) if !ctrl && !alt && self.searching => {
                 self.query.push(c);
                 self.moved();
                 self.refilter();
@@ -3716,6 +3751,8 @@ impl App {
     fn draw_search(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         let typing = !self.query.is_empty();
+        // The box lights up, with the cursor, only once `/` focuses it.
+        let focused = self.searching || self.quick;
         let placeholder = match self.view {
             View::Inbox if self.sidebar => "Search",
             View::Inbox if self.quick => "Jump to a tab or agent",
@@ -3726,7 +3763,7 @@ impl App {
             View::Work => "Search open work items",
         };
         if matches!(self.view, View::Usage | View::Work) {
-            draw::search(f, p, area, &self.query, placeholder, typing, true);
+            draw::search(f, p, area, &self.query, placeholder, focused, focused);
             return;
         }
         let shown = self.rows.iter().filter(|r| selectable(r)).count();
@@ -3804,7 +3841,7 @@ impl App {
         } else {
             preview::clip_width(placeholder, room)
         };
-        draw::search(f, p, area, &self.query, &placeholder, typing, true);
+        draw::search(f, p, area, &self.query, &placeholder, focused, focused);
         f.render_widget(Line::from(right).right_aligned(), area);
     }
 
@@ -4606,10 +4643,11 @@ impl App {
             sections.push(Section::new(
                 "Moving and searching",
                 &[
-                    ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
+                    ("↑↓ j k ⌃P ⌃N ⌃K ⌃J", "move"),
                     ("PgUp PgDn", "page"),
                     ("Home End", "first, last"),
-                    ("type", "search titles and numbers"),
+                    ("/", "search titles and numbers"),
+                    ("esc", "leave the search"),
                     ("⌃W ⌥⌫", "delete a word"),
                 ],
             ));
@@ -4617,7 +4655,7 @@ impl App {
             sections.push(Section::new(
                 "Usage",
                 &[
-                    ("↑↓ ⌃P ⌃N", "scroll"),
+                    ("↑↓ j k ⌃P ⌃N", "scroll"),
                     ("PgUp PgDn", "page"),
                     ("Home End", "top, bottom"),
                 ],
@@ -4741,7 +4779,7 @@ impl App {
     /// The help float's keys for moving and searching in this view.
     fn moving_keys(&self) -> Vec<(&'static str, &'static str)> {
         let mut moving = vec![
-            ("↑↓ ⌃P ⌃N ⌃K ⌃J", "move"),
+            ("↑↓ j k ⌃P ⌃N ⌃K ⌃J", "move"),
             ("PgUp PgDn", "page"),
             ("Home End", "first, last"),
         ];
@@ -4752,11 +4790,16 @@ impl App {
         if self.view == View::Archive {
             moving.extend([
                 ("⌃D ⌃U", "half a page"),
-                ("type", "search"),
+                ("/", "search"),
+                ("esc", "leave the search"),
                 ("⌃W ⌥⌫", "delete a word"),
             ]);
         } else {
-            moving.extend([("type", "search"), ("⌃W ⌥⌫", "delete a word")]);
+            moving.extend([
+                ("/", "search"),
+                ("esc", "leave the search"),
+                ("⌃W ⌥⌫", "delete a word"),
+            ]);
             // Inbox's ctrl-u scrolls the transcript instead.
             if self.view != View::Inbox {
                 moving.push(("⌃U", "clear the search"));
@@ -5899,6 +5942,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                 }
             }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                let k = app.list_letter(k);
                 if app.standalone_key(k, term) {
                     continue;
                 }
@@ -6084,13 +6128,17 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_l_turns_the_preview_and_letters_search() {
+    fn ctrl_l_turns_the_preview_and_slash_searches() {
         let mut app = inbox();
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        // Letters do nothing until `/` focuses the search box.
+        app.key(plain(KeyCode::Char('h')));
+        assert!(!app.searching && app.query.is_empty());
+        app.key(plain(KeyCode::Char('/')));
         app.key(plain(KeyCode::Char('h')));
         app.key(plain(KeyCode::Char('l')));
-        assert!(app.view == View::Inbox && app.query == "hl");
+        assert!(app.view == View::Inbox && app.searching && app.query == "hl");
         // cmd+1-4 pick the view; ctrl-h and ctrl-l no longer cycle it.
         app.key(ctrl('h'));
         assert!(app.view == View::Inbox && app.query == "hl");
@@ -6100,6 +6148,24 @@ mod tests {
         assert_eq!(app.lens, changes::Lens::Commits);
         app.key(ctrl('l'));
         assert_eq!(app.lens, changes::Lens::Transcript);
+        // Escape clears and leaves the search; letters stop typing.
+        app.key(plain(KeyCode::Esc));
+        app.key(plain(KeyCode::Char('h')));
+        assert!(!app.searching && app.query.is_empty());
+        // Unfocused, j and k move as ctrl-j and ctrl-k do, wrapping.
+        let first = app.selected;
+        app.key(plain(KeyCode::Char('k')));
+        let wrapped = app.selected;
+        app.key(ctrl('j'));
+        assert_eq!(app.selected, first);
+        app.key(ctrl('k'));
+        assert_eq!(app.selected, wrapped);
+        app.key(plain(KeyCode::Char('j')));
+        assert!(app.selected == first && app.query.is_empty());
+        // Searching, they type.
+        app.key(plain(KeyCode::Char('/')));
+        app.key(plain(KeyCode::Char('j')));
+        assert_eq!(app.query, "j");
     }
 
     #[test]
@@ -7783,7 +7849,7 @@ mod tests {
                 .any(|r| r.contains("Tab to type a message") && r.contains('│')),
             "{rows:#?}"
         );
-        // ctrl-s collapses the sidebar; typing to search brings it back.
+        // ctrl-s collapses the sidebar; `/` to search brings it back.
         app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         let rows = screen(&mut app, 140);
         assert!(
@@ -7793,6 +7859,7 @@ mod tests {
             "{rows:#?}"
         );
         assert!(help_text(&app).contains("⌃S show the sidebar"));
+        app.key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
         assert!(!app.expanded && app.query == "w");
         // Too narrow, Inbox stacks the list over the reply box as before.

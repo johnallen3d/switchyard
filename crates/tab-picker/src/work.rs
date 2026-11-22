@@ -13,7 +13,7 @@
 //! Items no open task links to come first. Those an open task links to
 //! follow, dimmed and marked (`TASK_MARK`), under "With a task", each
 //! naming its task. Each row shows what the listing gave besides the title:
-//! labels, assignee and age. Typing searches titles and numbers, as in the
+//! labels, assignee and age. `/` searches titles and numbers, as in the
 //! other views.
 //!
 //! The Inbox's ctrl-b float sends an item here with Enter: the view opens
@@ -663,7 +663,7 @@ impl Work {
             KeyCode::Char('t') if ctrl => self.review(),
             KeyCode::Char('m') if ctrl => self.arm(Action::Merge),
             // Searching brings back the list it searches.
-            KeyCode::Char(_) if !ctrl => {
+            KeyCode::Char('/') if !ctrl => {
                 self.detail.expanded = false;
                 Outcome::Pass
             }
