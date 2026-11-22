@@ -511,9 +511,10 @@ pub fn item_action(
             (Action::Ready | Action::Approve | Action::Merge, _) => {
                 switchyard_core::links::forget_pr(url);
             }
-            // A closed card's column and state are cached for a few minutes
-            // (see core's cards); the next refresh should ask Fizzy at once.
-            (Action::Close, Item::Card { account, number }) => {
+            // A closed or postponed card's column and state are cached for
+            // a few minutes (see core's cards); the next refresh should ask
+            // Fizzy at once.
+            (Action::Close | Action::Postpone, Item::Card { account, number }) => {
                 switchyard_core::cards::forget(account, number);
             }
             _ => {}

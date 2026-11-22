@@ -8,7 +8,7 @@
 //! reads its description and comments here, in a scrolling reader over
 //! the float (a card, issue or PR; see core's `item_view`); `c`
 //! types a comment for a card, issue or PR, in a wrapping prompt box; `x` closes a card or
-//! an issue (not a PR); `r` marks a
+//! an issue (not a PR); `n` moves a card to Not Now; `r` marks a
 //! draft PR ready for review. Nothing mutates without its explicit key and
 //! then a confirmation naming the item (Enter or `y` runs it, anything
 //! else goes back). Escape, ctrl-c or ctrl-b again close the float; in
@@ -390,6 +390,7 @@ fn action_key(a: Action) -> (&'static str, &'static str) {
         Action::Comment => ("c", "comment"),
         Action::Close => ("x", "close"),
         Action::Ready => ("r", "mark ready"),
+        Action::Postpone => ("n", "not now"),
         // The Work view's ctrl-g and ctrl-m; the float doesn't offer them.
         Action::Approve => ("⌃G", "approve"),
         Action::Merge => ("⌃M", "squash-merge"),
@@ -501,7 +502,7 @@ impl Items {
                 return Outcome::Stay;
             }
             let why = match a {
-                Action::Comment | Action::Close if e.link.kind == "card" => {
+                Action::Comment | Action::Close | Action::Postpone if e.link.kind == "card" => {
                     format!("{}: its URL names no Fizzy account", e.name())
                 }
                 Action::Comment => format!(
@@ -516,6 +517,7 @@ impl Items {
                 Action::Ready => format!("{} isn't a PR: r marks a draft PR ready", e.name()),
                 Action::Approve => format!("{}: approve PRs from the Work view", e.name()),
                 Action::Merge => format!("{}: squash-merge PRs from the Work view", e.name()),
+                Action::Postpone => format!("{}: n moves Fizzy cards to Not Now", e.name()),
             };
             Outcome::Refuse(why)
         };
@@ -538,6 +540,7 @@ impl Items {
             KeyCode::Char('c') => want(Action::Comment, self),
             KeyCode::Char('x') if !ctrl => want(Action::Close, self),
             KeyCode::Char('r') => want(Action::Ready, self),
+            KeyCode::Char('n') if !ctrl => want(Action::Postpone, self),
             _ => Outcome::Stay,
         }
     }
@@ -685,6 +688,7 @@ impl Items {
             Action::Ready => format!("Mark {name} ready for review?"),
             Action::Approve => format!("Approve {name}?"),
             Action::Merge => format!("Squash-merge {name}?"),
+            Action::Postpone => format!("Move {name} to Not Now?"),
         })
     }
 
@@ -1131,10 +1135,30 @@ mod tests {
             press(&mut i, KeyCode::Enter),
             Outcome::Run {
                 action: Action::Close,
+                item: card.clone(),
+                body: String::new()
+            }
+        );
+        // n moves it to Not Now, asking first too.
+        let mut i = items();
+        press(&mut i, KeyCode::Down);
+        assert_eq!(i.hints()[5], ("n", "not now"));
+        press(&mut i, KeyCode::Char('n'));
+        assert_eq!(i.question().unwrap(), "Move card 1041 to Not Now?");
+        assert_eq!(
+            press(&mut i, KeyCode::Enter),
+            Outcome::Run {
+                action: Action::Postpone,
                 item: card,
                 body: String::new()
             }
         );
+        // An issue isn't a card.
+        press(&mut i, KeyCode::Down);
+        assert!(matches!(
+            press(&mut i, KeyCode::Char('n')),
+            Outcome::Refuse(_)
+        ));
     }
 
     #[test]

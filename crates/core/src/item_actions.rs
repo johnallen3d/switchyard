@@ -1,5 +1,6 @@
 //! Actions on a task's linked work items, for the tab picker: comment on
-//! a Fizzy card or a GitHub issue or PR, close a card or an issue, and mark
+//! a Fizzy card or a GitHub issue or PR, close a card or an issue, move a
+//! card to Not Now, and mark
 //! a draft PR ready for review, and approve or squash-merge a PR. (A PR
 //! isn't closed from here.)
 //!
@@ -41,6 +42,8 @@ pub enum Action {
     /// the Work view's, not offered by `Item::actions`. Its branch stays,
     /// for the task's archive to settle.
     Merge,
+    /// Move a card to Not Now (`fizzy card postpone`).
+    Postpone,
 }
 
 impl Action {
@@ -53,6 +56,7 @@ impl Action {
             Action::Ready => "mark ready",
             Action::Approve => "approve",
             Action::Merge => "squash-merge",
+            Action::Postpone => "postpone",
         }
     }
 }
@@ -112,11 +116,13 @@ impl Item {
     }
 
     /// The actions this item takes: comment on and close a card or an
-    /// issue; comment on a PR, and mark a draft one ready.
+    /// issue, and move a card to Not Now; comment on a PR, and mark a
+    /// draft one ready.
     #[must_use]
     pub fn actions(&self) -> Vec<Action> {
         match self {
-            Item::Card { .. } | Item::Issue { .. } => vec![Action::Comment, Action::Close],
+            Item::Card { .. } => vec![Action::Comment, Action::Close, Action::Postpone],
+            Item::Issue { .. } => vec![Action::Comment, Action::Close],
             Item::Pr { draft: true, .. } => vec![Action::Comment, Action::Ready],
             Item::Pr { .. } => vec![Action::Comment],
         }
@@ -178,6 +184,11 @@ fn plan(action: Action, item: &Item, body: &str) -> Result<Plan, String> {
             s(&["card", "close", number, "--json"]),
             vec![("FIZZY_PROFILE".into(), account.clone())],
         )),
+        (Action::Postpone, Item::Card { account, number }) => Ok((
+            "fizzy",
+            s(&["card", "postpone", number, "--json"]),
+            vec![("FIZZY_PROFILE".into(), account.clone())],
+        )),
         (Action::Comment, Item::Issue { repo, number }) => Ok(gh(s(&[
             "issue", "comment", number, "-R", repo, "--body", body,
         ]))),
@@ -235,6 +246,7 @@ pub fn run(action: Action, item: &Item, body: &str, profile: &str) -> Result<Str
         Action::Ready => format!("marked {name} ready for review"),
         Action::Approve => format!("approved {name}"),
         Action::Merge => format!("squash-merged {name}"),
+        Action::Postpone => format!("moved {name} to Not Now"),
     })
 }
 
@@ -403,7 +415,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c, card());
-        assert_eq!(c.actions(), [Action::Comment, Action::Close]);
+        assert_eq!(
+            c.actions(),
+            [Action::Comment, Action::Close, Action::Postpone]
+        );
         assert_eq!(c.name(), "card 1041");
         // A card without its account in a URL can't say whose profile.
         assert_eq!(Item::from_link("card", "fizzy", "1041", "", ""), None);
@@ -442,6 +457,10 @@ mod tests {
         assert_eq!(program, "fizzy");
         assert_eq!(args, ["card", "close", "1041", "--json"]);
         assert_eq!(env, [("FIZZY_PROFILE".to_string(), "6284043".to_string())]);
+        let (program, args, env) = plan(Action::Postpone, &card(), "").unwrap();
+        assert_eq!(program, "fizzy");
+        assert_eq!(args, ["card", "postpone", "1041", "--json"]);
+        assert_eq!(env[0].1, "6284043");
 
         let (_, args, env) = plan(Action::Comment, &card(), "looks good; shipping").unwrap();
         assert_eq!(
@@ -518,6 +537,7 @@ mod tests {
             "can't mark ready card 1041"
         );
         assert!(plan(Action::Close, &pr, "").is_err());
+        assert!(plan(Action::Postpone, &issue, "").is_err());
     }
 
     #[test]

@@ -30,7 +30,10 @@
 //! --approve`) and any other key disarms it. ctrl-m arms a squash-merge
 //! the same way, on a pull request that is approved with no failing or
 //! running checks (see core's `merge_blocker`); Enter asks GitHub again
-//! before merging (see core's `item_actions`). A row says what stands in
+//! before merging (see core's `item_actions`). On a Fizzy card, ctrl-x
+//! arms moving it to Done (`fizzy card close`) and ctrl-z to Not Now
+//! (`fizzy card postpone`), the same way; the list then lists the project
+//! again, without it. A row says what stands in
 //! the way: failing or running checks, or changes requested. ctrl-t
 //! reviews a pull request in tuicr, in a float over the picker (`tuicr
 //! pr`, whose `:submit` sends the review to GitHub).
@@ -167,11 +170,11 @@ pub enum Outcome {
     Scroll(Option<KeyEvent>),
     /// Open the URL in the browser here.
     Open(String),
-    /// ctrl-g or ctrl-m armed an action: the footer says what Enter will
-    /// do.
+    /// ctrl-g, ctrl-m, ctrl-x or ctrl-z armed an action: the footer says
+    /// what Enter will do.
     Arm,
-    /// Approve or squash-merge (`action`) the pull request at `url`, named
-    /// `name` (`#57`).
+    /// Approve or squash-merge (`action`) the pull request at `url`, or
+    /// close or postpone the card there, named `name` (`#57`).
     Act {
         action: Action,
         item: Item,
@@ -210,8 +213,8 @@ pub struct Work {
     pub starting: HashSet<String>,
     /// The highlighted item's side (see detail.rs).
     pub detail: Detail,
-    /// What ctrl-g or ctrl-m armed (approve or squash-merge) and on which
-    /// pull request, by URL, until the next key.
+    /// What ctrl-g, ctrl-m, ctrl-x or ctrl-z armed (approve, squash-merge,
+    /// close or postpone) and on which item, by URL, until the next key.
     pub armed: Option<(Action, String)>,
     /// The item to highlight once its listing comes (see `focus_on`).
     focus: Option<Link>,
@@ -662,6 +665,8 @@ impl Work {
             KeyCode::Char('g') if ctrl => self.arm(Action::Approve),
             KeyCode::Char('t') if ctrl => self.review(),
             KeyCode::Char('m') if ctrl => self.arm(Action::Merge),
+            KeyCode::Char('x') if ctrl => self.arm(Action::Close),
+            KeyCode::Char('z') if ctrl => self.arm(Action::Postpone),
             // Searching brings back the list it searches.
             KeyCode::Char('/') if !ctrl => {
                 self.detail.expanded = false;
@@ -711,6 +716,9 @@ impl Work {
     /// else why not. A merge waits for an approval and passing checks, as
     /// the listing last saw them.
     fn actionable(&self, action: Action) -> Result<(Item, String, String), Outcome> {
+        if matches!(action, Action::Close | Action::Postpone) {
+            return self.card_actionable(action);
+        }
         if self.kind != Kind::Prs {
             let key = if action == Action::Merge {
                 "ctrl-m squash-merges"
@@ -740,8 +748,31 @@ impl Work {
         Ok((item, pr.url.clone(), name))
     }
 
-    /// ctrl-g or ctrl-m: arm `action` on the highlighted pull request,
-    /// for Enter.
+    /// The highlighted Fizzy card, when ctrl-x or ctrl-z (`action`: close
+    /// or postpone) can move it: as an item, with its URL and `#N`; else
+    /// why not.
+    fn card_actionable(&self, action: Action) -> Result<(Item, String, String), Outcome> {
+        let key = if action == Action::Close {
+            "ctrl-x moves cards to Done"
+        } else {
+            "ctrl-z moves cards to Not Now"
+        };
+        if self.kind != Kind::Items {
+            return Err(Outcome::Refuse(format!("{key}; ctrl-f lists work items")));
+        }
+        let card = self.selected_item().ok_or(Outcome::Stay)?;
+        let name = format!("#{}", card.number);
+        let item = link_key(&card.url)
+            .and_then(|(kind, system, reference)| {
+                Item::from_link(&kind, &system, &reference, &card.url, "")
+            })
+            .filter(|i| matches!(i, Item::Card { .. }))
+            .ok_or_else(|| Outcome::Refuse(format!("{name} isn't a Fizzy card: {key}")))?;
+        Ok((item, card.url.clone(), name))
+    }
+
+    /// ctrl-g, ctrl-m, ctrl-x or ctrl-z: arm `action` on the highlighted
+    /// item, for Enter.
     fn arm(&mut self, action: Action) -> Outcome {
         match self.actionable(action) {
             Ok((_, url, _)) => {
@@ -752,8 +783,8 @@ impl Work {
         }
     }
 
-    /// Enter on an armed action: take it on the highlighted pull request
-    /// if it is the one armed (the highlight can't move while armed).
+    /// Enter on an armed action: take it on the highlighted item if it is
+    /// the one armed (the highlight can't move while armed).
     fn act(&self, armed: Option<&(Action, String)>) -> Outcome {
         let Some((action, armed_url)) = armed else {
             return Outcome::Stay;
@@ -770,9 +801,8 @@ impl Work {
         }
     }
 
-    /// The armed action and its pull request, `#N` and its title, for the
-    /// footer.
-    pub fn armed_pr(&self) -> Option<(Action, String, String)> {
+    /// The armed action and its item, `#N` and its title, for the footer.
+    pub fn armed_item(&self) -> Option<(Action, String, String)> {
         let pr = self.selected_item()?;
         let (action, url) = self.armed.as_ref()?;
         (*url == pr.url).then(|| (*action, format!("#{}", pr.number), pr.title.clone()))
@@ -866,6 +896,9 @@ impl Work {
         }
         if self.kind == Kind::Prs && self.selected_item().is_some() {
             h.push(("⌃T", "review"));
+        }
+        if self.card_actionable(Action::Close).is_ok() {
+            h.extend([("⌃X", "done"), ("⌃Z", "not now")]);
         }
         if let Some(l) = self.selected_link().filter(|l| l.kind == "pr") {
             h.push(("⌃L", self.detail.lens_for(&l).next().name()));
@@ -1620,12 +1653,12 @@ mod tests {
         w.refilter("", &[]);
         assert_eq!(w.key(ctrl_g(), 10), Outcome::Arm);
         assert_eq!(
-            w.armed_pr(),
+            w.armed_item(),
             Some((Action::Approve, "#5".into(), "PR 5".into()))
         );
         // Any other key disarms it, and Enter goes back to launching.
         w.key(key(KeyCode::Home), 10);
-        assert_eq!(w.armed_pr(), None);
+        assert_eq!(w.armed_item(), None);
         assert!(matches!(
             w.key(key(KeyCode::Enter), 10),
             Outcome::Launch { .. }
@@ -1650,8 +1683,64 @@ mod tests {
         // Moving disarms; a draft can't be armed.
         w.key(ctrl_g(), 10);
         w.key(key(KeyCode::Down), 10);
-        assert_eq!(w.armed_pr(), None);
+        assert_eq!(w.armed_item(), None);
         assert_eq!(w.key(ctrl_g(), 10), Outcome::Refuse("#4 is a draft".into()));
+    }
+
+    #[test]
+    fn ctrl_x_and_ctrl_z_move_a_card_to_done_or_not_now() {
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut w = work();
+        w.refilter("", &[]);
+        let card3 = Item::Card {
+            account: "1".into(),
+            number: "3".into(),
+        };
+        assert_eq!(w.key(ctrl('x'), 10), Outcome::Arm);
+        assert_eq!(
+            w.armed_item(),
+            Some((Action::Close, "#3".into(), "Third".into()))
+        );
+        assert_eq!(
+            w.key(key(KeyCode::Enter), 10),
+            Outcome::Act {
+                action: Action::Close,
+                item: card3.clone(),
+                url: "https://app.fizzy.do/1/cards/3".into(),
+                name: "#3".into(),
+            }
+        );
+        // ctrl-z arms Not Now; another key disarms it.
+        assert_eq!(w.key(ctrl('z'), 10), Outcome::Arm);
+        w.key(key(KeyCode::Home), 10);
+        assert_eq!(w.armed_item(), None);
+        w.key(ctrl('z'), 10);
+        assert_eq!(
+            w.key(key(KeyCode::Enter), 10),
+            Outcome::Act {
+                action: Action::Postpone,
+                item: card3,
+                url: "https://app.fizzy.do/1/cards/3".into(),
+                name: "#3".into(),
+            }
+        );
+        // GitHub issues and pull requests aren't cards.
+        w.lists.insert(
+            ("sy".into(), Kind::Items),
+            Listing::Ready(OpenItems {
+                noun: "issues",
+                items: vec![OpenItem {
+                    number: 7,
+                    url: "https://github.com/o/r/issues/7".into(),
+                    ..OpenItem::default()
+                }],
+            }),
+        );
+        w.refilter("", &[]);
+        assert!(matches!(w.key(ctrl('x'), 10), Outcome::Refuse(_)));
+        w.kind = Kind::Prs;
+        assert!(matches!(w.key(ctrl('z'), 10), Outcome::Refuse(_)));
     }
 
     #[test]
@@ -1686,7 +1775,7 @@ mod tests {
         assert!(w.hints().contains(&("⌃M", "squash-merge")));
         assert_eq!(w.key(ctrl_m(), 10), Outcome::Arm);
         assert_eq!(
-            w.armed_pr(),
+            w.armed_item(),
             Some((Action::Merge, "#5".into(), "PR 5".into()))
         );
         assert_eq!(

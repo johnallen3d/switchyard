@@ -96,7 +96,8 @@
 //! empty prompt wakes a snoozed one. Task rows show their links as badges
 //! grouped by kind. ctrl-b opens the work items float on the highlighted
 //! task's links (PRs, cards, then issues), even one: show each in the Work view or open it, read its description and comments in place, comment
-//! on a card, issue or PR, close a card or issue, mark a draft PR ready, each
+//! on a card, issue or PR, close a card or issue, move a card to Not Now,
+//! mark a draft PR ready, each
 //! mutation behind its own key and a confirmation naming the item (see
 //! items.rs).
 //!
@@ -160,6 +161,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 use switchyard_core::commands::{self, SlashCommand};
+use switchyard_core::item_actions::Action;
 use switchyard_core::rex::log;
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
@@ -715,6 +717,7 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("c", "comment on a card, issue or PR (asks first)"),
                 ("⌥⏎", "new line in a comment"),
                 ("x", "close a card or issue (asks first)"),
+                ("n", "move a card to Not Now (asks first)"),
                 ("r", "mark a draft PR ready (asks first)"),
                 ("⏎ y", "confirm; other keys go back"),
                 ("↑↓ j k", "move"),
@@ -4658,6 +4661,8 @@ impl App {
                         "arm an approved, passing pull request's squash-merge: ⏎ merges it",
                     ),
                     ("⌃T", "review a pull request in tuicr; :submit sends it"),
+                    ("⌃X", "arm moving a Fizzy card to Done: ⏎ closes it"),
+                    ("⌃Z", "arm moving a Fizzy card to Not Now: ⏎ postpones it"),
                     ("⌃S", "give the highlighted item the whole view"),
                     ("⇧↑↓", "scroll the highlighted item beside the list"),
                     ("⌃R", "refresh: list the project again"),
@@ -5032,17 +5037,22 @@ impl App {
         spans
     }
 
-    /// The footer while ctrl-g or ctrl-m has armed an approval or a
-    /// squash-merge of the Work view's highlighted pull request.
+    /// The footer while ctrl-g, ctrl-m, ctrl-x or ctrl-z has armed an
+    /// approval or a squash-merge of the Work view's highlighted pull
+    /// request, or a move of its highlighted card to Done or Not Now.
     fn armed_pr_line(&self) -> Option<Line<'static>> {
-        let (action, name, title) = self.work.armed_pr().filter(|_| self.view == View::Work)?;
+        let (action, name, title) = self.work.armed_item().filter(|_| self.view == View::Work)?;
         let p = &self.p;
         let key = Style::new().fg(p.love).add_modifier(Modifier::BOLD);
-        let verb = action.verb();
+        let what = match action {
+            Action::Close => format!(" move {name} {title} to Done"),
+            Action::Postpone => format!(" move {name} {title} to Not Now"),
+            _ => format!(" {} {name} {title}", action.verb()),
+        };
         Some(Line::from(vec![
             Span::raw(" "),
             Span::styled("⏎", key),
-            Span::styled(format!(" {verb} {name} {title}"), Style::new().fg(p.love)),
+            Span::styled(what, Style::new().fg(p.love)),
             Span::styled(" · other keys cancel", Style::new().fg(p.muted)),
         ]))
     }
@@ -5519,12 +5529,12 @@ impl App {
         true
     }
 
-    /// Approve or squash-merge a pull request the Work view lists, under
-    /// its project's profile, then list the project's pull requests again
-    /// to show it.
+    /// Approve or squash-merge a pull request the Work view lists, or move
+    /// a card it lists to Done or Not Now, under its project's profile,
+    /// then list the project again to show it.
     fn act_on_pr(
         &mut self,
-        action: switchyard_core::item_actions::Action,
+        action: Action,
         item: &switchyard_core::item_actions::Item,
         url: &str,
         name: &str,
@@ -5536,10 +5546,12 @@ impl App {
             .map(|p| p.profile.clone())
             .unwrap_or_default();
         let doing = match action {
-            switchyard_core::item_actions::Action::Merge => "Squash-merging",
-            _ => "Approving",
+            Action::Merge => format!("Squash-merging {name}"),
+            Action::Close => format!("Moving {name} to Done"),
+            Action::Postpone => format!("Moving {name} to Not Now"),
+            _ => format!("Approving {name}"),
         };
-        self.busy(term, format!("{doing} {name}…"));
+        self.busy(term, format!("{doing}…"));
         self.note = Some(
             match standalone::item_action(action, item, "", &profile, url) {
                 Ok(done) => {
