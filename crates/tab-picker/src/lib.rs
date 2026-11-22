@@ -7691,6 +7691,15 @@ mod tests {
     }
 
     #[test]
+    fn an_orphan_pick_keeps_the_slashes_in_its_window() {
+        let p = standalone::parse_pick("archive:6d//orphan:mac:/r/.worktrees/x").unwrap();
+        assert_eq!(
+            (p.session.as_str(), p.window.as_str()),
+            ("", "orphan:mac:/r/.worktrees/x")
+        );
+    }
+
+    #[test]
     fn archive_is_one_flat_list_newest_first() {
         let mut app = App::new((String::new(), String::new()), View::Archive);
         app.follow = false;

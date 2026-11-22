@@ -293,9 +293,11 @@ pub struct Pick {
     pub window: String,
 }
 
+/// The window is the rest of the pick: an orphan worktree's
+/// (`orphan:HOST:PATH`, see core's `orphans`) holds slashes.
 pub fn parse_pick(pick: &str) -> Option<Pick> {
     let (action, target) = pick.split_once(':')?;
-    let mut parts = target.split('/');
+    let mut parts = target.splitn(3, '/');
     let (host, session, window) = (parts.next()?, parts.next()?, parts.next()?);
     Some(Pick {
         action: action.to_string(),
