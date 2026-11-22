@@ -154,6 +154,10 @@ enum Adopted {
 
 /// A session spawn created for the project goes when its last tab does.
 fn kill_if_empty(host: &str, session: &str) {
+    // An orphan worktree has no session.
+    if session.is_empty() {
+        return;
+    }
     if let Ok(list) = rex_json(host, &["window", "ls", "-s", session, "--json"])
         && list["windows"]
             .as_array()
@@ -174,6 +178,11 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         .clone();
     let field = |k: &str| task[k].as_str().unwrap_or("").to_string();
     let label = format!("{}/{}", field("project"), field("name"));
+    if field("ended_reason") == "orphaned" {
+        return Err(format!(
+            "{label} is an orphan worktree with no agent session to resume; ctrl-x removes it"
+        ));
+    }
     // Tasks from before sessions were recorded: ask the host for the newest.
     let agent_session = match field("agent_session") {
         id if !id.is_empty() => id,
@@ -731,6 +740,11 @@ fn archive_worktree(
     if exists && !force && !status.is_empty() {
         return Err(uncommitted_refusal(&label, &status));
     }
+    if exists && branch.is_empty() {
+        return Err(format!(
+            "{label}: {worktree} is on a detached HEAD; check out its branch to remove it"
+        ));
+    }
     if ended && !exists {
         task["ended_reason"] = "worktree removed".into();
         save_record(task)?;
@@ -812,18 +826,50 @@ pub fn auto_archivable(t: &serde_json::Value, now: u64) -> bool {
 
 /// Archive each task in reconciled `tasks` that `auto_archivable` picks, as
 /// the tab picker's archive does (it still refuses uncommitted changes, and
-/// the task ends as "merged"). Returns each outcome, for the caller to log.
+/// the task ends as "merged"), and remove each orphan worktree that
+/// `orphans::auto_removable` picks and no Rex pane on its host sits in, the
+/// same way (`wt remove` without `--force`). Returns each outcome, for the
+/// caller to log.
 #[must_use]
 pub fn auto_archive(tasks: &[serde_json::Value]) -> Vec<Result<String, String>> {
     let now = now();
-    tasks
+    let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
+    let mut outcomes: Vec<Result<String, String>> = tasks
         .iter()
         .filter(|t| auto_archivable(t, now))
         .map(|t| {
-            let s = |k: &str| t[k].as_str().unwrap_or("");
-            run_action("archive", s("host"), s("session_id"), s("window_id"))
+            run_action(
+                "archive",
+                &s(t, "host"),
+                &s(t, "session_id"),
+                &s(t, "window_id"),
+            )
         })
-        .collect()
+        .collect();
+    let orphans: Vec<&serde_json::Value> = tasks
+        .iter()
+        .filter(|t| crate::orphans::auto_removable(t))
+        .collect();
+    let mut cwds: std::collections::HashMap<String, Option<Vec<String>>> =
+        std::collections::HashMap::new();
+    for t in orphans {
+        let host = s(t, "host");
+        let worktree = s(t, "worktree");
+        let here = cwds
+            .entry(host.clone())
+            .or_insert_with(|| crate::orphans::pane_cwds(&host));
+        match here {
+            None => outcomes.push(Err(format!(
+                "kept orphan {host}:{worktree}: can't list {host}'s panes"
+            ))),
+            Some(c) if crate::orphans::occupied(c, &worktree) => {}
+            Some(_) => outcomes.push(
+                run_action("archive", &host, "", &s(t, "window_id"))
+                    .map(|m| format!("orphan {host}:{worktree}: {m}")),
+            ),
+        }
+    }
+    outcomes
 }
 
 /// The index in `tasks` of the task an action on `window` acts on: an open
@@ -1220,5 +1266,65 @@ mod tests {
         ] {
             assert!(!auto_archivable(&t, now), "{t}");
         }
+    }
+
+    #[test]
+    fn auto_archive_removes_only_clean_landed_orphans_no_pane_is_in() {
+        use crate::orphans::{auto_removable, occupied};
+        let base = serde_json::json!({
+            "ended_at": 1,
+            "ended_reason": "orphaned",
+            "worktree_left": true,
+            "worktree": "/r/.worktrees/x",
+            "repo": "/r",
+            "branch": "feature/x",
+            "dirty_count": 0,
+            "branch_merged": "merged",
+            "branch_head": "abc123def456",
+        });
+        assert!(auto_removable(&base));
+        let with = |k: &str, v: serde_json::Value| {
+            let mut t = base.clone();
+            t[k] = v;
+            t
+        };
+        // A merged PR counts only when its head is the branch head.
+        let mut pr = with("branch_merged", "unmerged".into());
+        pr["links"] =
+            serde_json::json!([{"kind": "pr", "state": "merged", "head": "abc123def4560000"}]);
+        assert!(auto_removable(&pr));
+        pr["links"][0]["head"] = "fff".into();
+        assert!(!auto_removable(&pr));
+        // A branch with no commits of its own isn't removed, even with a
+        // merged PR at its head.
+        let mut fresh = with("branch_merged", "new".into());
+        fresh["links"] =
+            serde_json::json!([{"kind": "pr", "state": "merged", "head": "abc123def4560000"}]);
+        assert!(!auto_removable(&fresh));
+        for t in [
+            with("branch_merged", "unmerged".into()),
+            with("branch_merged", "".into()),
+            with("dirty_count", 1.into()),
+            with("dirty_count", serde_json::Value::Null),
+            with("branch", "".into()),
+            with("worktree", "/r".into()),
+            with("worktree", "/r/".into()),
+            with("worktree_left", serde_json::Value::Null),
+            with("ended_reason", "tab closed".into()),
+            with("ended_reason", "worktree removed".into()),
+        ] {
+            assert!(!auto_removable(&t), "{t}");
+        }
+        // A pane in the worktree, or under it, keeps it; a sibling doesn't.
+        let cwds = |c: &[&str]| c.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert!(occupied(&cwds(&["/r/.worktrees/x"]), "/r/.worktrees/x"));
+        assert!(occupied(
+            &cwds(&["/r/.worktrees/x/src/"]),
+            "/r/.worktrees/x/"
+        ));
+        assert!(!occupied(
+            &cwds(&["/r/.worktrees/xy", "/r"]),
+            "/r/.worktrees/x"
+        ));
     }
 }

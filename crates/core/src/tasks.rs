@@ -825,10 +825,10 @@ fn field(t: &serde_json::Value, k: &str) -> String {
     t[k].as_str().unwrap_or("").to_string()
 }
 
-/// Whether `reconcile_tasks` checks task `t`: it is open, or ended with
-/// only its tab closed.
-fn checked(t: &serde_json::Value) -> bool {
-    t["ended_at"].is_null() || t["ended_reason"].as_str() == Some("tab closed")
+/// Whether `reconcile_tasks` checks task `t`: it is open, ended with only
+/// its tab closed, or an orphan worktree (see `orphans`).
+pub(crate) fn checked(t: &serde_json::Value) -> bool {
+    t["ended_at"].is_null() || matches!(t["ended_reason"].as_str(), Some("tab closed" | "orphaned"))
 }
 
 /// A task's `HOST/WINDOW_ID`, which keys a check's worktrees and PRs.
@@ -1179,7 +1179,11 @@ fn commit_checked_at(
             let Some(newer) = newer.get(&task_key(task)) else {
                 continue;
             };
-            if !newer["ended_at"].is_null() {
+            // An orphan whose worktree the check found gone is removed,
+            // not still an orphan.
+            let orphan_gone =
+                newer["ended_reason"] == "orphaned" && task["ended_reason"] == "worktree removed";
+            if !newer["ended_at"].is_null() && !orphan_gone {
                 task["ended_at"] = newer["ended_at"].clone();
                 task["ended_reason"] = newer["ended_reason"].clone();
             }

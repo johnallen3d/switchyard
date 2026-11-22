@@ -36,7 +36,10 @@
 //!   with no agent are left out, as is the picker's own `switchyard` tab;
 //!   the quick float (cmd+k) lists them under Tabs.
 //!   Pinned tasks lead the list and Snoozed ones trail it, with the agents
-//!   scheduled to resume themselves (a timer or background job). A task an
+//!   scheduled to resume themselves (a timer or background job). Orphans
+//!   come last: worktrees no task owns (see core's `orphans`), whether
+//!   each is clean and merged, which ctrl-x removes; not in the quick
+//!   float. A task an
 //!   agent spawned (through the MCP endpoint's `spawn_task`) hangs off its
 //!   spawner's row as a small tree when both are listed (see `nest`),
 //!   folded away by default so ctrl-j and ctrl-k pass over it: the
@@ -210,10 +213,11 @@ pub(crate) fn backdrop(f: &mut Frame, p: &Palette) {
 }
 
 /// Inbox's sections, in order: Pinned, agents by status (the empty string is
-/// no known status), the tabs with no agent (quick float only), then Snoozed
-/// (which takes the scheduled agents too).
-const SECTIONS: [&str; 9] = [
-    "pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed",
+/// no known status), the tabs with no agent (quick float only), Snoozed
+/// (which takes the scheduled agents too), then Orphans: worktrees no task
+/// owns (see core's `orphans`), not in the quick float.
+const SECTIONS: [&str; 10] = [
+    "pinned", "blocked", "error", "done", "working", "idle", "", "tabs", "snoozed", "orphaned",
 ];
 
 /// How long a pin or snooze made here holds over deliveries that don't
@@ -357,6 +361,12 @@ struct Hits {
     name: Vec<usize>,
     second: Vec<usize>,
     dir: Vec<usize>,
+}
+
+/// Whether a row heads Inbox's bottom groups, Snoozed and Orphans, which
+/// wrapping passes over and the free space goes above.
+fn bottom_heading(r: &Item) -> bool {
+    matches!(r, Item::Status("snoozed" | "orphaned"))
 }
 
 /// Session and status rows are headers, not picks.
@@ -1408,9 +1418,17 @@ impl App {
     }
 
     /// Open tasks with no listed tab.
-    fn orphans(&self) -> impl Iterator<Item = Item> + '_ {
+    fn tabless(&self) -> impl Iterator<Item = Item> + '_ {
         (0..self.tasks.len())
             .filter(|&k| self.tasks[k].ended.is_none() && self.tasks[k].tab.is_none())
+            .map(Item::Task)
+    }
+
+    /// Orphan worktrees still there, for Inbox's Orphans group; none in the
+    /// quick float.
+    fn orphan_worktrees(&self) -> impl Iterator<Item = Item> + '_ {
+        (0..self.tasks.len())
+            .filter(|&k| !self.quick && self.tasks[k].is_orphan())
             .map(Item::Task)
     }
 
@@ -1732,7 +1750,9 @@ impl App {
     /// The Inbox section a row goes in (see `SECTIONS`): an agent's group,
     /// or `tabs` for a tab with no agent.
     fn section(&self, item: Item) -> &'static str {
-        if self.is_agent(item) {
+        if self.task_of(item).is_some_and(Task::is_orphan) {
+            "orphaned"
+        } else if self.is_agent(item) {
             self.agent_group(item)
         } else {
             "tabs"
@@ -1749,7 +1769,8 @@ impl App {
         let mut sections: Vec<Vec<Item>> = vec![Vec::new(); SECTIONS.len()];
         let items: Vec<Item> = (0..self.tabs.len())
             .map(Item::Tab)
-            .chain(self.orphans())
+            .chain(self.tabless())
+            .chain(self.orphan_worktrees())
             .collect();
         for item in items {
             if !self.listed(item) || !self.profile_passes(self.flat(item).work) {
@@ -1969,13 +1990,13 @@ impl App {
     }
 
     /// As `step`, but past either end of the list it wraps to the other.
-    /// In Inbox it passes over the Snoozed section (the last), rows nested
+    /// In Inbox it passes over the Snoozed and Orphans sections (the last), rows nested
     /// there included, unless nothing else is left to pick.
     fn wrap_step(&mut self, delta: isize) {
         let Some(at) = self.selected else { return };
         self.moved();
         let snoozed = if self.view == View::Inbox {
-            self.rows.iter().position(|r| *r == Item::Status("snoozed"))
+            self.rows.iter().position(bottom_heading)
         } else {
             None
         }
@@ -3817,7 +3838,7 @@ impl App {
             let listed = (0..self.tabs.len())
                 .filter(|&t| self.listed(Item::Tab(t)))
                 .count();
-            let total = listed + self.orphans().count();
+            let total = listed + self.tabless().count() + self.orphan_worktrees().count();
             (total, if total == 1 { "tab" } else { "tabs" })
         };
         if typing || shown != total {
@@ -4007,6 +4028,7 @@ impl App {
             "pinned" => (ICON_PIN, "Pinned", p.iris),
             "snoozed" => (ICON_SNOOZE, "Snoozed", p.muted),
             "tabs" => ("·", "Tabs", p.subtle),
+            "orphaned" => ("○", "Orphans", p.gold),
             _ => ("?", "No status", p.muted),
         };
         let heading = format!(" {glyph} {label} ");
@@ -4269,6 +4291,7 @@ impl App {
             // Each outcome its own glyph: merged work landed; a closed
             // task left its worktree (open) or just its tab; an archived
             // one is boxed away.
+            (Some("orphaned"), _) if t.left => ("○", p.gold, "orphan"),
             (Some(_), _) if t.left => ("○", p.gold, "closed"),
             (Some("merged"), _) => ("✓", p.iris, "merged"),
             (Some("archived" | "force-archived" | "discarded" | "force-discarded"), _) => {
@@ -4335,7 +4358,7 @@ impl App {
     /// Inbox's list as the sidebar: each tab or task on two lines (see
     /// `draw_side_row`) under the one-line status headings, scrolled to keep
     /// the highlighted row, and the heading over it, in view. When it all
-    /// fits, the Snoozed group sits at the bottom, the free space above it.
+    /// fits, the Snoozed and Orphans groups sit at the bottom, the free space above them.
     fn draw_side_list(&mut self, f: &mut Frame, area: Rect) {
         let h = area.height as usize;
         let heights: Vec<usize> = self.rows.iter().map(|r| self.side_height(r)).collect();
@@ -4357,9 +4380,9 @@ impl App {
             ..area
         };
         let tick = tick(self.started);
-        // The free space goes above Snoozed, even when it leads the list.
+        // The free space goes above Snoozed or Orphans, even when it leads the list.
         let slack = if overflow { 0 } else { h.saturating_sub(total) };
-        let snoozed = self.rows.iter().position(|r| *r == Item::Status("snoozed"));
+        let snoozed = self.rows.iter().position(bottom_heading);
         let mut y = 0;
         for (i, row) in self.rows.iter().enumerate().skip(self.offset) {
             if Some(i) == snoozed {
@@ -4692,6 +4715,8 @@ impl App {
     fn row_keys(&self) -> Vec<(&'static str, &'static str)> {
         let task = self.selected_task();
         let mut row: Vec<(&str, &str)> = match task {
+            Some(t) if t.is_orphan() && t.safe() => vec![("⌃X", "remove worktree (merged)")],
+            Some(t) if t.is_orphan() => vec![("⌃X", "remove worktree")],
             Some(t) if t.ended.is_some() && t.left && t.safe() => {
                 vec![("⏎", "resume"), ("⌃X", "remove worktree (merged)")]
             }

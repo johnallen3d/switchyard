@@ -8,7 +8,11 @@
 //! (`refresh`), rather than waiting for the registry poll.
 //! Between checks the tasks get live status from the watchers' rows.
 //! After each check, tasks whose work has landed upstream and whose agent
-//! has gone quiet are archived (core's `auto_archive`).
+//! has gone quiet are archived (core's `auto_archive`), and so are clean,
+//! landed orphan worktrees. Every `orphans::SCAN_SECS` it also scans the
+//! catalog projects for orphan worktrees, linked worktrees no task owns,
+//! and records the new ones (core's `orphans::record_orphans`), which
+//! changes the registry and so prompts the next check.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use switchyard_core::actions::auto_archive;
+use switchyard_core::orphans::{SCAN_SECS, record_orphans};
 use switchyard_core::tasks::{load_tasks, reconcile_tasks, tasks_path};
 
 use crate::state::Shared;
@@ -47,6 +52,7 @@ pub fn run(shared: &Arc<Shared>, triggers: &Receiver<&'static str>) {
     let read_at = Instant::now();
     shared.update(|s| s.set_tasks(load_tasks(), false, read_at));
     let mut why = "start";
+    let mut scanned: Option<Instant> = None;
     loop {
         let started = Instant::now();
         let got = reconcile_tasks();
@@ -58,6 +64,23 @@ pub fn run(shared: &Arc<Shared>, triggers: &Receiver<&'static str>) {
         // An archive rewrites the registry, which prompts the next check.
         for outcome in auto_archive(&checked) {
             crate::log(&format!("auto-archive: {}", outcome.unwrap_or_else(|e| e)));
+        }
+        if scanned.is_none_or(|at| at.elapsed() >= Duration::from_secs(SCAN_SECS)) {
+            scanned = Some(Instant::now());
+            match record_orphans() {
+                Ok((new, unreachable)) => {
+                    for orphan in new {
+                        crate::log(&format!("orphan worktree: {orphan}"));
+                    }
+                    if !unreachable.is_empty() {
+                        crate::log(&format!(
+                            "orphan scan: can't reach {}",
+                            unreachable.join(", ")
+                        ));
+                    }
+                }
+                Err(e) => crate::log(&format!("orphan scan: {e}")),
+            }
         }
         shared.check_wakes();
         if started.elapsed() > Duration::from_secs(5) {

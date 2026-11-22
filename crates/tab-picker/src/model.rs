@@ -433,6 +433,11 @@ impl Task {
                     .any(|l| l.kind == "pr" && l.state == "merged"))
     }
 
+    /// An orphan worktree (see core's `orphans`) that is still there.
+    pub fn is_orphan(&self) -> bool {
+        self.ended.as_deref() == Some("orphaned") && self.left
+    }
+
     /// Open and pinned.
     pub fn is_pinned(&self) -> bool {
         self.ended.is_none() && self.pinned
