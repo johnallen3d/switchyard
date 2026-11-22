@@ -578,6 +578,27 @@ fn open_children(tasks: &[serde_json::Value], window: &str) -> Vec<(String, Stri
         .collect()
 }
 
+/// Another open task on task `i`'s host whose worktree is task `i`'s, as
+/// PROJECT/NAME.
+fn worktree_user(tasks: &[serde_json::Value], i: usize) -> Option<String> {
+    let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
+    let path = |t: &serde_json::Value| s(t, "worktree").trim_end_matches('/').to_string();
+    let me = &tasks[i];
+    if path(me).is_empty() {
+        return None;
+    }
+    tasks
+        .iter()
+        .enumerate()
+        .find(|&(j, t)| {
+            j != i
+                && t["ended_at"].is_null()
+                && s(t, "host") == s(me, "host")
+                && path(t) == path(me)
+        })
+        .map(|(_, t)| format!("{}/{}", s(t, "project"), s(t, "name")))
+}
+
 fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
     if action == "resume" {
         return resume(host, window);
@@ -626,15 +647,44 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
                 "archived {label}; kept the primary checkout {worktree}"
             ))
         }
-        "archive" | "force-archive" => archive_worktree(
-            &mut tasks[i],
-            action == "force-archive",
-            host,
-            session,
-            window,
-        ),
+        // Another open task works in the same worktree (spawned on the
+        // same branch): keep it for that task, as for a primary checkout.
+        "archive" | "force-archive" => match worktree_user(&tasks, i) {
+            Some(other) => {
+                end_keeping_worktree(&mut tasks[i], host, session, window)?;
+                Ok(format!(
+                    "archived {label}; kept {worktree}, which {other} still uses"
+                ))
+            }
+            None => archive_worktree(
+                &mut tasks[i],
+                action == "force-archive",
+                host,
+                session,
+                window,
+            ),
+        },
         _ => Err(format!("unknown action {action}")),
     }
+}
+
+/// Archive `task` but leave its worktree: close its tab and end it.
+fn end_keeping_worktree(
+    task: &mut serde_json::Value,
+    host: &str,
+    session: &str,
+    window: &str,
+) -> Result<(), String> {
+    if task["ended_at"].is_null() {
+        if let Some(id) = newest_session(task) {
+            task["agent_session"] = id.into();
+        }
+        let _ = rex(host, &["window", "close", "-s", session, window]);
+        task["ended_at"] = now().into();
+    }
+    kill_if_empty(host, session);
+    task["ended_reason"] = "archived".into();
+    save_record(task)
 }
 
 /// Archive `task`, whose worktree is its own (not the primary checkout):
@@ -905,6 +955,26 @@ mod tests {
             ]
         );
         assert_eq!(open_children(&tasks, "grand"), []);
+    }
+
+    #[test]
+    fn worktree_user_is_another_open_task_in_the_same_worktree() {
+        let task = |win: &str, host: &str, wt: &str, ended: Option<u64>| {
+            serde_json::json!({"host":host,"window_id":win,"worktree":wt,
+                "project":"p","name":win,"ended_at":ended})
+        };
+        let tasks = vec![
+            task("claude", "h", "/r/.worktrees/x", None),
+            task("agy", "h", "/r/.worktrees/x/", None),
+            task("done", "h", "/r/.worktrees/x", Some(5)),
+            task("far", "m", "/r/.worktrees/y", None),
+            task("none", "h", "", None),
+        ];
+        assert_eq!(worktree_user(&tasks, 0).as_deref(), Some("p/agy"));
+        assert_eq!(worktree_user(&tasks, 1).as_deref(), Some("p/claude"));
+        assert_eq!(worktree_user(&tasks, 2).as_deref(), Some("p/claude"));
+        assert_eq!(worktree_user(&tasks, 3), None);
+        assert_eq!(worktree_user(&tasks, 4), None);
     }
 
     #[test]
