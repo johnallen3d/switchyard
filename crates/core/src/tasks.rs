@@ -552,10 +552,10 @@ pub(crate) const MERGED_SH: &str = r#"
   fi
 "#;
 
-/// The loop of `host_worktrees`' script, reading `REPO<TAB>BRANCH<TAB>WANT`
+/// The loop of `host_worktrees`' script, reading `REPO<US>BRANCH<US>WANT` (US: the unit separator, \x1f)
 /// lines from the `RSP_PAIRS` heredoc that follows it.
 const WORKTREES_LOOP: &str = r#"repos=() lists=() origins=() bases=() configs=() boards=()
-while IFS=$'\t' read -r repo branch want; do
+while IFS=$'\x1f' read -r repo branch want; do
   list= n=
   for i in "${!repos[@]}"; do
     if [ "${repos[$i]}" = "$repo" ]; then list=${lists[$i]} n=$i; break; fi
@@ -637,8 +637,11 @@ fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<
     // finishes: a check in that moment would otherwise end the task as
     // "worktree removed". With no worktree on BRANCH, the recorded one on
     // another branch counts too, as that branch: the agent renamed it, and
-    // `git branch -m` took its link config along. One line per pair:
-    // PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>BRANCH<TAB>FILE...,
+    // `git branch -m` took its link config along. The pairs go in separated
+    // by the unit separator, not tabs: bash merges adjacent tabs (IFS
+    // whitespace), so an orphan's empty branch (a detached HEAD) would shift
+    // its worktree into BRANCH and it would never be found. One line out per
+    // pair: PATH<TAB>COUNT<TAB>HEAD<TAB>MERGED<TAB>ORIGIN<TAB>LINKS<TAB>FIXES<TAB>FIZZY<TAB>BRANCH<TAB>FILE...,
     // "-<TAB>FIZZY" for no worktree, "?" for no repo. MERGED is as MERGED_SH
     // sets it; LINKS are the branch's `switchyard-link` git config values,
     // FIXES its commit message lines that may close issues, space separated;
@@ -656,7 +659,7 @@ fn host_worktrees(host: &str, pairs: &[(String, String, String)]) -> Option<Vec<
     script.push_str(FIZZY_BOARD_SH);
     script.push_str(WORKTREES_LOOP);
     for (repo, branch, worktree) in pairs {
-        let _ = writeln!(script, "{repo}\t{branch}\t{worktree}");
+        let _ = writeln!(script, "{repo}\x1f{branch}\x1f{worktree}");
     }
     script.push_str("RSP_PAIRS\n");
     let out = host_bash(host, &script).filter(|o| o.status.success())?;
@@ -1735,6 +1738,8 @@ mod tests {
         let rebasing = root.join("rebasing").to_str().unwrap().to_string();
         pairs.push((r.clone(), "rebasing".into(), rebasing.clone()));
         pairs.push((r.clone(), "rebasing".into(), String::new()));
+        // A detached orphan has no branch at all, only its worktree.
+        pairs.push((r.clone(), String::new(), rebasing.clone()));
         let got = host_worktrees(&local_label(), &pairs).unwrap();
         let w: Vec<Worktree> = got.into_iter().map(Option::unwrap).collect();
         assert_eq!(w[0].merged, "new");
@@ -1757,6 +1762,7 @@ mod tests {
             w[5].path
         );
         assert_eq!(w[6].path, "");
+        assert_eq!(w[7].path, w[5].path);
         // The repo's `.fizzy.yaml` board, with or without a worktree.
         assert!(w.iter().all(|w| w.fizzy == "6284043/b1"));
         assert!(
