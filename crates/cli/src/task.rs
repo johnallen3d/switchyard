@@ -20,7 +20,8 @@ pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
        switchyard task session-of PROFILE HARNESS WORKTREE
 
-open finds or creates the session for DIR on HOST and prints its ID.
+open finds or creates the session for DIR on HOST (auto: the catalog
+project's least busy host) and prints HOST<TAB>SESSION_ID.
 launch collects the prompt (an empty PROMPT_REF is none), leads it with
 WORK_ITEM (a work project's /agent-kit:issue-implement, otherwise the
 item's URL), opens the work's tab on HOST (auto: the catalog project's
@@ -66,7 +67,7 @@ pub fn main(args: &[&str]) -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        ["open", host, dir] => out(folders::open(host, dir)),
+        ["open", host, dir] => out(folders::open_on(host, dir).map(|(h, s)| format!("{h}\t{s}"))),
         // An empty PROMPT_REF stands for none when a WORK_ITEM follows it.
         ["launch", host, path, name, harness, rest @ ..] if rest.len() <= 2 => out(launch(
             host,

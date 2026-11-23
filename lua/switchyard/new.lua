@@ -1,8 +1,9 @@
 -- New sessions and agent work in one float, the picker of `switchyard new`: cmd+shift+n
 -- opens it as a plain session, ctrl+cmd+n as agent work (ctrl-s switches).
 -- It lists the catalog's projects and the zoxide folders of one host (ctrl-o
--- picks the host; `auto` runs agent work on the least busy dev host, and a
--- session on the focused host). The float runs on the focused session's host
+-- picks the host; `auto` runs agent work, and a catalog project's session,
+-- on the project's least busy pool host, and a folder's session on the
+-- focused host). The float runs on the focused session's host
 -- and reports its pick in the terminal title, hex encoded:
 --   rex-new:session/HOST/PATH
 --   rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]
@@ -151,8 +152,12 @@ rex.action{
       host, dir = util.unhex(host), util.unhex(dir)
       local r, err = rex.exec({ "switchyard", "task", "open", host, dir }, { env = env })
       if r == nil then error(err, 0) end
-      if not r.ok or r.stdout == "" then error(r.stderr, 0) end
-      show(ctx, host, r.stdout)
+      if not r.ok then error(r.stderr, 0) end
+      -- With host "auto", `task open` picks the host and reports it first.
+      local session_id
+      host, session_id = r.stdout:match("^(%S+)\t(%S+)$")
+      if session_id == nil then error("switchyard task open: unexpected output: " .. r.stdout, 0) end
+      show(ctx, host, session_id)
       return
     end
 

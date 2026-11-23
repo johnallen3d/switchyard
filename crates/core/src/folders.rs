@@ -4,7 +4,8 @@
 
 use std::process::{Command, Stdio};
 
-use crate::rex::{host_home, rex_json, ssh};
+use crate::hosts::{AUTO, catalog, choose_host};
+use crate::rex::{host_home, log, rex_json, ssh};
 
 pub struct Folder {
     pub path: String,
@@ -93,6 +94,34 @@ pub fn home_relative(dir: &str) -> String {
         }
     }
     dir.to_string()
+}
+
+/// `open` on `host`, or for `auto` on the host the catalog project at `dir`
+/// would launch agent work on (its pool's only host, else the least busy),
+/// with the choice logged. Returns the host and the session ID.
+///
+/// # Errors
+///
+/// Fails when `host` is `auto` and `dir` is not a catalog project or none of
+/// its hosts is reachable, or as `open` does.
+pub fn open_on(host: &str, dir: &str) -> Result<(String, String), String> {
+    let host = if host == AUTO {
+        let projects = catalog()?;
+        let project = projects
+            .iter()
+            .find(|p| p.path == dir)
+            .ok_or_else(|| format!("auto: {dir} is not a catalog project; name a host"))?;
+        let (chosen, why) = choose_host(project)?;
+        log(&format!(
+            "auto chose {chosen} for a {} session: {why}",
+            project.name
+        ));
+        chosen
+    } else {
+        host.to_string()
+    };
+    let session = open(&host, dir)?;
+    Ok((host, session))
 }
 
 /// Find or create the session named after `dir` on `host` and return its ID.

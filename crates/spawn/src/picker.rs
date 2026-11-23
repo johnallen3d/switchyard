@@ -16,7 +16,8 @@
 //!
 //! ctrl-o chooses the host (the folders' host, and where agent work runs,
 //! where `auto` picks the least busy); ctrl-s switches the kind. A session
-//! on `auto` runs on the host the float is on.
+//! on `auto` opens a catalog project on its pool's host as agent work would
+//! (reporting `auto`), and a folder on the host the float is on.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -749,12 +750,19 @@ impl App {
         }
     }
 
+    /// Where a session pick opens: `auto` for a catalog project on `auto`
+    /// (`task open` chooses from its pool), else the listed host.
+    fn session_host(&self) -> &str {
+        if self.project().is_some() && self.chosen() == AUTO {
+            AUTO
+        } else {
+            self.listed()
+        }
+    }
+
     /// The one host `auto` would use for the highlighted pick, if it is
     /// settled rather than the least busy of a pool.
     fn auto_host(&self) -> Option<String> {
-        if self.kind == Kind::Session {
-            return Some(self.here.clone());
-        }
         if self.folder().is_some() {
             return Some(self.listed().to_string());
         }
@@ -964,7 +972,7 @@ impl App {
             return String::new();
         };
         match self.kind {
-            Kind::Session => format!("session/{}/{}", hex(self.listed()), hex(&path)),
+            Kind::Session => format!("session/{}/{}", hex(self.session_host()), hex(&path)),
             Kind::Agent => {
                 let name = self.launch_name();
                 // A blank name is fine when launch can name the work.
@@ -1858,7 +1866,6 @@ impl App {
         let changed = |on: bool| Style::new().fg(if on { p.gold } else { p.text });
         let host = self.chosen();
         let host_text = match (host, self.project()) {
-            (AUTO, _) if self.kind == Kind::Session => self.here.clone(),
             (AUTO, Some(project)) => {
                 let hosts: Vec<String> = pool(project).iter().map(|h| self.host_label(h)).collect();
                 if hosts.len() == 1 {
@@ -2161,14 +2168,14 @@ fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool
         app.note = Some(("pick a project or folder first".into(), true));
         return Ok(false);
     };
-    let host = app.listed().to_string();
+    let host = app.session_host().to_string();
     app.note = Some((
         format!("Opening {} on {host}…", folders::home_relative(&path)),
         false,
     ));
     term.draw(|f| app.draw(f))?;
-    match folders::open(&host, &path) {
-        Ok(session) => {
+    match folders::open_on(&host, &path) {
+        Ok((host, session)) => {
             app.exit_note = select(&host, &session, "").err();
             Ok(true)
         }

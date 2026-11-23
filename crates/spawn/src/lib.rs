@@ -35,8 +35,9 @@
 //!   new tab.
 //! - `switchyard task open HOST DIR`: runs on the config host. Finds or
 //!   creates the session named after DIR on HOST (a ~/ path is expanded for
-//!   HOST) and prints its ID, as a session pick's action needs (see core's
-//!   `folders`).
+//!   HOST; `auto` picks from the catalog project's pool as launch does) and
+//!   prints `HOST<TAB>SESSION_ID`, as a session pick's action needs (see
+//!   core's `folders`).
 //! - `switchyard task launch HOST PATH NAME HARNESS [PROMPT_REF
 //!   [WORK_ITEM]]`: runs on the config host (the Mac), which can reach every
 //!   Rex host. HOST `auto` picks from the project's host pool (see core's
