@@ -4771,7 +4771,9 @@ impl App {
         if task.is_some_and(|t| !chooser_links(&t.links).is_empty()) {
             row.push(("⌃B", "work items: open, read, comment, close, mark ready"));
         }
-        if self.preview_want().is_some() {
+        if self.view == View::Inbox && task.is_some_and(|t| t.open_pr().is_some()) {
+            row.push(("⌃T", "review its pull request in tuicr; :submit sends it"));
+        } else if self.preview_want().is_some() {
             row.push(("⌃T", "review its changes in tuicr; y sends the review"));
         }
         if self.view == View::Inbox && self.interruptible() {
@@ -5469,10 +5471,26 @@ impl App {
         true
     }
 
-    /// ctrl-t in Inbox: review the highlighted agent's changes in tuicr, in
-    /// a float over the picker (see the CLI's review.rs), which sends the
-    /// review to the agent once John says so.
+    /// ctrl-t in Inbox: review the highlighted task's open pull request in
+    /// tuicr, whose :submit sends it to GitHub; without one, the agent's
+    /// changes, which the float sends to the agent once John says so. Both
+    /// run in a float over the picker (see the CLI's review.rs).
     fn review_task(&mut self) {
+        if let Some((profile, pr, name)) = self.selected_task().and_then(|t| {
+            let pr = t.open_pr()?;
+            let reference = if pr.url.is_empty() {
+                pr.reference.clone()
+            } else {
+                pr.url.clone()
+            };
+            Some((t.profile.clone(), reference, pr.name(None)))
+        }) {
+            self.note = Some(match standalone::review_float(&["pr", &profile, &pr]) {
+                Ok(()) => (format!("reviewing {name} in tuicr"), false),
+                Err(e) => (e, true),
+            });
+            return;
+        }
         let Some(want) = self.preview_want() else {
             self.note = Some(("highlight an agent to review its changes".into(), true));
             return;

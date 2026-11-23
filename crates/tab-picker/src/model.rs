@@ -407,6 +407,14 @@ impl Task {
         self.profile == "work"
     }
 
+    /// Its first open (or draft) GitHub pull request, which Inbox's ctrl-t
+    /// reviews in place of the checkout's changes.
+    pub fn open_pr(&self) -> Option<&Link> {
+        self.links.iter().find(|l| {
+            l.kind == "pr" && l.system == "github" && matches!(l.state.as_str(), "open" | "draft")
+        })
+    }
+
     /// Ended by an archive (or a discard, its old name) rather than by its
     /// tab closing or worktree going away.
     pub fn archived(&self) -> bool {
