@@ -115,11 +115,6 @@ fn adopt(host: &str, session: &str, window: &str) -> Result<Adopted, String> {
             .unwrap_or("")
             .to_string()
     };
-    if top != repo && branch.is_empty() {
-        return Err(format!(
-            "{top} is on a detached HEAD; check out its branch to archive it"
-        ));
-    }
     // Rex names Claude Code `claude-code` and Antigravity's CLI
     // `antigravity`; spawned tasks record `claude` and `agy`.
     let app = pane["app"].as_str().unwrap_or("");
@@ -254,12 +249,20 @@ fn branch_head(host: &str, repo: &str, branch: &str) -> Option<String> {
 
 /// The archive's check of a worktree: exit 3 when it is gone, else its
 /// `git status --porcelain` lines and a last `@STATE` line from `MERGED_SH`.
+/// With no `branch` (a detached HEAD), `MERGED_SH` checks HEAD itself, and
+/// an `@stray` line before the last says no branch or remote-tracking ref
+/// contains HEAD, so removing the worktree would lose its commits.
 fn archive_check(worktree: &str, branch: &str) -> String {
     format!(
         "cd {} 2>/dev/null || exit 3\n\
          status=$(git status --porcelain) || exit 1\n\
          [ -n \"$status\" ] && printf '%s\\n' \"$status\"\n\
-         path=$PWD\nbranch={}\n{MERGED_SH}\necho \"@$merged\"\n",
+         path=$PWD\nbranch={}\n\
+         if [ -z \"$branch\" ]; then\n\
+         wt_head=$(git rev-parse --verify --quiet HEAD) || exit 1\n\
+         [ -n \"$(git for-each-ref --count=1 --contains \"$wt_head\" refs/heads refs/remotes)\" ] || echo @stray\n\
+         fi\n\
+         {MERGED_SH}\necho \"@$merged\"\n",
         sh_quote(worktree),
         sh_quote(branch),
     )
@@ -731,6 +734,7 @@ fn archive_worktree(
         .filter(|l| !l.is_empty() && !l.starts_with('@'))
         .collect();
     let branch_merged = text.lines().any(|l| l == "@merged");
+    let stray = text.lines().any(|l| l == "@stray");
     // Safe to archive: the work is merged (its PR, or the branch
     // itself) or all its cards closed, and nothing is left uncommitted.
     let merged = exists
@@ -740,9 +744,10 @@ fn archive_worktree(
     if exists && !force && !status.is_empty() {
         return Err(uncommitted_refusal(&label, &status));
     }
-    if exists && branch.is_empty() {
+    if exists && !force && stray {
         return Err(format!(
-            "{label}: {worktree} is on a detached HEAD; check out its branch to remove it"
+            "Archive refused: {label} is on a detached HEAD with commits no branch has. \
+             Press ⌃X, Enter, Enter in the tab picker (⌘K) to remove it anyway."
         ));
     }
     if ended && !exists {
@@ -761,7 +766,14 @@ fn archive_worktree(
         let _ = rex(host, &["window", "close", "-s", session, window]);
     }
     let (note, failed) = if exists {
-        remove_worktree(host, &repo, &branch, force)?
+        // A detached HEAD has no branch to name it by: Worktrunk takes
+        // the worktree's path instead.
+        let target = if branch.is_empty() {
+            &worktree
+        } else {
+            &branch
+        };
+        remove_worktree(host, &repo, target, force)?
     } else {
         (String::new(), false)
     };
@@ -940,12 +952,13 @@ fn uncommitted_refusal(label: &str, status: &[&str]) -> String {
     )
 }
 
-/// Remove `branch`'s worktree of `repo` on `host` with Worktrunk, returning
+/// Remove the worktree of `repo` on `host` that `target` (its branch, or
+/// its path for a detached HEAD) names with Worktrunk, returning
 /// a note for the outcome (`; ...`) and whether the removal failed.
 fn remove_worktree(
     host: &str,
     repo: &str,
-    branch: &str,
+    target: &str,
     force: bool,
 ) -> Result<(String, bool), String> {
     let remove = format!(
@@ -955,7 +968,7 @@ fn remove_worktree(
         "wt -C {} remove {}{} 2>&1",
         sh_quote(repo),
         if force { "--force " } else { "" },
-        sh_quote(branch)
+        sh_quote(target)
     );
     let out = host_bash(host, &remove).ok_or_else(|| format!("{host} can't be reached"))?;
     let text = String::from_utf8_lossy(&out.stdout);
@@ -1176,9 +1189,9 @@ mod tests {
             ],
         );
         git(&wt, &["commit", "--quiet", "--allow-empty", "-m", "work"]);
-        let run = || {
+        let run_on = |branch: &str| {
             let out = Command::new("bash")
-                .args(["-c", &archive_check(wt.to_str().unwrap(), "feature/x")])
+                .args(["-c", &archive_check(wt.to_str().unwrap(), branch)])
                 .output()
                 .unwrap();
             (
@@ -1186,11 +1199,20 @@ mod tests {
                 String::from_utf8_lossy(&out.stdout).into_owned(),
             )
         };
+        let run = || run_on("feature/x");
         assert_eq!(run(), (Some(0), "@unmerged\n".into()));
         git(&repo, &["merge", "--quiet", "--ff-only", "feature/x"]);
         assert_eq!(run(), (Some(0), "@merged\n".into()));
+        // A detached HEAD whose branch is gone: HEAD itself is checked,
+        // and it is in main.
+        git(&wt, &["checkout", "--quiet", "--detach"]);
+        git(&repo, &["branch", "--quiet", "-D", "feature/x"]);
+        assert_eq!(run_on(""), (Some(0), "@merged\n".into()));
+        // A commit made on the detached HEAD is in no branch.
+        git(&wt, &["commit", "--quiet", "--allow-empty", "-m", "stray"]);
+        assert_eq!(run_on(""), (Some(0), "@stray\n@unmerged\n".into()));
         std::fs::write(wt.join("f"), "x").unwrap();
-        assert_eq!(run(), (Some(0), "?? f\n@merged\n".into()));
+        assert_eq!(run_on(""), (Some(0), "?? f\n@stray\n@unmerged\n".into()));
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(run().0, Some(3));
     }
