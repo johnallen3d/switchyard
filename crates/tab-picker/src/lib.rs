@@ -756,6 +756,9 @@ struct App {
     profile: Profile,
     /// In the archive, hide the tasks an archive ended (ctrl-f).
     kept: bool,
+    /// In the archive, a `g` was typed outside search: another jumps to
+    /// the first row, as vim's `gg` does.
+    g_typed: bool,
     /// In the archive, only this project's tasks (chosen with Tab); None
     /// lists all.
     project: Option<String>,
@@ -899,6 +902,7 @@ impl App {
             view,
             profile: Profile::All,
             kept: false,
+            g_typed: false,
             project: None,
             projects: None,
             query: String::new(),
@@ -2723,6 +2727,9 @@ impl App {
         let alt = k.modifiers.contains(KeyModifiers::ALT);
         let shift = k.modifiers.contains(KeyModifiers::SHIFT);
         let page = self.page();
+        if self.view == View::Archive && self.archive_jump(k, ctrl || alt) {
+            return;
+        }
         match k.code {
             // standalone_key acts on ctrl-r and ctrl-t.
             KeyCode::Char('z') if ctrl => self.open_snooze(),
@@ -2819,6 +2826,22 @@ impl App {
             KeyCode::End => self.edge(true),
             _ => {}
         }
+    }
+
+    /// The Archive's vim jumps: `gg` and ctrl-g to the first row, `G` to
+    /// the last. Letters only jump outside search, where they don't type.
+    /// Whether `k` was one.
+    fn archive_jump(&mut self, k: KeyEvent, modified: bool) -> bool {
+        let g_typed = std::mem::take(&mut self.g_typed);
+        match k.code {
+            KeyCode::Char('g') if k.modifiers == KeyModifiers::CONTROL => self.edge(false),
+            _ if modified || self.searching => return false,
+            KeyCode::Char('g') if g_typed => self.edge(false),
+            KeyCode::Char('g') => self.g_typed = true,
+            KeyCode::Char('G') => self.edge(true),
+            _ => return false,
+        }
+        true
     }
 
     /// How far the page keys move: a list's height in rows, less two for
@@ -4821,6 +4844,7 @@ impl App {
         if self.view == View::Archive {
             moving.extend([
                 ("⌃D ⌃U", "half a page"),
+                ("gg ⌃G G", "first, last"),
                 ("/", "search"),
                 ("esc", "leave the search"),
                 ("⌃W ⌥⌫", "delete a word"),
@@ -6575,6 +6599,49 @@ mod tests {
         app.armed = Armed::No;
         app.set_view(View::Archive);
         assert!(!app.inbox_enter(enter));
+    }
+
+    #[test]
+    fn archive_jumps_with_gg_ctrl_g_and_shift_g() {
+        let key = |app: &mut App, c, m| app.key(KeyEvent::new(KeyCode::Char(c), m));
+        let mut app = App::new((String::new(), String::new()), View::Archive);
+        app.follow = false;
+        app.deliver(|app| {
+            app.tasks = parse_tasks(
+                &serde_json::json!([
+                    {"session_id":"s", "window_id":"a", "name":"a", "host":"m4", "ended_at":50},
+                    {"session_id":"s", "window_id":"b", "name":"b", "host":"m4", "ended_at":40},
+                    {"session_id":"s", "window_id":"c", "name":"c", "host":"m4", "ended_at":30}
+                ])
+                .to_string(),
+            )
+            .unwrap();
+            app.tasks_load = Tasks::Ready;
+        });
+        assert_eq!(app.rows.len(), 3);
+        let (first, last) = (
+            app.rows.iter().position(selectable),
+            app.rows.iter().rposition(selectable),
+        );
+        key(&mut app, 'G', KeyModifiers::SHIFT);
+        assert_eq!(app.selected, last);
+        // One g waits for the second; another key in between drops it.
+        key(&mut app, 'g', KeyModifiers::NONE);
+        assert_eq!(app.selected, last);
+        key(&mut app, 'k', KeyModifiers::NONE);
+        let moved = app.selected;
+        key(&mut app, 'g', KeyModifiers::NONE);
+        assert_eq!(app.selected, moved);
+        key(&mut app, 'g', KeyModifiers::NONE);
+        assert_eq!(app.selected, first);
+        app.edge(true);
+        key(&mut app, 'g', KeyModifiers::CONTROL);
+        assert_eq!(app.selected, first);
+        // Searching, g types, and ctrl-g still jumps.
+        app.searching = true;
+        key(&mut app, 'g', KeyModifiers::NONE);
+        key(&mut app, 'g', KeyModifiers::NONE);
+        assert_eq!(app.query, "gg");
     }
 
     #[test]
