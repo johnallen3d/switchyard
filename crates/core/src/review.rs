@@ -6,8 +6,8 @@
 //! `prepare` writes a small script into a fresh temporary folder on that
 //! host, `run` runs it in the terminal, and `collect` reads back what it
 //! left and removes the folder. The script runs tuicr in the checkout on
-//! the branch's commits since its base (`main`, else `master`, else
-//! `origin/HEAD`'s branch, as core's `changes` finds it) and the working
+//! the branch's commits since its base (the nearest of local and origin's
+//! default branches, as core's `changes` finds it) and the working
 //! tree, with `--stdout`: tuicr draws on the terminal, and its `y` writes
 //! the review as Markdown to stdout and quits, which the script keeps in a
 //! file (a terminal over SSH carries stdout and the screen together).
@@ -19,6 +19,7 @@
 
 use std::process::{Command, ExitStatus};
 
+use crate::changes::BASE_SH;
 use crate::rex::{host_bash, local_label, sh_quote, ssh_tty};
 use crate::transcript::unhex;
 
@@ -38,12 +39,7 @@ fn script() -> String {
         r#"{PATH_SETUP}
 here=$(dirname "$0")
 cd "$1" || {{ echo "no checkout at $1" >"$here/stderr"; echo 1 >"$here/status"; exit 1; }}
-base=
-for b in main master; do
-  if git rev-parse -q --verify "refs/heads/$b" >/dev/null; then base=$b; break; fi
-done
-[ -n "$base" ] || base=$(git symbolic-ref -q --short refs/remotes/origin/HEAD)
-if [ -n "$base" ] && [ -n "$(git rev-list -n1 "$base..HEAD" 2>/dev/null)" ]; then
+{BASE_SH}if [ -n "$base" ] && [ "$best" -gt 0 ]; then
   set -- -r "$base..HEAD"
 else
   set --
@@ -226,6 +222,7 @@ mod tests {
         let s = script();
         assert!(s.contains("tuicr -w \"$@\" --stdout"));
         assert!(s.contains("set -- -r \"$base..HEAD\""));
+        assert!(s.contains("origin/main origin/master"));
         // It ends before the heredoc's terminator, on a line of its own.
         assert!(s.ends_with('\n'));
         assert!(!s.contains("SWITCHYARD_REVIEW"));

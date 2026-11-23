@@ -8,8 +8,10 @@
 //!
 //! `local` reads the checkout with Git, taking no optional locks so it
 //! never contends with the agent's own Git commands, and with no external
-//! diff tool and the plain `a/` and `b/` prefixes, whatever Git's config. The base is `main`,
-//! else `master`, else `origin/HEAD`'s branch; the diff runs from where the
+//! diff tool and the plain `a/` and `b/` prefixes, whatever Git's config. The base is
+//! whichever of `main`, `master`, `origin/HEAD`'s branch and origin's `main`
+//! and `master` HEAD has the fewest commits beyond, so a stale local `main`
+//! doesn't pull in the upstream work since; the diff runs from where the
 //! branch left it (the merge base) to the working tree, so uncommitted work
 //! counts, with untracked files as new ones. It returns
 //! `{base, branch, dirty, commits: [{sha, subject, at}], files: [{path,
@@ -298,31 +300,49 @@ fn read(dir: &Path) -> Result<Value, String> {
     }))
 }
 
-/// The branch to diff against: `main`, else `master`, else the branch
-/// `origin/HEAD` names.
+/// The branch to diff against: of `main`, `master`, `origin/HEAD`'s branch
+/// and origin's `main` and `master`, the one HEAD has the fewest commits
+/// beyond, so a stale local `main` loses to the origin branch the task
+/// started from; on a tie, the first of them. `BASE_SH` is the same in shell.
 fn base_branch(dir: &Path) -> Option<String> {
-    for b in ["main", "master"] {
-        if git_ok(
-            dir,
-            &[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("refs/heads/{b}"),
-            ],
-        )
-        .is_some()
-        {
-            return Some(b.to_string());
-        }
-    }
-    git_ok(
+    let origin_head = git_ok(
         dir,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     )
     .map(|s| s.trim().to_string())
-    .filter(|s| !s.is_empty())
+    .filter(|s| !s.is_empty());
+    let mut best: Option<(u64, String)> = None;
+    for b in ["main", "master"]
+        .into_iter()
+        .map(String::from)
+        .chain(origin_head)
+        .chain(
+            ["origin/main", "origin/master"]
+                .into_iter()
+                .map(String::from),
+        )
+    {
+        let Some(ahead) = git_ok(dir, &["rev-list", "--count", &format!("{b}..HEAD")])
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(n, _)| ahead < *n) {
+            best = Some((ahead, b));
+        }
+    }
+    best.map(|(_, b)| b)
 }
+
+/// Shell that sets `base` the way `base_branch` picks it, in the current
+/// checkout, or leaves it empty, for the review script.
+pub(crate) const BASE_SH: &str = r#"base=
+best=
+for b in main master $(git symbolic-ref -q --short refs/remotes/origin/HEAD) origin/main origin/master; do
+  n=$(git rev-list --count "$b..HEAD" 2>/dev/null) || continue
+  if [ -z "$base" ] || [ "$n" -lt "$best" ]; then base=$b; best=$n; fi
+done
+"#;
 
 /// The commits on HEAD that `base` lacks, newest first.
 fn commits(dir: &Path, base: &str) -> Vec<Value> {
@@ -433,6 +453,34 @@ mod tests {
         assert!(patch.contains("diff --git a/a.txt b/a.txt"), "{patch}");
         assert!(patch.contains("diff --git a/new.txt b/new.txt"), "{patch}");
         assert_eq!(v["truncated"], false);
+    }
+
+    #[test]
+    fn a_stale_local_main_loses_to_origins() {
+        let tmp = std::env::temp_dir().join(format!("switchyard-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        run(&tmp, &["init", "-q", "-b", "main"]);
+        std::fs::write(tmp.join("a.txt"), "one\n").unwrap();
+        run(&tmp, &["add", "."]);
+        run(&tmp, &["commit", "-qm", "first"]);
+        // Upstream moves on while local main stays put.
+        run(&tmp, &["switch", "-qc", "up"]);
+        std::fs::write(tmp.join("up.txt"), "upstream\n").unwrap();
+        run(&tmp, &["add", "."]);
+        run(&tmp, &["commit", "-qm", "upstream work"]);
+        run(&tmp, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        // The task branches from origin/main and changes one file.
+        run(&tmp, &["switch", "-qc", "chore/x", "origin/main"]);
+        std::fs::write(tmp.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let v = local(tmp.to_str().unwrap());
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(v["base"], "origin/main", "{v}");
+        assert_eq!(v["commits"].as_array().unwrap().len(), 0);
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 1, "{v}");
+        assert_eq!(files[0]["path"], "a.txt");
     }
 
     #[test]
