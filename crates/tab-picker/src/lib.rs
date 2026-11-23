@@ -586,9 +586,6 @@ pub(crate) fn draw_scrollback(
     sb: &mut scrollback::Scrollback,
 ) {
     let h = text.height as usize;
-    // A raised fill under the whole pane marks it as the
-    // one with the keys.
-    f.buffer_mut().set_style(screen, Style::new().bg(p.surface));
     sb.sync(lines.len(), h);
     let sel = sb.selection();
     let query = sb.query();
