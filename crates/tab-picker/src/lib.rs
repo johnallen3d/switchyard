@@ -587,16 +587,37 @@ pub(crate) fn draw_scrollback(
 ) {
     let h = text.height as usize;
     sb.sync(lines.len(), h);
-    let sel = sb.selection();
+    let sel = sb.selection().filter(|_| sb.linewise());
+    let width = |i: usize| {
+        lines
+            .get(i)
+            .map_or(0, |l| scrollback::line_text(l).chars().count())
+    };
+    let chars = sb.text_selection(width(sb.cursor));
     let query = sb.query();
     let lit = Style::new().fg(p.base).bg(p.gold);
+    let picked = Style::new().bg(p.hl_med);
+    let block = Style::new().fg(p.base).bg(p.text);
     let end = lines.len().min(sb.top + h);
     let shown: Vec<Line> = (sb.top..end)
         .map(|i| {
             let mut line = lines[i].clone();
+            let text = scrollback::line_text(&line);
             if let Some(q) = query {
-                let at = scrollback::matches(&scrollback::line_text(&line), q);
+                let at = scrollback::matches(&text, q);
                 line = scrollback::mark(line, &at, lit);
+            }
+            if let Some(((l0, c0), (l1, c1))) = chars
+                && (l0..=l1).contains(&i)
+            {
+                let len = text.chars().count();
+                let from = if i == l0 { c0 } else { 0 };
+                let to = if i == l1 { (c1 + 1).min(len) } else { len };
+                line = scrollback::mark(line, &[(from, to)], picked);
+            }
+            if i == sb.cursor {
+                let c = sb.col_on(&text);
+                line = scrollback::mark(line, &[(c, c + 1)], block);
             }
             let bg = if sel.is_some_and(|(a, b)| (a..=b).contains(&i)) {
                 Some(p.hl_med)
@@ -672,9 +693,20 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("g G Home End", "top, bottom"),
                 ("/ ?", "search forward, back"),
                 ("n N", "next, previous match"),
-                ("v V Space", "start or drop a selection"),
-                ("y ⏎", "copy and leave"),
-                ("esc", "drop selection, search, then leave"),
+                ("h l ← →", "move a char"),
+                ("w b e", "next word, word start, word end"),
+                ("W B E", "the same by blank-separated WORDs"),
+                ("0 ^ $", "line start, first non-blank, line end"),
+                ("f F t T", "to, or just before, a char on the line"),
+                ("; ,", "repeat that find, either way"),
+                ("count", "repeat a motion, as 3w (NG: line N)"),
+                ("v", "select text (again: drop it)"),
+                ("V Space", "select lines (again: drop them)"),
+                ("iw aw i\" i( …", "select a word, quote, brackets"),
+                ("y", "copy the selection, then reply"),
+                ("y + motion", "copy what it covers: yw ye y$ yiw yt)"),
+                ("yy Y ⏎", "copy the line, then reply"),
+                ("esc", "drop y, selection, search, then leave"),
                 ("q ⌃C ⌃V", "leave"),
                 ("⇥", "leave for the reply box"),
                 ("⌃S", "collapse or expand the sidebar"),
@@ -3025,14 +3057,39 @@ impl App {
                     return self.leave_scrollback();
                 };
                 let count = text.lines().count();
-                self.note = Some((
-                    format!("copied {count} line{}", if count == 1 { "" } else { "s" }),
-                    false,
-                ));
-                self.copied = Some(text);
-                self.leave_scrollback();
+                let what = format!("{count} line{}", if count == 1 { "" } else { "s" });
+                self.yanked(text, &what);
+            }
+            scrollback::Outcome::Text(text) => {
+                let count = text.lines().count();
+                let what = if count > 1 {
+                    format!("{count} lines")
+                } else {
+                    let n = text.chars().count();
+                    format!("{n} char{}", if n == 1 { "" } else { "s" })
+                };
+                self.yanked(text, &what);
             }
         }
+    }
+
+    /// Copy `text` (`what` it is, for the note) and leave scrollback for
+    /// the reply box, in Inbox, to paste it in: the one it was entered
+    /// from, else a new one on the highlighted agent. Elsewhere it leaves
+    /// for the picker.
+    fn yanked(&mut self, text: String, what: &str) {
+        self.copied = Some(text);
+        self.leave_scrollback();
+        self.note = None;
+        if self.view == View::Inbox && self.reply.is_none() {
+            self.open_reply();
+        }
+        // Why there is no reply box, if there is none, after the copy.
+        let why = self.note.take().map(|(n, _)| format!(" · {n}"));
+        self.note = Some((
+            format!("copied {what}{}", why.as_deref().unwrap_or_default()),
+            why.is_some(),
+        ));
     }
 
     /// Back to the live end of the transcript.
@@ -3739,10 +3796,10 @@ impl App {
         let Some(sb) = &self.scrollback else {
             return Vec::new();
         };
-        let label = if sb.anchor.is_some() {
-            "SCROLLBACK · SELECT"
-        } else {
-            "SCROLLBACK"
+        let label = match sb.anchor {
+            Some(a) if a.linewise => "SCROLLBACK · SELECT LINES",
+            Some(_) => "SCROLLBACK · SELECT",
+            None => "SCROLLBACK",
         };
         let mut spans = draw::pill(
             vec![Span::styled(
@@ -4957,7 +5014,14 @@ impl App {
             return f.render_widget(line, area);
         }
         let right = Span::styled(
-            format!("SCROLLBACK {}/{} ", sb.cursor + 1, sb.len()),
+            format!(
+                "{}SCROLLBACK {}/{} ",
+                Some(sb.typed())
+                    .filter(|t| !t.is_empty())
+                    .map_or_else(String::new, |t| format!("{t}  ")),
+                sb.cursor + 1,
+                sb.len()
+            ),
             Style::new().fg(p.iris),
         );
         let right_w = str_width(&right.content);
@@ -4968,12 +5032,11 @@ impl App {
                 Span::styled(note.clone(), Style::new().fg(p.love)),
             ]
         } else {
-            let select = if sb.anchor.is_some() {
-                "copy selection"
+            let mut keys = if sb.anchor.is_some() {
+                vec![("y", "copy selection", p.subtle)]
             } else {
-                "copy line"
+                vec![("yy", "copy line", p.subtle), ("v V", "select", p.subtle)]
             };
-            let mut keys = vec![("y", select, p.subtle)];
             if !sb.nav.marks.is_empty() {
                 keys.push(("[ ]", sb.nav.what, p.subtle));
             }
@@ -7532,7 +7595,7 @@ mod tests {
         }
         let text = screen(&mut app);
         assert!(
-            text.contains("copy and leave") && !text.contains("Highlighted row"),
+            text.contains("copy the line, then reply") && !text.contains("Highlighted row"),
             "{text}"
         );
         // Escape stops typing, clears the filter, then closes.
@@ -7647,12 +7710,13 @@ mod tests {
             text.contains("answer 3 ") && !text.contains("answer 44"),
             "{text}"
         );
-        app.key(plain('v'));
+        app.key(plain('V'));
         app.key(plain('j'));
         app.key(plain('j'));
         app.key(plain('y'));
         assert_eq!(app.copied.as_deref(), Some("answer 3\n\nanswer 4"));
-        assert!(app.scrollback.is_none());
+        // The copy leaves for the reply box, to paste it in.
+        assert!(app.scrollback.is_none() && app.reply.is_some());
         let text = screen(&mut app);
         assert!(
             text.contains("copied 3 lines") && text.contains("answer 44"),
@@ -7660,7 +7724,6 @@ mod tests {
         );
         // From the reply box, ctrl-v toggles scrollback and leaves the box
         // as it was.
-        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(plain('h'));
         app.key(ctrl('v'));
         assert!(app.scrollback.is_some() && app.reply.is_some());
