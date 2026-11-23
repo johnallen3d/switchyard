@@ -793,6 +793,10 @@ struct App {
     reply: Option<Reply>,
     /// The reply box as drawn while it doesn't have focus.
     idle: PromptBox,
+    /// Messages typed into the reply box but neither sent nor cleared, by
+    /// agent: leaving the box (Escape, scrollback, the list) keeps them, and
+    /// it opens on them again.
+    drafts: HashMap<Key, String>,
     /// Each agent's slash commands, by where it runs, once the reply box
     /// has been on it (None while they're being fetched), and the
     /// fetches' results.
@@ -920,6 +924,7 @@ impl App {
             snooze: None,
             reply: None,
             idle: PromptBox::new(),
+            drafts: HashMap::new(),
             commands: HashMap::new(),
             commands_tx,
             commands_rx,
@@ -2313,20 +2318,41 @@ impl App {
             return;
         }
         self.moved();
+        let mut prompt = PromptBox::new();
+        if let Some(draft) = self.drafts.get(&key) {
+            prompt.set_text(draft);
+        }
         self.reply = Some(Reply {
             key,
             label,
-            prompt: PromptBox::new(),
+            prompt,
             history: history::History::default(),
             taken: None,
         });
     }
 
-    /// Close the reply box, throwing its message away.
+    /// Close the reply box, keeping its message as the agent's draft (see
+    /// `drafts`); an empty box, or one holding only the suggestion Tab
+    /// took, drops it.
     fn close_reply(&mut self) {
         if let Some(r) = self.reply.take() {
             r.prompt.discard();
+            let text = r.prompt.text();
+            if text.is_empty() || r.taken.as_deref() == Some(&*text) {
+                self.drafts.remove(&r.key);
+            } else {
+                self.drafts.insert(r.key, r.prompt.field.lines().join("\n"));
+            }
         }
+    }
+
+    /// Close the reply box once its message is sent, dropping the draft
+    /// (`switchyard task act message` also removes the prompt file).
+    fn sent_reply(&mut self) -> Option<Reply> {
+        let r = self.reply.take()?;
+        r.prompt.discard();
+        self.drafts.remove(&r.key);
+        Some(r)
     }
 
     /// The prompt Claude Code suggests next to the reply box's agent, while
@@ -2350,7 +2376,7 @@ impl App {
     /// The reply box's Enter once the message is sent (`switchyard task act
     /// message` also removes the prompt file).
     fn finish_reply(&mut self) {
-        if let Some(r) = self.reply.take() {
+        if let Some(r) = self.sent_reply() {
             self.note = Some((format!("sent to {}", r.label), false));
         }
     }
@@ -3537,13 +3563,13 @@ impl App {
     /// Unfocused, it says what Tab would do.
     fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
         let p = self.p;
+        let blocked = self
+            .selected_item()
+            .is_some_and(|i| self.flat(i).state == "blocked");
         let unfocused = if self.reply.is_some() {
             None
         } else {
             let label = self.preview_want().map(|_| self.selected_label());
-            let blocked = self
-                .selected_item()
-                .is_some_and(|i| self.flat(i).state == "blocked");
             Some(match label {
                 Some(l) if blocked => (
                     format!("{l} is waiting on a prompt; answer it in its tab"),
@@ -3552,6 +3578,14 @@ impl App {
                 Some(l) => ("Tab to type a message".to_string(), Some(l)),
                 None => ("Highlight an agent to message it".to_string(), None),
             })
+        };
+        // Unfocused on an agent Tab would message, its draft shows.
+        let draft = match &unfocused {
+            Some((_, Some(_))) if !blocked => self
+                .selected_key()
+                .and_then(|k| self.drafts.get(&k).cloned())
+                .unwrap_or_default(),
+            _ => String::new(),
         };
         let tokens = self.tokens_label();
         let ghost = self.reply_suggestion();
@@ -3565,6 +3599,9 @@ impl App {
                 (&mut r.prompt, Some(r.label.clone()), true)
             }
             (None, Some((placeholder, label))) => {
+                if self.idle.field.lines().join("\n") != draft {
+                    self.idle.set_text(&draft);
+                }
                 self.idle.set_placeholder(&placeholder);
                 (&mut self.idle, label, false)
             }
@@ -5838,7 +5875,7 @@ impl App {
         self.busy(term, format!("sending to {label}…"));
         self.note = Some(match standalone::message(&pick, &text) {
             Ok(msg) => {
-                self.close_reply();
+                self.sent_reply();
                 (msg, false)
             }
             Err(e) => (format!("{label}: {e}"), true),
@@ -7214,6 +7251,50 @@ mod tests {
         app.key(ctrl_s);
         let sb = app.scrollback.as_ref().unwrap();
         assert!(app.expanded && sb.typing.as_ref().is_some_and(|t| t.query == "x"));
+    }
+
+    #[test]
+    fn leaving_the_reply_box_keeps_its_message_as_a_draft() {
+        let mut app = inbox_with_lifecycle();
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let text = |app: &App| app.reply.as_ref().map(|r| r.prompt.text());
+        app.open_reply();
+        app.key(key(KeyCode::Char('h')));
+        app.key(key(KeyCode::Char('i')));
+        // Escape leaves the box; Tab comes back to the message.
+        app.key(key(KeyCode::Esc));
+        assert!(app.reply.is_none());
+        app.open_reply();
+        assert_eq!(text(&app).as_deref(), Some("hi"));
+        // As does ctrl-u for scrollback; the box shows it meanwhile.
+        app.key(ctrl('u'));
+        assert!(app.reply.is_none());
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(
+            screen.contains("hi") && !screen.contains("Tab to type"),
+            "{screen}"
+        );
+        app.open_reply();
+        assert_eq!(text(&app).as_deref(), Some("hi"));
+        // ctrl-c clears it for good.
+        app.key(ctrl('c'));
+        app.key(key(KeyCode::Esc));
+        app.open_reply();
+        assert_eq!(text(&app).as_deref(), Some(""));
+        // Sending drops the draft.
+        app.reply.as_mut().unwrap().prompt.set_text("sent");
+        app.sent_reply();
+        assert!(app.drafts.is_empty());
     }
 
     #[test]
