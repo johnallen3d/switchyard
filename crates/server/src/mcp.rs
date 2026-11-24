@@ -37,7 +37,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use switchyard_core::hosts::catalog;
 use switchyard_core::launch::{Parent, Placement, launch_text};
-use switchyard_core::naming::{HARNESSES, harness_spec, models, name_char};
+use switchyard_core::naming::{
+    HARNESSES, default_harness, harness_spec, models, name_char, split_harness,
+};
 use switchyard_core::rex::local_label;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
@@ -423,7 +425,7 @@ fn tools() -> Value {
                 "properties": {
                     "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path." },
                     "name": { "type": "string", "description": "Task name, normalised as the picker does (lowercase, spaces become dashes); the branch is feature/NAME." },
-                    "harness": { "type": "string", "enum": HARNESSES, "default": HARNESSES[0] },
+                    "harness": { "type": "string", "enum": HARNESSES, "description": "Omit for the project's profile default (the config's [harnesses], else claude)." },
                     "model": { "type": "string", "description": model_help() },
                     "prompt": { "type": "string", "description": "The agent's first message." },
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
@@ -726,11 +728,30 @@ fn normalise(name: &str) -> String {
 fn model_help() -> String {
     let list = |h| models(h)[1..].join(", ");
     format!(
-        "Optional model for the harness; omit for its default. claude: {}. pi: {}. agy: {}.",
+        "Optional model for the harness; omit for its default (with no harness, the profile default's; a model alone picks the harness that lists it). claude: {}. pi: {}. agy: {}.",
         list("claude"),
         list("pi"),
         list("agy")
     )
+}
+
+/// `spawn_task`'s harness spec: the harness and model asked for, with the
+/// project's profile default (`default`) filling in what's left out. A
+/// model asked for without a harness goes with the default's harness if
+/// that lists it, else the first harness that does.
+fn spawn_harness(harness: Option<&str>, model: Option<&str>, default: &str) -> String {
+    match (harness, model) {
+        (Some(harness), model) => harness_spec(harness, model),
+        (None, Some(model)) => {
+            let default = split_harness(default).0;
+            let harness = std::iter::once(default)
+                .chain(HARNESSES)
+                .find(|h| models(h).contains(&model))
+                .unwrap_or(default);
+            harness_spec(harness, Some(model))
+        }
+        (None, None) => default.to_string(),
+    }
 }
 
 fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
@@ -739,11 +760,6 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
     let name = normalise(str_arg(args, "name")?);
     let name = name.as_str();
     let prompt = str_arg(args, "prompt")?;
-    let harness = harness_spec(
-        opt_arg(args, "harness").unwrap_or("claude"),
-        opt_arg(args, "model"),
-    );
-    let harness = harness.as_str();
     let host = opt_arg(args, "host").unwrap_or("auto");
     // Catalog projects only: a folder outside it would need its host's
     // checkout, which a remote caller can't see.
@@ -752,6 +768,12 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         .iter()
         .find(|p| p.name == project || p.path == project)
         .ok_or_else(|| format!("{project} is not a catalog project"))?;
+    let harness = spawn_harness(
+        opt_arg(args, "harness"),
+        opt_arg(args, "model"),
+        &default_harness(&found.profile),
+    );
+    let harness = harness.as_str();
     // The spawner's tab, so the picker can nest the task under it. Not
     // finding it only costs the nesting.
     let (parent_session, parent_block) = parent_location(args, caller);
@@ -788,6 +810,19 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn spawn_harness_fills_in_the_profile_default() {
+        let d = "agy:gemini-4-neon";
+        assert_eq!(super::spawn_harness(None, None, d), d);
+        assert_eq!(super::spawn_harness(Some("claude"), None, d), "claude");
+        assert_eq!(super::spawn_harness(Some("pi"), Some("x"), d), "pi:x");
+        assert_eq!(super::spawn_harness(None, Some("opus"), d), "claude:opus");
+        assert_eq!(
+            super::spawn_harness(None, Some("gemini-4-neon-xhigh"), d),
+            "agy:gemini-4-neon-xhigh"
+        );
+    }
+
     use super::*;
     use std::io::Cursor;
     use std::sync::mpsc;

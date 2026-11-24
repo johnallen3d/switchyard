@@ -2,7 +2,8 @@
 //! projects and the zoxide folders of one host, and reports a pick in the
 //! terminal title: a plain session in the highlighted folder or project
 //! (kind `session`), or agent work in a catalog project or Git folder (kind `agent`) with
-//! a name, harness (ctrl-t) and model (ctrl-l), optional work item and optional prompt. Titles are
+//! a name, harness (ctrl-t) and model (ctrl-l), starting at the profile's default from the
+//! config's `[harnesses]`, optional work item and optional prompt. Titles are
 //! `rex-new:session/HOST/PATH` and
 //! `rex-new:agent/HOST/PATH/NAME/HARNESS[/PROMPT_REF[/WORK_ITEM]]`, the
 //! fields hex encoded; `PROMPT_REF` is empty when only a work item follows.
@@ -41,12 +42,14 @@ use ratatui::{DefaultTerminal, Frame};
 use ratatui_textarea::TextArea;
 use switchyard_core::autoname::{nameable, suggest_name, warm_up};
 use switchyard_core::commands::{self, SlashCommand};
+use switchyard_core::config;
 use switchyard_core::folders::{self, Folder};
 use switchyard_core::hosts::{AUTO, CONFIG, Project, catalog, compatible, dev_hosts, pool};
 use switchyard_core::items::{self, OpenItem, OpenItems};
 use switchyard_core::launch::{WORK_ITEM_COMMAND, launch};
 use switchyard_core::naming::{
-    HARNESSES, branch_and_slug, harness_spec, models, name_char, name_problem,
+    HARNESSES, branch_and_slug, default_harness_in, harness_spec, models, name_char, name_problem,
+    split_harness,
 };
 use switchyard_core::prompts::prune_prompts;
 use switchyard_core::rex::{local_label, log, select};
@@ -243,9 +246,13 @@ struct App {
     loads: HashMap<String, Load>,
     tx: Sender<(String, Result<String, String>)>,
     rx: Receiver<(String, Result<String, String>)>,
-    harness: usize,
-    /// The model, an index into the harness's `models`; 0 is its default.
-    model: usize,
+    /// Each profile group's default `HARNESS[:MODEL]`, the config's
+    /// `[harnesses]` (see `naming::default_harness`).
+    defaults: HashMap<String, String>,
+    /// The harness and model picked with ctrl-t and ctrl-l, as indexes
+    /// into `HARNESSES` and the harness's `models` (0 is its own default);
+    /// None follows the highlighted target's profile default.
+    picked: Option<(usize, usize)>,
     focus: Focus,
     query: String,
     /// The name, work item and prompt fields: readline-style editors (see
@@ -336,8 +343,10 @@ impl App {
             loads: HashMap::new(),
             tx,
             rx,
-            harness: 0,
-            model: 0,
+            defaults: config::load()
+                .map(|c| c.harnesses.clone())
+                .unwrap_or_default(),
+            picked: None,
             focus: Focus::Project,
             query: String::new(),
             name: text_field(),
@@ -408,29 +417,57 @@ impl App {
     /// profile, harness and folder.
     fn probe(&self) -> Option<Probe> {
         let dir = self.target_path()?;
-        let profile = match self.project() {
-            Some(p) => p.profile.clone(),
-            None if dir.contains("/dev/src/amfaro") => "work".into(),
-            None => "personal".into(),
-        };
+        let profile = self.profile_of(&dir);
         let host = match self.agent_host() {
             AUTO => self.here.clone(),
             h => h.to_string(),
         };
-        Some((host, profile, HARNESSES[self.harness].to_string(), dir))
+        let harness = HARNESSES[self.choice().0].to_string();
+        Some((host, profile, harness, dir))
     }
 
-    /// The chosen model, or None for the harness's default.
+    /// The profile group work in `dir`, the highlighted target, runs under.
+    fn profile_of(&self, dir: &str) -> String {
+        match self.project() {
+            Some(p) => p.profile.clone(),
+            None if dir.contains("/dev/src/amfaro") => "work".into(),
+            None => "personal".into(),
+        }
+    }
+
+    /// The highlighted target's profile default harness and model, as
+    /// indexes like `picked`'s; personal's with nothing highlighted.
+    fn default_choice(&self) -> (usize, usize) {
+        let profile = self
+            .target_path()
+            .map_or_else(|| "personal".into(), |dir| self.profile_of(&dir));
+        let spec = default_harness_in(&self.defaults, &profile);
+        let (harness, model) = split_harness(&spec);
+        let h = HARNESSES.iter().position(|x| *x == harness).unwrap_or(0);
+        let m = model
+            .and_then(|m| models(HARNESSES[h]).iter().position(|x| *x == m))
+            .unwrap_or(0);
+        (h, m)
+    }
+
+    /// The harness and model new work would get: as picked, else the
+    /// default.
+    fn choice(&self) -> (usize, usize) {
+        self.picked.unwrap_or_else(|| self.default_choice())
+    }
+
+    /// The chosen model, or None for the harness's own default.
     fn chosen_model(&self) -> Option<&'static str> {
-        models(HARNESSES[self.harness])
-            .get(self.model)
+        let (h, m) = self.choice();
+        models(HARNESSES[h])
+            .get(m)
             .copied()
             .filter(|m| !m.is_empty())
     }
 
     /// The harness with its chosen model, as `task launch` takes it.
     fn harness_spec(&self) -> String {
-        harness_spec(HARNESSES[self.harness], self.chosen_model())
+        harness_spec(HARNESSES[self.choice().0], self.chosen_model())
     }
 
     /// Give the prompt the slash commands of where the work would run,
@@ -1106,16 +1143,17 @@ impl App {
             }
             KeyCode::Tab => self.next_focus(true),
             KeyCode::BackTab => self.next_focus(false),
-            // Overrides for the defaults: host starts at auto, harness at
-            // claude, and model at the harness's own.
+            // Overrides for the defaults: host starts at auto, and harness
+            // and model at the target profile's (see `default_choice`).
             KeyCode::Char('o') if ctrl => self.next_host(),
             KeyCode::Char('s') if ctrl => self.toggle_kind(),
             KeyCode::Char('t') if ctrl && self.kind == Kind::Agent => {
-                self.harness = (self.harness + 1) % HARNESSES.len();
-                self.model = 0;
+                let (h, _) = self.choice();
+                self.picked = Some(((h + 1) % HARNESSES.len(), 0));
             }
             KeyCode::Char('l') if ctrl && self.kind == Kind::Agent => {
-                self.model = (self.model + 1) % models(HARNESSES[self.harness]).len();
+                let (h, m) = self.choice();
+                self.picked = Some((h, (m + 1) % models(HARNESSES[h]).len()));
             }
             KeyCode::Char('p') if ctrl && list_key => self.step(-1),
             KeyCode::Char('n') if ctrl && list_key => self.step(1),
@@ -1886,14 +1924,18 @@ impl App {
             fill,
         );
         if self.kind == Kind::Agent {
+            let (choice, default) = (self.choice(), self.default_choice());
             let mut harness = vec![Span::styled(
-                HARNESSES[self.harness].to_string(),
-                changed(self.harness != 0),
+                HARNESSES[choice.0].to_string(),
+                changed(choice.0 != default.0),
             )];
             if let Some(model) = self.chosen_model() {
                 // Pi's provider makes the chip long and says little.
                 let short = model.rsplit('/').next().unwrap_or(model);
-                harness.push(Span::styled(format!(" {short}"), changed(true)));
+                harness.push(Span::styled(
+                    format!(" {short}"),
+                    changed(choice != default),
+                ));
             }
             left.push(Span::raw(" "));
             left.extend(pill(harness, chip_bg, fill));
@@ -2291,6 +2333,8 @@ mod tests {
             Load::Ready(folders::parse("/repos/remote")),
         );
         app.name.insert_str("folder-work");
+        // Claude on its own default, whatever this host's config says.
+        app.defaults.clear();
         app.refilter();
         app
     }
@@ -2318,6 +2362,38 @@ mod tests {
         app.standalone = true;
         app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.request, Some(Request::Launch));
+    }
+
+    #[test]
+    fn work_starts_on_its_profile_default_until_one_is_picked() {
+        let mut app = app();
+        app.defaults
+            .insert("personal".into(), "agy:gemini-4-neon".into());
+        let pick = |path: &str, spec: &str| {
+            format!(
+                "agent/{}/{}/{}/{}",
+                hex(AUTO),
+                hex(path),
+                hex("folder-work"),
+                hex(spec)
+            )
+        };
+        app.query = "repo".into();
+        app.refilter();
+        assert_eq!(app.pick(), pick("~/catalog/repo", "agy:gemini-4-neon"));
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        app.key(ctrl('l'));
+        assert_eq!(
+            app.pick(),
+            pick("~/catalog/repo", "agy:gemini-4-neon-xhigh"),
+            "ctrl-l steps on from the default's model"
+        );
+        app.key(ctrl('t'));
+        assert_eq!(
+            app.pick(),
+            pick("~/catalog/repo", HARNESSES[0]),
+            "ctrl-t steps on from the default's harness, wrapping"
+        );
     }
 
     #[test]

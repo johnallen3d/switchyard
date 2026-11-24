@@ -1,8 +1,9 @@
 //! Runtime settings, written by the Home Manager module (nix/module.nix) to
 //! `$XDG_CONFIG_HOME/switchyard/config.toml` (default `~/.config`): the
-//! project catalog, the dev hosts, the `auto` pools and the palette. Read once
-//! per process; the tools that need the catalog fail with a clear error when
-//! the file is missing, and the palette falls back to Rosé Pine.
+//! project catalog, the dev hosts, the `auto` pools, the palette and each
+//! profile's default harness. Read once per process; the tools that need the
+//! catalog fail with a clear error when the file is missing, and the palette
+//! falls back to Rosé Pine.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -28,6 +29,9 @@ pub struct Config {
     pub mcp: Mcp,
     /// `[inbox]`: what the tab picker's Inbox leaves out.
     pub inbox: Inbox,
+    /// `[harnesses]`: each profile group's default `HARNESS[:MODEL]` for
+    /// new work (see `naming::default_harness`).
+    pub harnesses: HashMap<String, String>,
 }
 
 /// `[inbox]`: what the tab picker's Inbox and cmd+k float leave out.

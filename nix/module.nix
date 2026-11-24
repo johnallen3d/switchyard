@@ -105,6 +105,20 @@ in {
               project's own `hosts` overrides its group.
             '';
           };
+          harnesses = mkOption {
+            type = types.attrsOf types.str;
+            default = {};
+            example = {
+              personal = "agy:gemini-4-neon";
+            };
+            description = ''
+              Default agent for new work per profile group, as
+              `HARNESS[:MODEL]` (harness claude, pi or agy; a model from the
+              picker's list). The new-session picker starts on it, and the
+              tab picker's Work view and MCP `spawn_task` use it when no
+              harness is given. Groups without an entry use claude.
+            '';
+          };
           palette = mkOption {
             type = types.attrsOf types.str;
             default = {};

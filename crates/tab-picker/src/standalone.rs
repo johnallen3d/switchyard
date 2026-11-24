@@ -381,7 +381,8 @@ pub fn launch(path: &str, url: &str) -> Result<(String, String, String), String>
         "auto",
         path,
         "",
-        "claude",
+        // The project's profile default.
+        "",
         "",
         Some(url),
         switchyard_core::launch::Placement::default(),

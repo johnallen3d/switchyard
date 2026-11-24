@@ -5,7 +5,9 @@ use crate::autoname::{item_title, name_work};
 use crate::hosts::{AUTO, Project, catalog, choose_host};
 use crate::images::carry;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
-use crate::naming::{HARNESSES, branch_and_slug, models, name_problem, split_harness};
+use crate::naming::{
+    HARNESSES, branch_and_slug, default_harness, models, name_problem, split_harness,
+};
 use crate::prompts::{PROMPT_DIR, discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, host_home, local_label, log, now, rex_json, sh_quote};
 use crate::sessions::new_session_id;
@@ -250,6 +252,14 @@ fn launch_with(
     placement: Placement,
 ) -> Result<(String, String, String), String> {
     let project = launch_project(host, path, resume)?;
+    // No harness means the project's profile default.
+    let default;
+    let harness = if harness.is_empty() {
+        default = default_harness(&project.profile);
+        default.as_str()
+    } else {
+        harness
+    };
     let work_item = check_request(name, harness, work_item, resume.is_some())?;
     // `task run` takes the whole spec; the registry keeps its parts.
     let spec = harness;

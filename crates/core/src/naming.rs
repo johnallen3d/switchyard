@@ -3,7 +3,8 @@
 //! `api-work`; a name with a slash is used as the branch as is, its slug
 //! replacing `/` with `-`.
 
-/// The agent harnesses work can run in; the first is the default.
+/// The agent harnesses work can run in; the first is the default where the
+/// config's `[harnesses]` names none (see `default_harness`).
 pub const HARNESSES: [&str; 3] = ["claude", "pi", "agy"];
 
 /// The models work can pick for `harness`; the first, empty, is the
@@ -24,6 +25,8 @@ pub fn models(harness: &str) -> &'static [&'static str] {
         ],
         "agy" => &[
             "",
+            "gemini-4-neon",
+            "gemini-4-neon-xhigh",
             "gemini-3.8-flash-high",
             "gemini-3.8-flash-medium",
             "gemini-3.8-flash-low",
@@ -52,6 +55,38 @@ pub fn harness_spec(harness: &str, model: Option<&str>) -> String {
     match model.filter(|m| !m.is_empty()) {
         Some(model) => format!("{harness}:{model}"),
         None => harness.to_string(),
+    }
+}
+
+/// The default `HARNESS[:MODEL]` for new work under `profile`: the
+/// config's `[harnesses]` entry for it, or the first harness on its own
+/// default model when it has none, the config can't be read, or the entry
+/// names an unknown harness. An unknown model falls back to the harness's
+/// own default.
+#[must_use]
+pub fn default_harness(profile: &str) -> String {
+    match crate::config::load() {
+        Ok(config) => default_harness_in(&config.harnesses, profile),
+        Err(_) => HARNESSES[0].to_string(),
+    }
+}
+
+/// `default_harness` under `harnesses`, a config's `[harnesses]` table.
+#[must_use]
+pub fn default_harness_in<S: std::hash::BuildHasher>(
+    harnesses: &std::collections::HashMap<String, String, S>,
+    profile: &str,
+) -> String {
+    known_harness(harnesses.get(profile).map_or("", String::as_str))
+}
+
+/// `spec` if it names a known harness, else the first; with its model only
+/// if the harness lists it.
+fn known_harness(spec: &str) -> String {
+    let (harness, model) = split_harness(spec.trim());
+    match HARNESSES.iter().find(|h| **h == harness) {
+        Some(h) => harness_spec(h, model.filter(|m| models(h).contains(m))),
+        None => HARNESSES[0].to_string(),
     }
 }
 
@@ -96,6 +131,15 @@ pub fn branch_and_slug(name: &str) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_defaults_keep_only_known_harnesses_and_models() {
+        assert_eq!(known_harness("agy:gemini-4-neon"), "agy:gemini-4-neon");
+        assert_eq!(known_harness("pi"), "pi");
+        assert_eq!(known_harness("agy:no-such-model"), "agy");
+        assert_eq!(known_harness("nope:opus"), HARNESSES[0]);
+        assert_eq!(known_harness(""), HARNESSES[0]);
+    }
 
     #[test]
     fn harness_specs_split_on_their_first_colon() {
