@@ -68,6 +68,7 @@
 //! The work itself (catalog, work names, launches, the task registry and
 //! actions) is in switchyard-core; this crate holds the picker and `task run`.
 
+mod atuin;
 mod picker;
 mod run;
 mod trust;

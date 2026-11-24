@@ -248,11 +248,7 @@ pub fn run(
                 .arg(task_note(&worktree, &branch));
             let mut resuming = false;
             if let Some((id, mode)) = session {
-                let here = worktree.display().to_string();
-                if mode == "resume" && !session_exists_here(profile, harness, &here, id) {
-                    eprintln!(
-                        "\x1b[33mswitchyard: agent session {id} is gone; starting a new one\x1b[0m"
-                    );
+                if mode == "resume" && !session_here(profile, harness, &env, &worktree, id) {
                     agent.args(["--session-id", &new_session_id()]);
                 } else if mode == "resume" && harness == "claude" {
                     resuming = true;
@@ -287,6 +283,32 @@ pub fn run(
         }
     };
     fail(&dir)
+}
+
+/// Whether this host has agent session `id` for `worktree` to resume,
+/// restoring it from Atuin Threads first when the harness no longer has it
+/// (see `atuin`). Says why when it doesn't, as the task starts a new one.
+fn session_here(
+    profile: &str,
+    harness: &str,
+    env: &[(String, String)],
+    worktree: &Path,
+    id: &str,
+) -> bool {
+    let here = worktree.display().to_string();
+    if session_exists_here(profile, harness, &here, id) {
+        return true;
+    }
+    status(&format!(
+        "Agent session {id} is gone; restoring it from Atuin"
+    ));
+    let why = match crate::atuin::restore(profile, harness, env, worktree, id) {
+        Ok(()) if session_exists_here(profile, harness, &here, id) => return true,
+        Ok(()) => "Atuin restored it elsewhere".to_string(),
+        Err(e) => e,
+    };
+    eprintln!("\x1b[33mswitchyard: agent session {id} is gone ({why}); starting a new one\x1b[0m");
+    false
 }
 
 /// Antigravity's arguments. It takes no system prompt, so the task note
