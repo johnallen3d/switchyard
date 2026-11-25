@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -52,7 +52,7 @@ use switchyard_core::naming::{
     split_harness,
 };
 use switchyard_core::prompts::prune_prompts;
-use switchyard_core::rex::{local_label, log, select};
+use switchyard_core::rex::{local_label, log, rex_command, select};
 use switchyard_ui::Palette;
 use switchyard_ui::chrome;
 use switchyard_ui::draw::{self, cells, delete_word, highlight, pill, str_width};
@@ -1056,7 +1056,7 @@ impl App {
         if !std::mem::take(&mut self.away) || self.standalone {
             return;
         }
-        let child = Command::new("rex")
+        let child = rex_command()
             .args(["do", "client.mode.enter", "name=new"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -2121,7 +2121,7 @@ pub fn run_picker(
                 eprintln!("switchyard: {note}");
             }
         } else {
-            let _ = Command::new("rex")
+            let _ = rex_command()
                 .args(["do", "client.mode.exit_all"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -2288,7 +2288,7 @@ fn edit_prompt(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         prompt_box::edit_in_editor(term, &app.prompt, &mut app.corners, app.cell, fills, || {
             // The mode would take the editor's Enter as the action.
             if !standalone {
-                let _ = Command::new("rex")
+                let _ = rex_command()
                     .args(["do", "client.mode.exit_all"])
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())

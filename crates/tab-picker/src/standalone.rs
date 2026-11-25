@@ -21,7 +21,7 @@ use std::thread;
 use std::time::Duration;
 
 use switchyard_core::item_actions::{self, Action, Item};
-use switchyard_core::rex::{local_label, log, select};
+use switchyard_core::rex::{local_label, log, rex_command, select};
 use switchyard_core::tasks::{live_tasks, reconcile_tasks};
 use switchyard_core::{actions, server};
 use switchyard_ui::protocol::{DATA, unhex};
@@ -274,7 +274,7 @@ fn fetch_tasks(tx: &Sender<String>) -> bool {
 
 fn all_rows() -> Result<String, String> {
     let script = format!("local host_rows_script = [=====[\n{HOST_ROWS}]=====]\n{ALL_ROWS}");
-    let out = std::process::Command::new("rex")
+    let out = rex_command()
         .args(["do", "-e", &script])
         .stdin(std::process::Stdio::null())
         .output()
@@ -490,7 +490,7 @@ pub fn review_float(args: &[&str]) -> Result<(), String> {
     ];
     command.extend(args.iter().map(ToString::to_string));
     let command = serde_json::to_string(&command).map_err(|e| e.to_string())?;
-    let out = std::process::Command::new("rex")
+    let out = rex_command()
         .args(["do", "-e", REVIEW_FLOAT])
         .arg(format!("session={session}"))
         .arg(format!("label={}", switchyard_core::review::LABEL))

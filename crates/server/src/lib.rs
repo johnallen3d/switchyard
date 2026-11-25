@@ -38,7 +38,7 @@ mod wakes;
 mod watch;
 
 use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -166,7 +166,7 @@ fn serve() -> Result<(), String> {
 
 /// The Rex servers this machine knows besides its own.
 fn list_servers() -> Result<Vec<String>, String> {
-    let out = Command::new("rex")
+    let out = switchyard_core::rex::rex_command()
         .args(["do", "-e", "return rex.servers()"])
         .stdin(Stdio::null())
         .output()

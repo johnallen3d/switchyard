@@ -13,11 +13,12 @@
 //! It ends when the float has gone.
 
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
+use switchyard_core::rex::rex_command;
 use switchyard_ui::protocol;
 
 use crate::standalone;
@@ -47,7 +48,7 @@ enum Msg {
 /// Fails when rex can't run or the float can't be found.
 pub fn feed(session: &str, block: &str) -> io::Result<()> {
     standalone::detach_env();
-    let mut bridge = Command::new("rex")
+    let mut bridge = rex_command()
         .args(["do", "-e", FEED_FLOAT])
         .arg(format!("session={session}"))
         .arg(format!("block={block}"))
@@ -134,7 +135,7 @@ fn act(pick: &str) -> Result<(), String> {
 
 /// Follow the float's title on its host, sending each pick it reports.
 fn follow_picks(host: &str, session: &str, block: &str, tx: Sender<Msg>) -> io::Result<Child> {
-    let mut child = Command::new("rex")
+    let mut child = rex_command()
         .args(["-S", host, "events", "-s", session, "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

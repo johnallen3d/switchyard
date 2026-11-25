@@ -11,7 +11,7 @@
 //! off while its host stays unreachable, and records why in the state.
 
 use std::io::{BufRead, BufReader, Read};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -202,7 +202,7 @@ fn run(
     events: &Events,
     stop: &AtomicBool,
 ) -> Result<(), String> {
-    let mut cmd = Command::new("rex");
+    let mut cmd = switchyard_core::rex::rex_command();
     // Never start a server: a missing one (as a temporary XDG_RUNTIME_DIR
     // points at) is unreachable, not empty.
     cmd.arg("--autostart=false");

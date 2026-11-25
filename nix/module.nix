@@ -16,12 +16,13 @@
   inherit (lib) mkEnableOption mkIf mkMerge mkOption types;
   inherit (pkgs.stdenv.hostPlatform) isDarwin isLinux;
   home = config.home.homeDirectory;
-  # Services start with a bare PATH. The server runs rex (often outside Nix,
-  # in ~/.local/bin), ssh, git, bash and hostname, so give it the same
-  # lookup as the Rex Lua's util.user_path, then the system's. On the Mac
-  # that includes Homebrew's, where mise lives: work-profile gh lookups
-  # (titles, PR state) load amfaro's env through it.
-  servicePath = lib.concatStringsSep ":" (lib.unique ([
+  # Services start with a bare PATH. The server runs rex (from Rex's own
+  # bundle on macOS, or ~/.local/bin / Nix on Linux), ssh, git, bash and
+  # hostname, so give it the same lookup as the Rex Lua's util.user_path,
+  # then the system's. On the Mac that includes Homebrew's, where mise lives:
+  # work-profile gh lookups (titles, PR state) load amfaro's env through it.
+  servicePath = lib.concatStringsSep ":" (lib.unique (lib.optional isDarwin "${home}/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"
+    ++ [
       "${home}/.local/bin"
       "${config.home.profileDirectory}/bin"
       "/etc/profiles/per-user/${config.home.username}/bin"

@@ -13,14 +13,14 @@ use std::fs::{File, OpenOptions};
 use std::hash::BuildHasher;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::links::{
     FIZZY_BOARD_SH, Lookup, Pr, Tracker, Unlinked, add_link, add_live, branch_number, find_prs,
     github_repo, parse_ref, pr_key, set_agent_links, set_derived_items, set_derived_pr,
     tracker_or_fizzy, unlink,
 };
-use crate::rex::{home, host_bash, local_label, log, now};
+use crate::rex::{home, host_bash, local_label, log, now, rex_command};
 use crate::sessions::newest_session;
 
 /// How long ended tasks stay in the registry, and so can be resumed from the
@@ -560,7 +560,7 @@ impl HostWindows {
 /// `host`'s Rex windows, or None when they can't be listed. It never starts
 /// a server: a missing one is unreachable, not empty.
 fn host_windows(host: &str) -> Option<HostWindows> {
-    let mut cmd = Command::new("rex");
+    let mut cmd = rex_command();
     cmd.arg("--autostart=false");
     if host != local_label() {
         cmd.args(["-S", host]);
@@ -1683,7 +1683,7 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let ok = Command::new("git")
+        let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
             .args([

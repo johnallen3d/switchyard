@@ -753,7 +753,7 @@ struct Tab {
 /// for this one) that has it.
 fn block_window(hosts: &[String], block: &str) -> Option<Tab> {
     hosts.iter().find_map(|host| {
-        let mut cmd = std::process::Command::new("rex");
+        let mut cmd = switchyard_core::rex::rex_command();
         if host != "local" {
             cmd.args(["-S", host]);
         }

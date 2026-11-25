@@ -4,9 +4,121 @@
 //! SSH calls share one connection per host (see `ssh`): connecting costs
 //! about 100 ms to a dev host, more than most of the scripts sent over it.
 
+use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+
+/// Where Rex keeps its current server/CLI binary on macOS, relative to
+/// `$HOME` — stable across app bundle renames and updates.
+const MACOS_REX_BIN_DIR: &str = "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS";
+
+/// How `rex` was resolved, so `rex_command` knows whether to also put its
+/// directory at the front of the child's `PATH` (for `rex do` scripts that
+/// spawn `rex`).
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedRex {
+    path: PathBuf,
+    prepend_dir: bool,
+}
+
+fn is_executable(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+fn find_in_path(path_var: &OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn resolve_rex(
+    rex_bin_dir: Option<&OsStr>,
+    path_var: Option<&OsStr>,
+    home_dir: &Path,
+    is_macos: bool,
+) -> ResolvedRex {
+    if let Some(dir) = rex_bin_dir.filter(|d| !d.is_empty()) {
+        let candidate = PathBuf::from(dir).join("rex");
+        if is_executable(&candidate) {
+            return ResolvedRex {
+                path: candidate,
+                prepend_dir: true,
+            };
+        }
+    }
+    if let Some(path) = path_var
+        && let Some(found) = find_in_path(path, "rex")
+    {
+        return ResolvedRex {
+            path: found,
+            prepend_dir: false,
+        };
+    }
+    if is_macos {
+        let candidate = home_dir.join(MACOS_REX_BIN_DIR).join("rex");
+        if is_executable(&candidate) {
+            return ResolvedRex {
+                path: candidate,
+                prepend_dir: true,
+            };
+        }
+    }
+    ResolvedRex {
+        path: PathBuf::from("rex"),
+        prepend_dir: false,
+    }
+}
+
+fn prepend_path(dir: &Path, existing: Option<&OsStr>) -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = existing
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    if dirs.first().is_some_and(|first| first == dir) {
+        return None;
+    }
+    dirs.insert(0, dir.to_path_buf());
+    std::env::join_paths(dirs).ok()
+}
+
+/// Path to the `rex` CLI binary: `$REX_BIN_DIR/rex` first, then `PATH`, then
+/// macOS's `Versions/Current` server bundle directory, falling back to bare
+/// `"rex"`.
+#[must_use]
+pub fn rex_bin() -> PathBuf {
+    resolve_rex(
+        std::env::var_os("REX_BIN_DIR").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        &home(),
+        cfg!(target_os = "macos"),
+    )
+    .path
+}
+
+/// A `Command` for the `rex` CLI, resolved through `$REX_BIN_DIR/rex`,
+/// `PATH`, and the macOS `Versions/Current` fallback. When resolved via
+/// `REX_BIN_DIR` or the macOS fallback, its directory is placed at the front
+/// of the child's `PATH` so Lua scripts run via `rex do` that invoke `rex`
+/// find the same binary.
+#[must_use]
+pub fn rex_command() -> Command {
+    let resolved = resolve_rex(
+        std::env::var_os("REX_BIN_DIR").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+        &home(),
+        cfg!(target_os = "macos"),
+    );
+    let mut cmd = Command::new(&resolved.path);
+    if resolved.prepend_dir
+        && let Some(dir) = resolved.path.parent().filter(|d| !d.as_os_str().is_empty())
+        && let Some(new_path) = prepend_path(dir, std::env::var_os("PATH").as_deref())
+    {
+        cmd.env("PATH", new_path);
+    }
+    cmd
+}
 
 /// This host's Rex label: its short hostname.
 #[must_use]
@@ -25,7 +137,7 @@ pub fn local_label() -> String {
 ///
 /// Fails when rex can't run, exits unsuccessfully, or prints invalid JSON.
 pub fn rex_json(host: &str, args: &[&str]) -> Result<serde_json::Value, String> {
-    let mut cmd = Command::new("rex");
+    let mut cmd = rex_command();
     if host != local_label() {
         cmd.args(["-S", host]);
     }
@@ -115,7 +227,7 @@ fn ssh_with(host: &str, tty: bool) -> Command {
 /// someone else owns it.
 #[must_use]
 pub fn runtime_dir() -> Option<PathBuf> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::MetadataExt;
     // SAFETY: getuid has no preconditions and can't fail.
     let uid = unsafe { libc::getuid() };
     let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
@@ -197,7 +309,7 @@ pub fn sh_quote(s: &str) -> String {
 ///
 /// Fails when rex can't run or exits unsuccessfully.
 pub fn rex(host: &str, args: &[&str]) -> Result<(), String> {
-    let mut cmd = Command::new("rex");
+    let mut cmd = rex_command();
     if host != local_label() {
         cmd.args(["-S", host]);
     }
@@ -253,7 +365,7 @@ pub fn host_home(host: &str) -> Result<String, String> {
 ///
 /// Fails when rex can't run or exits unsuccessfully.
 pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
-    let mut cmd = Command::new("rex");
+    let mut cmd = rex_command();
     if host != local_label() {
         cmd.args(["-S", host]);
     }
@@ -277,4 +389,148 @@ pub fn select(host: &str, session: &str, window: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "switchyard-rex-test-{}-{}-{seq}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_file(path: &Path, executable: bool) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "#!/bin/sh\n").unwrap();
+        let mode = if executable { 0o755 } else { 0o644 };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn resolve_rex_prefers_rex_bin_dir_then_path_then_macos_fallback() {
+        let root = temp_dir("order");
+        let rex_dir = root.join("rex-bin");
+        let path_dir = root.join("path-bin");
+        let home_dir = root.join("home");
+        let mac_dir = home_dir.join(MACOS_REX_BIN_DIR);
+
+        make_file(&rex_dir.join("rex"), true);
+        make_file(&path_dir.join("rex"), true);
+        make_file(&mac_dir.join("rex"), true);
+
+        let path_env = std::env::join_paths([&path_dir]).unwrap();
+
+        // 1. REX_BIN_DIR wins over PATH and macOS fallback.
+        assert_eq!(
+            resolve_rex(Some(rex_dir.as_os_str()), Some(&path_env), &home_dir, true),
+            ResolvedRex {
+                path: rex_dir.join("rex"),
+                prepend_dir: true,
+            }
+        );
+
+        // 2. Without REX_BIN_DIR, PATH wins over macOS fallback.
+        assert_eq!(
+            resolve_rex(None, Some(&path_env), &home_dir, true),
+            ResolvedRex {
+                path: path_dir.join("rex"),
+                prepend_dir: false,
+            }
+        );
+
+        // 3. When PATH has no executable rex, macOS falls back to Versions/Current.
+        let empty_dir = root.join("empty");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        let empty_path = std::env::join_paths([&empty_dir]).unwrap();
+        assert_eq!(
+            resolve_rex(None, Some(&empty_path), &home_dir, true),
+            ResolvedRex {
+                path: mac_dir.join("rex"),
+                prepend_dir: true,
+            }
+        );
+
+        // 4. On non-macOS, the macOS bundle path is not used; falls back to bare "rex".
+        assert_eq!(
+            resolve_rex(None, Some(&empty_path), &home_dir, false),
+            ResolvedRex {
+                path: PathBuf::from("rex"),
+                prepend_dir: false,
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_rex_skips_non_executable_and_broken_symlinks() {
+        let root = temp_dir("broken");
+        let stale_rex_dir = root.join("stale");
+        let broken_path_dir = root.join("broken-path");
+        let good_path_dir = root.join("good-path");
+        let home_dir = root.join("home");
+
+        make_file(&stale_rex_dir.join("rex"), false);
+        std::fs::create_dir_all(&broken_path_dir).unwrap();
+        symlink(root.join("does-not-exist/rex"), broken_path_dir.join("rex")).unwrap();
+        make_file(&good_path_dir.join("rex"), true);
+
+        let path_env = std::env::join_paths([&broken_path_dir, &good_path_dir]).unwrap();
+        assert_eq!(
+            resolve_rex(
+                Some(stale_rex_dir.as_os_str()),
+                Some(&path_env),
+                &home_dir,
+                false
+            ),
+            ResolvedRex {
+                path: good_path_dir.join("rex"),
+                prepend_dir: false,
+            }
+        );
+
+        // With only a broken symlink in PATH on macOS, falls back to Versions/Current.
+        let mac_rex = home_dir.join(MACOS_REX_BIN_DIR).join("rex");
+        make_file(&mac_rex, true);
+        let broken_only = std::env::join_paths([&broken_path_dir]).unwrap();
+        assert_eq!(
+            resolve_rex(None, Some(&broken_only), &home_dir, true),
+            ResolvedRex {
+                path: mac_rex,
+                prepend_dir: true,
+            }
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prepend_path_prepends_only_when_not_already_first() {
+        let a = Path::new("/opt/rex/bin");
+        let b = Path::new("/usr/bin");
+        let existing = std::env::join_paths([b]).unwrap();
+        assert_eq!(
+            prepend_path(a, Some(&existing)),
+            Some(std::env::join_paths([a, b]).unwrap())
+        );
+
+        let already = std::env::join_paths([a, b]).unwrap();
+        assert_eq!(prepend_path(a, Some(&already)), None);
+
+        assert_eq!(prepend_path(a, None), Some(a.as_os_str().to_os_string()));
+    }
 }

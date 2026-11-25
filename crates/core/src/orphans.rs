@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 
 use crate::folders::home_relative;
 use crate::hosts::{catalog, dev_hosts};
-use crate::rex::{host_bash, local_label, now};
+use crate::rex::{host_bash, local_label, now, rex_command};
 use crate::tasks::{checked, update_tasks};
 
 /// How often switchyard-server scans for orphans.
@@ -264,7 +264,7 @@ return table.concat(out, "\n")
 /// can't be listed (then nothing there may be removed).
 #[must_use]
 pub fn pane_cwds(host: &str) -> Option<Vec<String>> {
-    let mut cmd = std::process::Command::new("rex");
+    let mut cmd = rex_command();
     cmd.arg("--autostart=false");
     if host != local_label() {
         cmd.args(["-S", host]);

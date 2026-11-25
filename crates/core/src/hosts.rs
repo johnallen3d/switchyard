@@ -1,10 +1,10 @@
 //! The project catalog and dev hosts, from the runtime config (see
 //! `config`), and choosing the least busy host for `auto`.
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::config;
-use crate::rex::{host_bash, local_label, rex_json};
+use crate::rex::{host_bash, local_label, rex_command, rex_json};
 
 #[derive(Clone)]
 pub struct Project {
@@ -273,7 +273,7 @@ impl Probe {
 /// existing project session over Rex. None when the host can't be reached.
 fn probe(host: &str, project: &str) -> Option<Probe> {
     let m = metrics(host).ok()?;
-    let mut cmd = Command::new("rex");
+    let mut cmd = rex_command();
     if host != local_label() {
         cmd.args(["-S", host]);
     }

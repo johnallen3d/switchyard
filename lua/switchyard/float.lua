@@ -25,19 +25,25 @@ function M.close_float(ctx, label)
   rex.client.queue("client.mode.exit_all")
 end
 
+-- Shell snippet that sets rex_bin to $REX_BIN_DIR (when set) and, on macOS,
+-- falls back to Rex's stable Versions/Current CLI directory when present.
+local REX_BIN_SH = 'rex_bin="${REX_BIN_DIR:-}"; '
+  .. 'd="$HOME/Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS"; '
+  .. 'if [ -d "$d" ] && [ "$rex_bin" != "$d" ]; then rex_bin="${rex_bin:+$rex_bin:}$d"; fi; '
+
 -- The config host runs with a bare PATH, so find its rex CLI. On the Mac
 -- that includes Homebrew's, where mise lives: work-profile gh lookups
 -- (a work item's title, to name a launch) load amfaro's env through it.
 function M.user_path()
   local r = rex.exec({ "sh", "-c",
-    'printf %s "$HOME/.local/bin:/etc/profiles/per-user/$(id -un)/bin:/opt/homebrew/bin:$PATH"' })
+    REX_BIN_SH .. 'printf %s "${rex_bin:+$rex_bin:}$HOME/.local/bin:/etc/profiles/per-user/$(id -un)/bin:/opt/homebrew/bin:$PATH"' })
   return r.stdout
 end
 
 -- A pane command that runs program from the user's PATH on the pane's host.
 function M.float_command(program, ...)
   return {
-    "sh", "-c", 'PATH="$HOME/.local/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH"; export PATH; exec ' .. program .. ' "$@"',
+    "sh", "-c", REX_BIN_SH .. 'PATH="${rex_bin:+$rex_bin:}$HOME/.local/bin:$HOME/.nix-profile/bin:/etc/profiles/per-user/$(id -un)/bin:$PATH"; export PATH; exec ' .. program .. ' "$@"',
     "sh", ...,
   }
 end
