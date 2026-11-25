@@ -353,6 +353,7 @@ pub struct Task {
     pub project: String,
     pub repo: String,
     pub worktree: String,
+    pub branch: String,
     pub name: String,
     /// The agent session's own title (Claude's, or one given with
     /// `/rename`; see core's `transcript::title`), or empty.
@@ -360,6 +361,8 @@ pub struct Task {
     pub profile: String,
     pub harness: String,
     pub model: String,
+    /// The agent's own session ID (for mapping Atuin threads back to tasks).
+    pub agent_session: String,
     /// Uncommitted files in the worktree, and the first few of their paths.
     pub dirty: u64,
     pub dirty_files: Vec<String>,
@@ -484,11 +487,13 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             project: s(t, "project"),
             repo: s(t, "repo"),
             worktree: s(t, "worktree"),
+            branch: s(t, "branch"),
             name: s(t, "name"),
             title: s(t, "title"),
             profile: s(t, "profile"),
             harness: s(t, "harness"),
             model: s(t, "model"),
+            agent_session: s(t, "agent_session"),
             dirty: t["dirty_count"].as_u64().unwrap_or(0),
             dirty_files: t["dirty_files"]
                 .as_array()

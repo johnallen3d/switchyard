@@ -1,4 +1,4 @@
-//! Restoring and converting agent sessions through Atuin Threads.
+//! Restoring, converting, and searching agent sessions through Atuin Threads.
 //!
 //! Atuin keeps a synced copy of each captured thread under the agent's own
 //! session ID:
@@ -10,6 +10,8 @@
 //!   captured thread into a new session for `TARGET`, carrying over messages
 //!   and tool calls with a note naming the original session, and prints the
 //!   command naming the new session ID.
+//! - `search`: `atuin threads search --style json` searches captured threads'
+//!   titles, messages, reasoning, changed file names, and tool-call inputs.
 //!
 //! The personal profile's threads live in the default store (`atuin`), the
 //! work profile's in its own (`atuin-work`, which system-config installs with
@@ -21,10 +23,115 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use serde::Deserialize;
+
 use crate::sessions::{session_exists_with_env, work_env};
+use crate::tasks::rfc3339_secs;
 
 /// How long an Atuin Threads call may take, sync included, before giving up.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default maximum threads requested per store from `atuin threads search`.
+pub const DEFAULT_SEARCH_LIMIT: usize = 30;
+
+/// One of the Atuin stores Switchyard knows about.
+///
+/// Personal threads live in the default `atuin` store (synced through nas);
+/// work threads live in `atuin-work` (`ATUIN_HOME=~/.atuin-work`, local only).
+/// They are always queried read-only in their own processes and kept labelled
+/// separately so work results are never copied into the personal store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Store {
+    Personal,
+    Work,
+}
+
+impl Store {
+    /// Both Atuin stores, personal first.
+    pub const ALL: [Store; 2] = [Store::Personal, Store::Work];
+
+    /// Short profile label shown on search results.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Store::Personal => "personal",
+            Store::Work => "work",
+        }
+    }
+
+    /// The Atuin binary for this store.
+    #[must_use]
+    pub fn program(self) -> &'static str {
+        store_program(self.label()).unwrap_or("atuin")
+    }
+
+    /// Whether a Switchyard task with `profile` belongs to this store.
+    #[must_use]
+    pub fn matches_profile(self, profile: &str) -> bool {
+        match self {
+            Store::Personal => matches!(profile, "" | "personal"),
+            Store::Work => profile == "work",
+        }
+    }
+}
+
+/// Switchyard's harness name for an Atuin harness name (`claude-code` →
+/// `claude`), falling back to the raw name for other harnesses.
+#[must_use]
+pub fn switchyard_harness(atuin_harness: &str) -> &str {
+    match atuin_harness {
+        "claude-code" => "claude",
+        other => other,
+    }
+}
+
+/// One matching thread returned by `atuin threads search --style json`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub store: Store,
+    /// Switchyard harness name (`claude`, `pi`, or Atuin's raw name).
+    pub harness: String,
+    /// Agent session ID, which maps back to a Switchyard task's `agent_session`.
+    pub session_id: String,
+    pub atuin_id: String,
+    pub cwd: String,
+    pub git_branch: String,
+    pub model: String,
+    /// Unix seconds (0 when absent or unparseable).
+    pub started_at: u64,
+    pub updated_at: u64,
+    pub message_count: u64,
+    /// Thread title (from the search hit's title block or session metadata).
+    pub title: String,
+    /// UTF-8 byte ranges `[start, end)` inside `title` that matched.
+    pub title_matches: Vec<(usize, usize)>,
+    /// Matched excerpt (`preview.text`), empty when the match was only in `title`.
+    pub snippet: String,
+    /// UTF-8 byte ranges `[start, end)` inside `snippet` that matched.
+    pub snippet_matches: Vec<(usize, usize)>,
+    /// First user prompt (`session.preview`).
+    pub first_prompt: String,
+    /// Last assistant reply (`session.last_reply`).
+    pub last_reply: String,
+    pub message_index: Option<u64>,
+    pub score: f64,
+}
+
+/// Failure from searching a single Atuin store.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreError {
+    pub store: Store,
+    pub message: String,
+    /// True when the store's binary (`atuin` / `atuin-work`) is not installed.
+    pub missing: bool,
+}
+
+/// Combined outcome of searching one or more Atuin stores.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchResult {
+    pub hits: Vec<SearchHit>,
+    pub errors: Vec<StoreError>,
+}
 
 /// Atuin's harness name for a Switchyard harness, when Atuin supports it both
 /// for thread capture and as a `--in` target. Antigravity (`agy`) is neither.
@@ -340,6 +447,275 @@ pub fn convert_here(
     convert(profile, source_harness, target_harness, &env, worktree, id)
 }
 
+/// Split a transcript search query into arguments for `atuin threads search`.
+///
+/// Unquoted whitespace-separated words become separate arguments (all must
+/// appear). Quoted phrases (`"..."` or `'...'`) stay together in one argument
+/// so Atuin searches for those words adjacent and in order. Unclosed trailing
+/// quotes are tolerated so an incomplete query still searches sensibly.
+#[must_use]
+pub fn parse_search_terms(query: &str) -> Vec<String> {
+    let mut terms = Vec::new();
+    let mut cur = String::new();
+    let mut chars = query.chars();
+    let mut quote: Option<char> = None;
+    while let Some(c) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if c == '\'' {
+                    quote = None;
+                } else {
+                    cur.push(c);
+                }
+            }
+            Some('"') => match c {
+                '"' => quote = None,
+                '\\' => {
+                    if let Some(next) = chars.next() {
+                        cur.push(next);
+                    }
+                }
+                _ => cur.push(c),
+            },
+            Some(_) => unreachable!(),
+            None => match c {
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() {
+                        terms.push(std::mem::take(&mut cur));
+                    }
+                }
+                '\'' | '"' => quote = Some(c),
+                _ => cur.push(c),
+            },
+        }
+    }
+    if !cur.is_empty() {
+        terms.push(cur);
+    }
+    terms
+}
+
+#[derive(Deserialize)]
+struct RawSearchHit {
+    #[serde(default)]
+    session: RawSearchSession,
+    #[serde(default)]
+    score: f64,
+    #[serde(default)]
+    title: Option<RawHighlight>,
+    #[serde(default)]
+    preview: Option<RawHighlight>,
+    #[serde(default)]
+    message_index: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawSearchSession {
+    #[serde(default)]
+    harness: String,
+    #[serde(default)]
+    session_id: String,
+    #[serde(default)]
+    atuin_id: String,
+    #[serde(default)]
+    cwd: String,
+    #[serde(default)]
+    git_branch: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    message_count: u64,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    preview: Option<String>,
+    #[serde(default)]
+    last_reply: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct RawHighlight {
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    matches: Vec<[usize; 2]>,
+}
+
+/// Keep only valid UTF-8 byte ranges inside `text`, sorted by start.
+fn clean_matches(text: &str, raw: Vec<[usize; 2]>) -> Vec<(usize, usize)> {
+    let mut ranges: Vec<(usize, usize)> = raw
+        .into_iter()
+        .filter(|&[a, b]| {
+            a < b && b <= text.len() && text.is_char_boundary(a) && text.is_char_boundary(b)
+        })
+        .map(|[a, b]| (a, b))
+        .collect();
+    ranges.sort_unstable();
+    ranges
+}
+
+/// Parse the JSON array printed by `atuin threads search --style json` for
+/// `store`, labelling every hit with `store`.
+///
+/// # Errors
+///
+/// Fails when `json` isn't a valid Atuin search JSON array.
+pub fn parse_search_json(store: Store, json: &str) -> Result<Vec<SearchHit>, String> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw: Vec<RawSearchHit> = serde_json::from_str(trimmed)
+        .map_err(|e| format!("{}: bad search JSON: {e}", store.program()))?;
+    Ok(raw
+        .into_iter()
+        .map(|item| {
+            let (title, title_matches) = match item.title {
+                Some(h) if !h.text.is_empty() => {
+                    let m = clean_matches(&h.text, h.matches);
+                    (h.text, m)
+                }
+                _ => (item.session.title.unwrap_or_default(), Vec::new()),
+            };
+            let (snippet, snippet_matches) = match item.preview {
+                Some(h) if !h.text.is_empty() => {
+                    let m = clean_matches(&h.text, h.matches);
+                    (h.text, m)
+                }
+                _ => (String::new(), Vec::new()),
+            };
+            SearchHit {
+                store,
+                harness: switchyard_harness(&item.session.harness).to_string(),
+                session_id: item.session.session_id,
+                atuin_id: item.session.atuin_id,
+                cwd: item.session.cwd,
+                git_branch: item.session.git_branch.unwrap_or_default(),
+                model: item.session.model.unwrap_or_default(),
+                started_at: item
+                    .session
+                    .started_at
+                    .as_deref()
+                    .and_then(rfc3339_secs)
+                    .unwrap_or(0),
+                updated_at: item
+                    .session
+                    .updated_at
+                    .as_deref()
+                    .and_then(rfc3339_secs)
+                    .unwrap_or(0),
+                message_count: item.session.message_count,
+                title,
+                title_matches,
+                snippet,
+                snippet_matches,
+                first_prompt: item.session.preview.unwrap_or_default(),
+                last_reply: item.session.last_reply.unwrap_or_default(),
+                message_index: item.message_index,
+                score: item.score,
+            }
+        })
+        .collect())
+}
+
+/// Search one Atuin `store` (`atuin` or `atuin-work`) read-only for `query`.
+///
+/// `harness`, when `Some`, is a Switchyard harness name (`claude` or `pi`)
+/// translated through [`harness_name`] for `--harness`. `limit` caps hits per
+/// store (0 for unbounded).
+///
+/// # Errors
+///
+/// Fails with a [`StoreError`] when `harness` isn't captured by Atuin, the
+/// binary is missing, Atuin exits non-zero or times out, or its JSON can't be
+/// parsed.
+pub fn search_store(
+    store: Store,
+    query: &str,
+    harness: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SearchHit>, StoreError> {
+    let terms = parse_search_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+    let program = store.program();
+    let limit_str = limit.to_string();
+    let mut args: Vec<&str> = vec![
+        "threads", "search", "--style", "json", "--limit", &limit_str,
+    ];
+    if let Some(h) = harness {
+        let Some(atuin_h) = harness_name(h) else {
+            return Err(StoreError {
+                store,
+                message: format!("Atuin doesn't capture {h} sessions"),
+                missing: false,
+            });
+        };
+        args.push("--harness");
+        args.push(atuin_h);
+    }
+    args.push("--");
+    args.extend(terms.iter().map(String::as_str));
+    let home = crate::rex::home();
+    let stdout = run_atuin_detailed(program, &args, &[], &home, "search failed").map_err(
+        |(message, missing)| StoreError {
+            store,
+            message,
+            missing,
+        },
+    )?;
+    parse_search_json(store, &stdout).map_err(|message| StoreError {
+        store,
+        message,
+        missing: false,
+    })
+}
+
+/// Search `stores` in parallel for `query`, keeping every hit labelled with
+/// its store and sorting combined hits by relevance score (then recency).
+///
+/// Each store is queried read-only in its own process (`atuin` for personal,
+/// `atuin-work` for work); results are never written or copied between stores.
+#[must_use]
+pub fn search(stores: &[Store], query: &str, harness: Option<&str>, limit: usize) -> SearchResult {
+    if parse_search_terms(query).is_empty() || stores.is_empty() {
+        return SearchResult::default();
+    }
+    let outcomes: Vec<Result<Vec<SearchHit>, StoreError>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = stores
+            .iter()
+            .copied()
+            .map(|store| scope.spawn(move || search_store(store, query, harness, limit)))
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+    let mut out = SearchResult::default();
+    for outcome in outcomes {
+        match outcome {
+            Ok(hits) => out.hits.extend(hits),
+            Err(err) => out.errors.push(err),
+        }
+    }
+    sort_hits(&mut out.hits);
+    out
+}
+
+/// Sort hits from one or more stores by score descending, then `updated_at`
+/// descending, then session ID for stability.
+fn sort_hits(hits: &mut [SearchHit]) {
+    hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+}
+
 /// Run `program` with `args` and `env` in `cwd`, returning its stdout on
 /// success or a concise one-line error on failure or timeout.
 fn run_atuin(
@@ -349,6 +725,18 @@ fn run_atuin(
     cwd: &Path,
     not_found: &str,
 ) -> Result<String, String> {
+    run_atuin_detailed(program, args, env, cwd, not_found).map_err(|(msg, _)| msg)
+}
+
+/// Like [`run_atuin`], also reporting whether `program` wasn't installed
+/// (`NotFound`).
+fn run_atuin_detailed(
+    program: &str,
+    args: &[&str],
+    env: &[(String, String)],
+    cwd: &Path,
+    not_found: &str,
+) -> Result<String, (String, bool)> {
     let mut child = Command::new(program)
         .args(args)
         .envs(env.iter().map(|(k, v)| (k, v)))
@@ -357,7 +745,15 @@ fn run_atuin(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("{program}: {e}"))?;
+        .map_err(|e| {
+            let missing = e.kind() == std::io::ErrorKind::NotFound;
+            let msg = if missing {
+                format!("{program} isn't installed")
+            } else {
+                format!("{program}: {e}")
+            };
+            (msg, missing)
+        })?;
     let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
         std::thread::spawn(move || {
             let mut s = String::new();
@@ -387,9 +783,9 @@ fn run_atuin(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{program} took over {}s", TIMEOUT.as_secs()));
+                return Err((format!("{program} took over {}s", TIMEOUT.as_secs()), false));
             }
-            Err(e) => return Err(format!("{program}: {e}")),
+            Err(e) => return Err((format!("{program}: {e}"), false)),
         }
     };
     let stdout = out.join().unwrap_or_default();
@@ -397,7 +793,10 @@ fn run_atuin(
     if status.success() {
         return Ok(stdout);
     }
-    Err(first_error(&stderr).map_or_else(|| not_found.to_string(), |e| format!("{program}: {e}")))
+    Err((
+        first_error(&stderr).map_or_else(|| not_found.to_string(), |e| format!("{program}: {e}")),
+        false,
+    ))
 }
 
 /// Extract the new session ID from `atuin threads resume --print --in ...`
@@ -606,5 +1005,139 @@ mod tests {
             "thread diverged on another host; pass --branch"
         ));
         assert!(!needs_branch_switch("no claude-code thread abc in atuin"));
+    }
+
+    #[test]
+    fn store_labels_programs_and_profile_matching_stay_separate() {
+        assert_eq!(Store::Personal.label(), "personal");
+        assert_eq!(Store::Personal.program(), "atuin");
+        assert!(Store::Personal.matches_profile("personal"));
+        assert!(Store::Personal.matches_profile(""));
+        assert!(!Store::Personal.matches_profile("work"));
+        assert!(!Store::Personal.matches_profile("notes"));
+
+        assert_eq!(Store::Work.label(), "work");
+        assert_eq!(Store::Work.program(), "atuin-work");
+        assert!(Store::Work.matches_profile("work"));
+        assert!(!Store::Work.matches_profile("personal"));
+        assert!(!Store::Work.matches_profile(""));
+        assert!(!Store::Work.matches_profile("notes"));
+    }
+
+    #[test]
+    fn parses_search_terms_with_phrases_and_escapes() {
+        assert_eq!(parse_search_terms("   "), Vec::<String>::new());
+        assert_eq!(
+            parse_search_terms("fed.rs switchyard"),
+            vec!["fed.rs", "switchyard"]
+        );
+        assert_eq!(
+            parse_search_terms(r#"fed.rs "last week" 'exact phrase'"#),
+            vec!["fed.rs", "last week", "exact phrase"]
+        );
+        assert_eq!(
+            parse_search_terms(r#""say \"hi\"" --flag"#),
+            vec![r#"say "hi""#, "--flag"]
+        );
+        assert_eq!(
+            parse_search_terms(r#""unclosed phrase"#),
+            vec!["unclosed phrase"]
+        );
+    }
+
+    #[test]
+    fn parses_search_json_for_claude_and_pi_and_validates_match_ranges() {
+        let json = r#"[
+          {
+            "session": {
+              "harness": "claude-code",
+              "session_id": "fcc83b5d-647a-444e-98e0-5085a2ebf1d0",
+              "atuin_id": "01a20464386f71c7b0a925a8713f68d3",
+              "cwd": "/Users/john/dev/switchyard/.worktrees/demo",
+              "git_branch": "feature/demo",
+              "model": "claude-opus-5-5",
+              "started_at": "2026-11-22T17:53:26.639+00:00",
+              "updated_at": "2026-11-22T17:56:47.607+00:00",
+              "message_count": 16,
+              "title": "Fix fed.rs",
+              "preview": "check fed.rs",
+              "last_reply": "Done."
+            },
+            "score": 8.5,
+            "title": {"text": "Fix fed.rs", "matches": [[4, 7], [8, 10]]},
+            "preview": {"text": "…crates/fed.rs", "matches": [[10, 13], [14, 16], [1, 2], [99, 120]]},
+            "message_index": 28
+          },
+          {
+            "session": {
+              "harness": "pi",
+              "session_id": "e128b81d-e55c-42a0-a0c6-9c22263b62e3",
+              "atuin_id": "01a1c742163c7e6881df20833b101cf6",
+              "cwd": "/Users/john/dev/work-app",
+              "model": "gpt-6.1-sol",
+              "started_at": "2026-11-10T20:59:19.484+00:00",
+              "updated_at": "2026-11-10T22:56:03.602+00:00",
+              "message_count": 207,
+              "preview": "first pi prompt",
+              "last_reply": "wrap complete"
+            },
+            "score": 4.2
+          }
+        ]"#;
+        let hits = parse_search_json(Store::Work, json).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].store, Store::Work);
+        assert_eq!(hits[0].harness, "claude");
+        assert_eq!(hits[0].session_id, "fcc83b5d-647a-444e-98e0-5085a2ebf1d0");
+        assert_eq!(hits[0].title, "Fix fed.rs");
+        assert_eq!(hits[0].title_matches, vec![(4, 7), (8, 10)]);
+        // [1, 2] lands inside the 3-byte `…` ellipsis and [99, 120] is out of bounds: both dropped.
+        assert_eq!(hits[0].snippet_matches, vec![(10, 13), (14, 16)]);
+        assert_eq!(hits[0].message_index, Some(28));
+        assert!(hits[0].updated_at > hits[0].started_at);
+
+        assert_eq!(hits[1].store, Store::Work);
+        assert_eq!(hits[1].harness, "pi");
+        assert_eq!(hits[1].title, "");
+        assert_eq!(hits[1].git_branch, "");
+        assert_eq!(hits[1].first_prompt, "first pi prompt");
+
+        assert_eq!(
+            parse_search_json(Store::Personal, "[]").unwrap(),
+            Vec::new()
+        );
+        assert!(parse_search_json(Store::Personal, "not json").is_err());
+    }
+
+    #[test]
+    fn sort_hits_orders_by_score_then_recency() {
+        let mk = |store, id: &str, score, updated_at| SearchHit {
+            store,
+            harness: "claude".into(),
+            session_id: id.into(),
+            atuin_id: String::new(),
+            cwd: String::new(),
+            git_branch: String::new(),
+            model: String::new(),
+            started_at: 0,
+            updated_at,
+            message_count: 1,
+            title: String::new(),
+            title_matches: Vec::new(),
+            snippet: String::new(),
+            snippet_matches: Vec::new(),
+            first_prompt: String::new(),
+            last_reply: String::new(),
+            message_index: None,
+            score,
+        };
+        let mut hits = vec![
+            mk(Store::Personal, "a", 5.0, 100),
+            mk(Store::Work, "b", 8.0, 50),
+            mk(Store::Personal, "c", 5.0, 200),
+        ];
+        sort_hits(&mut hits);
+        let ids: Vec<&str> = hits.iter().map(|h| h.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "c", "a"]);
     }
 }

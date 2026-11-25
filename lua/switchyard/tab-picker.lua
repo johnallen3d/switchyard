@@ -198,11 +198,11 @@ rex.action{
 rex.bind("cmd+i", "inbox")
 rex.bind("cmd+k", "quick_jump")
 
--- cmd+1-4: on the picker's own tab, show Inbox, Work, Usage or Archive
+-- cmd+1-5: on the picker's own tab, show Inbox, Work, Usage, Archive or Search
 -- (pasted as rex-data:view); anywhere else, Rex's own Go to Tab. A
 -- function binding that declines sends the key to the terminal rather
 -- than to the default, so it runs Go to Tab itself.
-local VIEWS = { "inbox", "work", "usage", "archive" }
+local VIEWS = { "inbox", "work", "usage", "archive", "search" }
 
 -- Whether the focused block is the picker's tab (labelled as FIND_OR_OPEN
 -- labels it; the quick float is a floating layer, not a tiled one).

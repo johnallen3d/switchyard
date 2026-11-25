@@ -29,7 +29,7 @@ const VERSION: &str = match option_env!("SWITCHYARD_BUILD_VERSION") {
 };
 
 const USAGE: &str =
-    "usage: switchyard [--view inbox|work|usage|archive] [--current SESSION/WINDOW] [--quick]
+    "usage: switchyard [--view inbox|work|usage|archive|search] [--current SESSION/WINDOW] [--quick]
        switchyard new [--session]
        switchyard link [REF...]
        switchyard unlink REF...
@@ -41,9 +41,11 @@ Bare, from a terminal, switchyard opens the picker for Rex tabs, agent
 tasks and the archive, which fetches its own data and acts on Enter,
 ctrl-b (work item actions: open, read, comment on or close a card
 or issue, mark a draft PR ready, each mutation confirmed first), ctrl-e
-(switch harness), ctrl-h (move to another host), ctrl-r (pin), ctrl-t (review in tuicr) and ctrl-z (snooze), staying open until its tab is closed. cmd+1-4 on its tab pick the views: Inbox, Work (one
+(switch harness), ctrl-h (move to another host), ctrl-q (search transcripts),
+ctrl-r (pin), ctrl-t (review in tuicr) and ctrl-z (snooze), staying open until its tab is closed. cmd+1-5 on its tab pick the views: Inbox, Work (one
 project's open cards or issues, or with ctrl-f its open pull requests,
-to start a session from), Usage, Archive.
+to start a session from), Usage, Archive, Search (full-text search across
+Atuin personal and work thread stores).
 --current highlights that tab (cmd+i and cmd+k pass the tab they were
 pressed on). --quick is cmd+k's float: Inbox's list alone, where
 Enter jumps to the highlighted tab and quits, and Escape quits. With

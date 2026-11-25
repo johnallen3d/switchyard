@@ -134,6 +134,7 @@ mod move_host;
 mod preview;
 mod projects;
 mod scrollback;
+mod search;
 mod snooze;
 mod standalone;
 mod usage;
@@ -255,7 +256,7 @@ enum Tasks {
     Failed,
 }
 
-/// The picker's views, picked with cmd+1-4 on the picker's tab.
+/// The picker's views, picked with cmd+1-5 on the picker's tab.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
     Inbox,
@@ -263,11 +264,19 @@ pub enum View {
     Work,
     Usage,
     Archive,
+    /// Full-text search across Atuin Threads (personal and work stores; see search.rs).
+    Search,
 }
 
 impl View {
     /// Every view, in the frame's view strip's order.
-    const ALL: [View; 4] = [View::Inbox, View::Work, View::Usage, View::Archive];
+    const ALL: [View; 5] = [
+        View::Inbox,
+        View::Work,
+        View::Usage,
+        View::Archive,
+        View::Search,
+    ];
 
     /// Its name in the frame's view strip.
     fn name(self) -> &'static str {
@@ -276,10 +285,11 @@ impl View {
             View::Work => "Work",
             View::Usage => "Usage",
             View::Archive => "Archive",
+            View::Search => "Search",
         }
     }
 
-    /// `inbox` (or the older `all`), `work`, `usage` or `archive`.
+    /// `inbox` (or the older `all`), `work`, `usage`, `archive`, or `search`.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
@@ -287,13 +297,14 @@ impl View {
             "archive" => Some(View::Archive),
             "work" => Some(View::Work),
             "usage" => Some(View::Usage),
+            "search" => Some(View::Search),
             _ => None,
         }
     }
 }
 
 /// The footer's hint for moving along the frame's view strip.
-const VIEW_HINT: (&str, &str) = ("⌘1-4", "views");
+const VIEW_HINT: (&str, &str) = ("⌘1-5", "views");
 
 /// Columns `spans` take.
 fn spans_width(spans: &[Span]) -> usize {
@@ -900,6 +911,10 @@ struct App {
     usage: usage::Usage,
     /// The Work view (see work.rs).
     work: work::Work,
+    /// The Search view (ctrl-q / cmd+5; see search.rs).
+    search: search::Search,
+    /// The view open before ctrl-q entered Search, so ctrl-q toggles back.
+    before_search: View,
     /// Sessions the Work view is starting: the item's URL and name, and
     /// the launch's outcome to come.
     launching: Vec<Launching>,
@@ -1011,6 +1026,8 @@ impl App {
             gone: None,
             usage: usage::Usage::default(),
             work: work::Work::default(),
+            search: search::Search::new(view == View::Search),
+            before_search: View::Inbox,
             launching: Vec::new(),
             launched: None,
             preview: None,
@@ -1038,9 +1055,12 @@ impl App {
     /// A bracketed paste: tabs, tasks, or a failure to get either.
     fn paste(&mut self, text: &str) {
         let Some((kind, body)) = protocol::data(text) else {
-            // Anything else John pasted goes into a comment being typed, or
-            // the reply box, if open.
+            // Anything else John pasted goes into a comment being typed, the
+            // transcript search bar, or the reply box, if open.
             if self.items.as_mut().is_some_and(|i| i.paste(text)) {
+                return;
+            }
+            if self.view == View::Search && self.search.paste(text) {
                 return;
             }
             if let Some(r) = &mut self.reply {
@@ -1793,7 +1813,7 @@ impl App {
                 self.work.refilter(&self.query, &self.tasks);
                 None
             }
-            View::Usage => None,
+            View::Usage | View::Search => None,
         };
         let want = if filtering {
             best.and_then(|i| self.key_of(i))
@@ -2185,6 +2205,13 @@ impl App {
                 .filter(|p| !p.is_empty());
             self.work.open(project.as_deref());
         }
+        if view == View::Search && self.view != View::Search {
+            self.before_search = self.view;
+            // Focus the query bar when opening Search without results yet.
+            if !self.search.has_searched {
+                self.search.typing = true;
+            }
+        }
         self.armed = Armed::No;
         self.projects = None;
         self.items = None;
@@ -2197,6 +2224,33 @@ impl App {
         // A search typed here carries over; an empty one ends.
         self.searching &= !self.query.is_empty();
         self.refilter();
+    }
+
+    /// The Atuin store(s) searched by the Search view for the current profile
+    /// filter (`all` queries both personal and work stores in parallel).
+    fn search_stores(&self) -> &'static [switchyard_core::atuin::Store] {
+        use switchyard_core::atuin::Store;
+        match self.profile {
+            Profile::All => &Store::ALL,
+            Profile::Personal => &[Store::Personal],
+            Profile::Work => &[Store::Work],
+        }
+    }
+
+    /// Toggle into the Search view (focusing its query box) or back to the
+    /// view open before it.
+    fn toggle_search(&mut self) {
+        if self.view == View::Search {
+            let back = if self.before_search == View::Search {
+                View::Inbox
+            } else {
+                self.before_search
+            };
+            self.set_view(back);
+        } else {
+            self.set_view(View::Search);
+            self.search.typing = true;
+        }
     }
 
     // ------------------------------------------------------------ the pick
@@ -2861,6 +2915,33 @@ impl App {
             return self.reply_key(k);
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        if self.view == View::Search {
+            let page = usize::try_from(self.page()).unwrap_or(1);
+            match self.search.key(k, &self.tasks, page) {
+                search::Outcome::Pass => {}
+                search::Outcome::RunSearch => {
+                    if self.feed.is_some() {
+                        let stores = self.search_stores();
+                        self.search.start(stores);
+                    }
+                    return;
+                }
+                search::Outcome::FocusTask(idx) => {
+                    self.focus_task_from_search(idx);
+                    return;
+                }
+                search::Outcome::Copy(text, note) => {
+                    self.copied = Some(text);
+                    self.note = Some((note, false));
+                    return;
+                }
+                search::Outcome::Refuse(why) => {
+                    self.note = Some((why, true));
+                    return;
+                }
+                search::Outcome::Stay | search::Outcome::GoOrResume(_) => return,
+            }
+        }
         // ctrl-x arms an archive; on a worktree with uncommitted changes, the
         // next ctrl-x (typed by the config when Enter answers `ask`) moves on
         // to "are you sure". Enter and Escape never get here.
@@ -2902,6 +2983,7 @@ impl App {
             || self.snooze.is_some()
             || self.reply.is_some()
             || (self.view == View::Work && self.work.chooser.is_some())
+            || (self.view == View::Search && self.search.typing)
         {
             return k;
         }
@@ -3069,7 +3151,15 @@ impl App {
             KeyCode::Char('o') if ctrl => {
                 self.profile = self.profile.next();
                 self.refilter();
+                if self.view == View::Search
+                    && !self.search.last_query.is_empty()
+                    && self.feed.is_some()
+                {
+                    let stores = self.search_stores();
+                    self.search.start(stores);
+                }
             }
+            KeyCode::Char('q') if ctrl => self.toggle_search(),
             KeyCode::Char('a') if ctrl => self.set_view(if self.view == View::Archive {
                 View::Inbox
             } else {
@@ -3619,6 +3709,17 @@ impl App {
             };
             self.usage
                 .draw(f, body, &self.p, self.now, &self.query, profile);
+        } else if self.view == View::Search {
+            self.list_area = body;
+            let p = self.p;
+            let ctx = search::DrawCtx {
+                palette: &p,
+                tasks: &self.tasks,
+                stores: self.search_stores(),
+                now: self.now,
+                tick: tick(self.started),
+            };
+            self.search.draw(f, body, &ctx);
         } else if let Some((list, pane)) = self.preview_split(body) {
             if self.expanded {
                 // Page keys page through the preview.
@@ -4136,7 +4237,12 @@ impl App {
         if self.view == View::Archive && self.kept {
             chip("not archived", p.foam);
         }
-        if matches!(self.view, View::Usage | View::Work) {
+        if self.view == View::Search
+            && let Some(harness) = self.search.harness.label()
+        {
+            chip(harness, if harness == "pi" { p.iris } else { p.foam });
+        }
+        if matches!(self.view, View::Usage | View::Work | View::Search) {
             return spans;
         }
         if let Tasks::Failed = self.tasks_load {
@@ -4152,6 +4258,10 @@ impl App {
 
     fn draw_search(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
+        if self.view == View::Search {
+            self.search.draw_search_bar(f, p, area, tick(self.started));
+            return;
+        }
         let typing = !self.query.is_empty();
         // The box lights up, with the cursor, only once `/` focuses it.
         let focused = self.searching || self.quick;
@@ -4163,6 +4273,7 @@ impl App {
             View::Usage => "Search accounts, harnesses, models, and hosts",
             View::Work if self.work.kind == work::Kind::Prs => "Search open pull requests",
             View::Work => "Search open work items",
+            View::Search => unreachable!(),
         };
         if matches!(self.view, View::Usage | View::Work) {
             draw::search(f, p, area, &self.query, placeholder, focused, focused);
@@ -4440,7 +4551,7 @@ impl App {
         };
         let lines = if self.query.trim().is_empty() {
             match self.view {
-                View::Usage | View::Work => Vec::new(),
+                View::Usage | View::Work | View::Search => Vec::new(),
                 View::Inbox => match &self.load {
                     Load::Waiting => vec![spin(), Line::from(""), text("Loading tabs…".into())],
                     Load::Failed(err) => vec![
@@ -5057,6 +5168,8 @@ impl App {
                     ("⌃W ⌥⌫", "delete a word"),
                 ],
             ));
+        } else if self.view == View::Search {
+            sections.push(search::help_section());
         } else if self.view == View::Usage {
             sections.push(Section::new(
                 "Usage",
@@ -5231,8 +5344,9 @@ impl App {
     fn views_section(&self) -> help::Section {
         let profile = format!("show {}", self.profile.next().name());
         let mut views = vec![
-            ("⌘1-4", "Inbox, Work, Usage, Archive"),
+            ("⌘1-5", "Inbox, Work, Usage, Archive, Search"),
             ("⌃A", "archive, and back"),
+            ("⌃Q", "transcript search, and back"),
             ("⌃O", profile.as_str()),
         ];
         match self.view {
@@ -5263,7 +5377,7 @@ impl App {
                     },
                 ));
             }
-            View::Usage | View::Work => {}
+            View::Usage | View::Work | View::Search => {}
         }
         views.push(("? F1", "these keys"));
         help::Section::new("Views", &views)
@@ -5502,6 +5616,22 @@ impl App {
         self.projects.as_ref().map(|_| projects::Chooser::hints())
     }
 
+    /// Footer hints for views with their own hint sets (Work and Search),
+    /// with the view strip hint placed before the keys float hint.
+    fn view_footer_hints(&self) -> Option<Vec<(&'static str, &'static str)>> {
+        let mut hints = match self.view {
+            View::Work => self.work.hints(),
+            View::Search => self.search.hints(&self.tasks),
+            _ => return None,
+        };
+        let at = hints
+            .iter()
+            .position(|h| h.0 == "?" || h.0 == "F1")
+            .unwrap_or(hints.len());
+        hints.insert(at, VIEW_HINT);
+        Some(hints)
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         if let Some((msg, failed)) = &self.note {
@@ -5562,11 +5692,7 @@ impl App {
             f.render_widget(line, area);
             return;
         }
-        if self.view == View::Work {
-            let mut hints = self.work.hints();
-            // The view strip's keys, before the keys float's.
-            let at = hints.iter().position(|h| h.0 == "?").unwrap_or(hints.len());
-            hints.insert(at, VIEW_HINT);
+        if let Some(hints) = self.view_footer_hints() {
             return self.draw_hints(f, area, &hints);
         }
         let hints: &[(&str, &str, Color)] = if self.quick {
@@ -5724,26 +5850,20 @@ impl App {
         if self.help.is_some() || self.scrollback.is_some() {
             return false;
         }
-        // The work items float has every key while it lasts; this runs
-        // what it asks for (see items.rs).
-        if self.items.is_some() {
-            self.run_items_key(k, term);
-            return true;
-        }
-        // The switch-harness float has every key while it lasts (see harness.rs).
-        if self.harness.is_some() {
-            self.run_harness_key(k, term);
-            return true;
-        }
-        // The move-host float has every key while it lasts (see move_host.rs).
-        if self.move_host.is_some() {
-            self.run_move_host_key(k, term);
+        // The modal floats (work items, switch-harness, move-host) have every
+        // key while open.
+        if self.run_modal_key(k, term) {
             return true;
         }
         // The Work view's own keys (see work.rs); the rest search and
         // switch views as in the others.
         if self.view == View::Work {
             return self.run_work_key(k, term);
+        }
+        // The Search view's own keys (see search.rs); global view/help/store
+        // keys pass through to `key`.
+        if self.view == View::Search {
+            return self.run_search_key(k, term);
         }
         // The Archive's project chooser has every key, Enter included.
         if self.projects.is_some() {
@@ -6108,6 +6228,24 @@ impl App {
         }
     }
 
+    /// Run a key for whichever modal float (`items`, `harness`, `move_host`)
+    /// is currently open; false when none is open.
+    fn run_modal_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        if self.items.is_some() {
+            self.run_items_key(k, term);
+            return true;
+        }
+        if self.harness.is_some() {
+            self.run_harness_key(k, term);
+            return true;
+        }
+        if self.move_host.is_some() {
+            self.run_move_host_key(k, term);
+            return true;
+        }
+        false
+    }
+
     /// Run what the work items float asks for on `k`: open a URL (closing
     /// the float), or take an action on its item, keeping the float open
     /// with the text if it fails.
@@ -6431,13 +6569,115 @@ impl App {
         self.note = Some((msg, false));
         let _ = term.draw(|f| self.draw(f));
     }
+
+    /// Run what a key in the Search view asks for: submit a background Atuin
+    /// query, jump to a mapped task in Inbox/Archive, go directly to its tab
+    /// or resume it, or copy its session info; false for keys passed through.
+    fn run_search_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        let page = usize::try_from(self.page()).unwrap_or(1);
+        match self.search.key(k, &self.tasks, page) {
+            search::Outcome::Pass => return false,
+            search::Outcome::Stay => self.note = None,
+            search::Outcome::RunSearch => {
+                self.note = None;
+                let stores = self.search_stores();
+                self.search.start(stores);
+            }
+            search::Outcome::FocusTask(idx) => {
+                self.note = None;
+                self.focus_task_from_search(idx);
+            }
+            search::Outcome::GoOrResume(idx) => {
+                self.note = None;
+                self.go_or_resume_from_search(idx, term);
+            }
+            search::Outcome::Copy(text, note) => {
+                self.copied = Some(text);
+                self.note = Some((note, false));
+            }
+            search::Outcome::Refuse(why) => {
+                self.note = Some((why, true));
+            }
+        }
+        true
+    }
+
+    /// Switch from Search to the mapped task `idx` in Inbox (live) or Archive
+    /// (ended), clearing filters that would hide it and highlighting its row.
+    fn focus_task_from_search(&mut self, idx: usize) {
+        let Some(task) = self.tasks.get(idx) else {
+            return;
+        };
+        let key = (task.session_id.clone(), task.window_id.clone());
+        let ended = task.ended.is_some();
+        let work = task.work();
+        let archived = task.archived();
+        let label = task.label();
+        if !self.profile_passes(work) {
+            self.profile = Profile::All;
+        }
+        self.query.clear();
+        self.searching = false;
+        if ended {
+            self.project = None;
+            if archived {
+                self.kept = false;
+            }
+            self.set_view(View::Archive);
+        } else {
+            self.set_view(View::Inbox);
+        }
+        self.follow = false;
+        self.refilter_to(Some(key));
+        self.note = Some((
+            format!(
+                "showing {label} in {}",
+                if ended { "Archive" } else { "Inbox" }
+            ),
+            false,
+        ));
+    }
+
+    /// Jump directly to a mapped open task's Rex tab, or resume a mapped ended
+    /// task in a new tab (highlighting it in Inbox once it lists).
+    fn go_or_resume_from_search(&mut self, idx: usize, term: &mut DefaultTerminal) {
+        let Some(task) = self.tasks.get(idx) else {
+            return;
+        };
+        let label = task.label();
+        let ended = task.ended.is_some();
+        let pick = standalone::Pick {
+            action: if ended { "resume" } else { "task" }.into(),
+            host: task.host.clone(),
+            session: task.session_id.clone(),
+            window: task.window_id.clone(),
+        };
+        if ended {
+            self.busy(term, format!("Resuming {label}…"));
+            self.note = Some(match standalone::resume_here(&pick) {
+                Ok((host, session, window)) => {
+                    self.query.clear();
+                    self.set_view(View::Inbox);
+                    self.launched = Some(((session, window), Instant::now()));
+                    (format!("resumed {label} on {host}"), false)
+                }
+                Err(e) => (e, true),
+            });
+            self.refetch();
+        } else {
+            self.note = Some(match standalone::go(&pick) {
+                Ok(()) => (format!("showed {label}"), false),
+                Err(e) => (e, true),
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------- main
 
 /// The project a folder is in: the repository a `.worktrees` worktree
 /// belongs to, else the folder's own name (`~` for home).
-fn folder_project(dir: &str) -> String {
+pub(crate) fn folder_project(dir: &str) -> String {
     let dir = match dir.trim_end_matches('/') {
         "" => return dir.to_string(),
         d => d,
@@ -6459,6 +6699,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.take_fetched();
         app.take_archived();
         app.take_work();
+        app.search.poll();
         app.ask_preview();
         app.sync_commands();
         let before = app.now;
@@ -6476,6 +6717,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         let animate = app.archiving.is_some()
             || !app.launching.is_empty()
             || (app.view == View::Work && app.work.loading())
+            || app.search.loading()
             || matches!(app.load, Load::Waiting)
             || matches!(app.tasks_load, Tasks::Waiting | Tasks::Live)
             || app.tabs.iter().any(|t| t.state == State::Working);
@@ -6495,13 +6737,12 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             }
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let k = app.list_letter(k);
-                if app.standalone_key(k, term) {
-                    continue;
-                }
-                app.note = None;
-                app.key(k);
-                if std::mem::take(&mut app.edit_requested) {
-                    app.edit_reply(term)?;
+                if !app.standalone_key(k, term) {
+                    app.note = None;
+                    app.key(k);
+                    if std::mem::take(&mut app.edit_requested) {
+                        app.edit_reply(term)?;
+                    }
                 }
                 if let Some(text) = app.copied.take() {
                     use std::io::Write;
@@ -6511,11 +6752,12 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
                         .and_then(|()| out.flush());
                 }
             }
-            // cmd+k's `current`, and John's own pastes, for the reply box
-            // or a work item comment.
+            // cmd+k's `current`, and John's own pastes, for the reply box,
+            // transcript search bar, or a work item comment.
             Event::Paste(text)
                 if app.fed && protocol::data(&text).is_some()
                     || app.reply.is_some()
+                    || (app.view == View::Search && app.search.typing)
                     || app
                         .items
                         .as_ref()
@@ -7254,10 +7496,10 @@ mod tests {
         let mut app = App::new((String::new(), String::new()), View::Archive);
         let (top, footer, buf) = draw(&mut app, 100);
         assert!(
-            top.starts_with("╭─ Inbox · Work · Usage · Archive "),
+            top.starts_with("╭─ Inbox · Work · Usage · Archive · Search "),
             "{top}"
         );
-        assert!(footer.contains("⌘1-4 views"), "{footer}");
+        assert!(footer.contains("⌘1-5 views"), "{footer}");
         // The current view lit, the others not.
         let fg = |name: &str| {
             let x = top[..top.find(name).unwrap()].chars().count();
@@ -8483,7 +8725,7 @@ mod tests {
         // on the right, on the same rows.
         let rows = screen(&mut app, 140);
         assert!(app.sidebar);
-        let row = rows.iter().find(|r| r.contains("Search")).unwrap();
+        let row = rows.iter().skip(1).find(|r| r.contains("Search")).unwrap();
         assert!(
             row.contains('│') && row.contains("woke") && row.contains("done"),
             "{row}"
@@ -8503,6 +8745,7 @@ mod tests {
         assert!(
             !rows
                 .iter()
+                .skip(1)
                 .any(|r| r.contains("Search") || r.contains("pinned")),
             "{rows:#?}"
         );
@@ -8688,5 +8931,91 @@ mod tests {
         assert!(app.move_host.is_none());
         let (msg, err) = app.note.as_ref().unwrap();
         assert!(*err && msg.contains("primary checkout"), "{msg}");
+    }
+
+    #[test]
+    fn ctrl_q_opens_transcript_search_and_enter_focuses_mapped_tasks() {
+        use switchyard_core::atuin::{SearchHit, SearchResult, Store};
+
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.paste(&format!(
+            "{}rows\nS\t-\tmac\ts1\tswitchyard\nT\tw-live\tdone\tlive-task\t~/dev/switchyard\n",
+            protocol::DATA
+        ));
+        app.paste(&format!(
+            "{}tasks\n[\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w-live\",\"project\":\"switchyard\",\"name\":\"live-task\",\"profile\":\"personal\",\"harness\":\"claude\",\"agent_session\":\"sess-live\",\"created_at\":10,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w-old\",\"project\":\"amfaro\",\"name\":\"old-work\",\"profile\":\"work\",\"harness\":\"pi\",\"agent_session\":\"sess-work\",\"created_at\":5,\"ended_at\":20,\"ended_reason\":\"archived\"}}\
+            ]",
+            protocol::DATA
+        ));
+
+        // ctrl-q from Inbox opens Search with the query bar focused.
+        app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.view == View::Search && app.search.typing);
+
+        // Plain `j` and `k` type into the query box instead of stepping.
+        for c in "jk".chars() {
+            app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        assert_eq!(app.search.query, "jk");
+
+        // Load simulated hits from both stores and leave typing mode.
+        app.search.typing = false;
+        app.search.has_searched = true;
+        app.search.last_query = "fed.rs".into();
+        let hit = |store, sid: &str, title: &str| SearchHit {
+            store,
+            harness: "claude".into(),
+            session_id: sid.into(),
+            atuin_id: "a1".into(),
+            cwd: "/Users/john/dev/switchyard".into(),
+            git_branch: "main".into(),
+            model: "claude-opus-5-5".into(),
+            started_at: 10,
+            updated_at: 20,
+            message_count: 5,
+            title: title.into(),
+            title_matches: Vec::new(),
+            snippet: "touched fed.rs".into(),
+            snippet_matches: Vec::new(),
+            first_prompt: "check fed.rs".into(),
+            last_reply: "done".into(),
+            message_index: Some(2),
+            score: 5.0,
+        };
+        app.search.apply_result(SearchResult {
+            hits: vec![
+                hit(Store::Personal, "sess-live", "Live task"),
+                hit(Store::Work, "sess-work", "Work archived"),
+            ],
+            errors: Vec::new(),
+        });
+
+        // Enter on open personal hit opens Inbox on that task.
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.view == View::Inbox);
+        assert_eq!(app.selected_key(), Some(("s1".into(), "w-live".into())));
+
+        // Return to Search via `view` paste (cmd+5); previous hits remain.
+        app.paste(&format!("{}view\nsearch", protocol::DATA));
+        assert!(app.view == View::Search);
+        assert_eq!(app.search.hits.len(), 2);
+
+        // Even with Archive hiding archived tasks and profile=personal, Enter on
+        // the work archived hit clears blocking filters and highlights it.
+        app.profile = Profile::Personal;
+        app.kept = true;
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.view == View::Archive);
+        assert!(app.profile == Profile::All && !app.kept);
+        assert_eq!(app.selected_key(), Some(("s1".into(), "w-old".into())));
+
+        // ctrl-q from Archive toggles into Search, and ctrl-q again returns to Archive.
+        app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.view == View::Search);
+        app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
+        assert!(app.view == View::Archive);
     }
 }
