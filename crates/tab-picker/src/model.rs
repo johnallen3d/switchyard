@@ -351,6 +351,8 @@ pub struct Task {
     pub session_id: String,
     pub window_id: String,
     pub project: String,
+    pub repo: String,
+    pub worktree: String,
     pub name: String,
     /// The agent session's own title (Claude's, or one given with
     /// `/rename`; see core's `transcript::title`), or empty.
@@ -480,6 +482,8 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             session_id: s(t, "session_id"),
             window_id: s(t, "window_id"),
             project: s(t, "project"),
+            repo: s(t, "repo"),
+            worktree: s(t, "worktree"),
             name: s(t, "name"),
             title: s(t, "title"),
             profile: s(t, "profile"),

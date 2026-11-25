@@ -377,6 +377,16 @@ pub fn switch_harness(p: &Pick, target: &str) -> Result<(String, String, String)
     parse_tab_out("switch", &out)
 }
 
+/// Move a live or ended personal task to another compatible host (`HOST` or
+/// `"auto"`). Ok is where it runs: host, session and window.
+pub fn move_host(p: &Pick, target: &str) -> Result<(String, String, String), String> {
+    let out = logged(
+        "move",
+        actions::move_host(&p.host, &p.session, &p.window, target),
+    )?;
+    parse_tab_out("move", &out)
+}
+
 fn parse_tab_out(action: &str, out: &str) -> Result<(String, String, String), String> {
     let mut fields = out.trim_end().splitn(3, '\t');
     match (fields.next(), fields.next(), fields.next()) {

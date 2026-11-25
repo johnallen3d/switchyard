@@ -130,6 +130,7 @@ mod help;
 mod history;
 mod items;
 mod model;
+mod move_host;
 mod preview;
 mod projects;
 mod scrollback;
@@ -774,6 +775,15 @@ fn help_popup_sections() -> Vec<help::Section> {
             ],
         ),
         Section::new(
+            "Move host",
+            &[
+                ("⏎", "move task to highlighted host or auto (asks first)"),
+                ("⏎ y", "confirm; other keys go back"),
+                ("↑↓ j k", "choose"),
+                ("esc ⌃H", "dismiss"),
+            ],
+        ),
+        Section::new(
             "This float",
             &[
                 ("/", "filter"),
@@ -836,6 +846,8 @@ struct App {
     items: Option<items::Items>,
     /// The open ctrl-e switch-harness float (see harness.rs).
     harness: Option<harness::Chooser>,
+    /// The open ctrl-h move-host float (see `move_host.rs`).
+    move_host: Option<move_host::Chooser>,
     /// The open ctrl-z snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
     /// The reply box while Tab has moved into it; Enter sends, Escape
@@ -972,6 +984,7 @@ impl App {
             armed: Armed::No,
             items: None,
             harness: None,
+            move_host: None,
             snooze: None,
             reply: None,
             idle: PromptBox::new(),
@@ -1103,6 +1116,7 @@ impl App {
             if self.projects.is_none()
                 && self.items.is_none()
                 && self.harness.is_none()
+                && self.move_host.is_none()
                 && self.snooze.is_none()
                 && self.reply.is_none()
             {
@@ -1115,6 +1129,7 @@ impl App {
         if self.projects.is_some()
             || self.items.is_some()
             || self.harness.is_some()
+            || self.move_host.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
         {
@@ -1193,6 +1208,14 @@ impl App {
         {
             self.harness = None;
         }
+        // As does the move-host float.
+        if self
+            .move_host
+            .as_ref()
+            .is_some_and(|m| self.selected_key().as_ref() != Some(&m.key))
+        {
+            self.move_host = None;
+        }
         // The reply box stays on its agent, closing only when it's gone.
         if let Some(key) = self.reply.as_ref().map(|r| r.key.clone())
             && self.selected_key().as_ref() != Some(&key)
@@ -1219,6 +1242,7 @@ impl App {
         if self.projects.is_some()
             || self.items.is_some()
             || self.harness.is_some()
+            || self.move_host.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
         {
@@ -2165,6 +2189,7 @@ impl App {
         self.projects = None;
         self.items = None;
         self.harness = None;
+        self.move_host = None;
         self.snooze = None;
         self.close_reply();
         self.view = view;
@@ -2327,6 +2352,106 @@ impl App {
                 None
             }
             run @ harness::Outcome::Switch(_) => Some(run),
+        }
+    }
+
+    /// Open the move-host float (ctrl-h) for the highlighted task, in Inbox or
+    /// Archive; the footer says why when it can't be moved.
+    fn open_move_host(&mut self) {
+        if !matches!(self.view, View::Inbox | View::Archive) {
+            return;
+        }
+        let Some(t) = self.selected_task() else {
+            self.note = Some(("highlight a task to move it to another host".into(), true));
+            return;
+        };
+        let label = t.label();
+        if t.is_orphan() {
+            self.note = Some((
+                format!("{label} is an orphan worktree with no agent session to move"),
+                true,
+            ));
+            return;
+        }
+        if !t.worktree.is_empty()
+            && t.worktree.trim_end_matches('/') == t.repo.trim_end_matches('/')
+        {
+            self.note = Some((
+                format!("{label} is in the primary checkout, not a task worktree"),
+                true,
+            ));
+            return;
+        }
+        let source = if t.harness.is_empty() {
+            "claude".to_string()
+        } else {
+            t.harness.clone()
+        };
+        if let Err(why) = switchyard_core::atuin::move_plan(&t.profile, &source) {
+            self.note = Some((format!("{label}: {why}"), true));
+            return;
+        }
+        let projects = match switchyard_core::hosts::catalog() {
+            Ok(p) => p,
+            Err(e) => {
+                self.note = Some((e, true));
+                return;
+            }
+        };
+        let Some(project) = projects.into_iter().find(|p| {
+            switchyard_core::folders::home_relative(&p.path)
+                == switchyard_core::folders::home_relative(&t.repo)
+        }) else {
+            self.note = Some((
+                format!("{label} isn't a catalog project, so it can't be moved to another host"),
+                true,
+            ));
+            return;
+        };
+        let current_host = t.host.clone();
+        let targets = switchyard_core::hosts::other_compatible(&project, &current_host);
+        if targets.is_empty() {
+            self.note = Some((format!("no other compatible host for {label}"), true));
+            return;
+        }
+        let (dirty, ended) = (t.dirty, t.ended.is_some());
+        let Some(key) = self.selected_key() else {
+            return;
+        };
+        let local = switchyard_core::rex::local_label();
+        let probes = switchyard_core::hosts::cached_probe_summary(&project.name);
+        self.armed = Armed::No;
+        self.moved();
+        self.move_host = Some(move_host::Chooser::from_hosts(
+            move_host::Source {
+                key,
+                label,
+                host: current_host,
+                dirty,
+                ended,
+            },
+            &targets,
+            &local,
+            &probes,
+        ));
+    }
+
+    /// A key for the move-host float: what it does here, and what it asks the
+    /// picker to run, if anything.
+    fn move_host_key(&mut self, k: KeyEvent) -> Option<move_host::Outcome> {
+        let m = self.move_host.as_mut()?;
+        self.note = None;
+        match m.key(k) {
+            move_host::Outcome::Stay => None,
+            move_host::Outcome::Close => {
+                self.move_host = None;
+                None
+            }
+            move_host::Outcome::Help => {
+                self.help = Some(help::Help::default());
+                None
+            }
+            run @ move_host::Outcome::Move(_) => Some(run),
         }
     }
 
@@ -2720,6 +2845,10 @@ impl App {
             self.harness_key(k);
             return;
         }
+        if self.move_host.is_some() {
+            self.move_host_key(k);
+            return;
+        }
         if self.snooze.is_some() {
             return self.snooze_key(k);
         }
@@ -2768,6 +2897,7 @@ impl App {
             || self.scrollback.is_some()
             || self.items.is_some()
             || self.harness.is_some()
+            || self.move_host.is_some()
             || self.projects.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
@@ -2903,6 +3033,7 @@ impl App {
             KeyCode::Char('z') if ctrl => self.open_snooze(),
             KeyCode::Char('b') if ctrl => self.open_items(),
             KeyCode::Char('e') if ctrl => self.open_harness(),
+            KeyCode::Char('h') if ctrl => self.open_move_host(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('s') if ctrl && self.view == View::Inbox => {
                 self.expanded = !self.expanded;
@@ -3329,6 +3460,7 @@ impl App {
         self.draw_projects(f, main);
         self.draw_items(f, main);
         self.draw_harness(f, main);
+        self.draw_move_host(f, main);
         self.draw_snooze(f, main);
     }
 
@@ -3505,6 +3637,7 @@ impl App {
         self.draw_projects(f, body);
         self.draw_items(f, body);
         self.draw_harness(f, body);
+        self.draw_move_host(f, body);
         self.draw_snooze(f, body);
     }
 
@@ -3896,6 +4029,13 @@ impl App {
     fn draw_harness(&self, f: &mut Frame, area: Rect) {
         if let Some(h) = &self.harness {
             h.draw(f, area, &self.p);
+        }
+    }
+
+    /// The ctrl-h move-host float, when open (see `move_host.rs`).
+    fn draw_move_host(&self, f: &mut Frame, area: Rect) {
+        if let Some(m) = &self.move_host {
+            m.draw(f, area, &self.p);
         }
     }
 
@@ -4946,6 +5086,8 @@ impl App {
             Some("Work items")
         } else if self.harness.is_some() {
             Some("Switch harness")
+        } else if self.move_host.is_some() {
+            Some("Move host")
         } else {
             None
         };
@@ -4989,6 +5131,7 @@ impl App {
         }
         if task.is_some_and(|t| !t.is_orphan()) {
             row.push(("⌃E", "continue in another harness (claude ↔ pi)"));
+            row.push(("⌃H", "move task to another compatible host"));
         }
         if self.view == View::Inbox && task.is_some_and(|t| t.open_pr().is_some()) {
             row.push(("⌃T", "review its pull request in tuicr; :submit sends it"));
@@ -5353,6 +5496,9 @@ impl App {
         if let Some(h) = &self.harness {
             return Some(h.hints());
         }
+        if let Some(m) = &self.move_host {
+            return Some(m.hints());
+        }
         self.projects.as_ref().map(|_| projects::Chooser::hints())
     }
 
@@ -5587,6 +5733,11 @@ impl App {
         // The switch-harness float has every key while it lasts (see harness.rs).
         if self.harness.is_some() {
             self.run_harness_key(k, term);
+            return true;
+        }
+        // The move-host float has every key while it lasts (see move_host.rs).
+        if self.move_host.is_some() {
+            self.run_move_host_key(k, term);
             return true;
         }
         // The Work view's own keys (see work.rs); the rest search and
@@ -6061,6 +6212,45 @@ impl App {
             Err(e) => {
                 if let Some(h) = &mut self.harness {
                     h.failed();
+                }
+                self.note = Some((e, true));
+            }
+        }
+    }
+
+    /// Run what the move-host float asks for on `k`: move the live or archived
+    /// personal task to the chosen host (or `auto`), keeping the float open on
+    /// failure so the error stays readable and retryable.
+    fn run_move_host_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
+        let Some(move_host::Outcome::Move(target)) = self.move_host_key(k) else {
+            return;
+        };
+        let Some((label, ended)) = self.move_host.as_ref().map(|m| (m.label.clone(), m.ended))
+        else {
+            return;
+        };
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return;
+        };
+        self.busy(term, format!("Moving {label} to {target}…"));
+        match standalone::move_host(&pick, &target) {
+            Ok((host, session, window)) => {
+                self.move_host = None;
+                if ended {
+                    self.query.clear();
+                    self.set_view(View::Inbox);
+                }
+                self.launched = Some(((session, window), Instant::now()));
+                self.preview = None;
+                if let Some(feed) = &self.feed {
+                    feed.preview(None);
+                }
+                self.note = Some((format!("moved {label} to {host}"), false));
+                self.refetch();
+            }
+            Err(e) => {
+                if let Some(m) = &mut self.move_host {
+                    m.failed();
                 }
                 self.note = Some((e, true));
             }
@@ -8448,5 +8638,55 @@ mod tests {
         assert!(app.harness.is_none());
         let (msg, err) = app.note.as_ref().unwrap();
         assert!(*err && msg.contains("notes"), "{msg}");
+    }
+
+    #[test]
+    fn ctrl_h_refuses_work_agy_notes_and_primary_checkout_clearly() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.paste(&format!(
+            "{}rows\nS\t-\tmac\ts1\tswitchyard\nT\tw1\tidle\tw\t~\nT\tw2\tidle\ta\t~\nT\tw3\tidle\tn\t~\nT\tw4\tidle\tp\t~\n",
+            protocol::DATA
+        ));
+        app.paste(&format!(
+            "{}tasks\n[\
+            {{\"host\":\"miller\",\"session_id\":\"s1\",\"window_id\":\"w1\",\"project\":\"calc\",\"repo\":\"/home/j/dev/amfaro/calc\",\"worktree\":\"/home/j/dev/amfaro/calc/.worktrees/w\",\"name\":\"w\",\"profile\":\"work\",\"harness\":\"claude\",\"created_at\":1,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w2\",\"project\":\"switchyard\",\"repo\":\"/r\",\"worktree\":\"/r/.worktrees/a\",\"name\":\"a\",\"profile\":\"personal\",\"harness\":\"agy\",\"created_at\":1,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w3\",\"project\":\"notes\",\"repo\":\"/n\",\"worktree\":\"/n/.worktrees/n\",\"name\":\"n\",\"profile\":\"notes\",\"harness\":\"pi\",\"created_at\":1,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w4\",\"project\":\"switchyard\",\"repo\":\"/r\",\"worktree\":\"/r\",\"name\":\"p\",\"profile\":\"personal\",\"harness\":\"claude\",\"created_at\":1,\"ended_at\":null}}\
+            ]",
+            protocol::DATA
+        ));
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+
+        // Work task: refuses clearly because atuin-work is local-only.
+        app.select_key(Some(("s1".into(), "w1".into())));
+        app.key(ctrl_h);
+        assert!(app.move_host.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(
+            *err && msg.contains("atuin-work") && msg.contains("not synced"),
+            "{msg}"
+        );
+
+        // Antigravity task: refuses clearly.
+        app.select_key(Some(("s1".into(), "w2".into())));
+        app.key(ctrl_h);
+        assert!(app.move_host.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(*err && msg.contains("agy"), "{msg}");
+
+        // Notes profile: refuses clearly.
+        app.select_key(Some(("s1".into(), "w3".into())));
+        app.key(ctrl_h);
+        assert!(app.move_host.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(*err && msg.contains("notes"), "{msg}");
+
+        // Primary checkout: refuses clearly.
+        app.select_key(Some(("s1".into(), "w4".into())));
+        app.key(ctrl_h);
+        assert!(app.move_host.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(*err && msg.contains("primary checkout"), "{msg}");
     }
 }

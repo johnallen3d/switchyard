@@ -19,6 +19,7 @@ pub mod item_view;
 pub mod items;
 pub mod launch;
 pub mod links;
+pub mod move_host;
 pub mod naming;
 pub mod orphans;
 pub mod prompts;

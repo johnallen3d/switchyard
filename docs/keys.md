@@ -18,6 +18,7 @@ in every list view.
 | ⌃E        | expand the preview / hide the sidebar | —                                | give the item the whole view             | —                             | —      | —                | —                      |
 | ⌃F        | —                                   | —                                  | work items ↔ pull requests               | hide or show archived tasks   | —      | page down        | —                      |
 | ⌃G        | —                                   | edit in the editor                 | arm a pull request's approval            | —                             | —      | —                | —                      |
+| ⌃H        | move host float                     | —                                  | —                                        | move host float               | —      | —                | —                      |
 | ⌃J ⌃K     | next, previous (wraps)              | leave for the list, next, previous | next, previous                           | next, previous (wraps)        | scroll | —                | —                      |
 | ⌃L        | transcript → diff → commits         | —                                  | pull request: description → diff → commits | —                           | —      | —                | —                      |
 | ⌃N ⌃P     | next, previous                      | —                                  | next, previous                           | next, previous                | scroll | —                | next, previous; reader: a line |
@@ -30,7 +31,7 @@ in every list view.
 | ⌃W        | delete a word of the search         | delete a word                      | delete a word of the search              | delete a word of the search   | delete a word | —         | —                      |
 | ⌃X        | arm an archive                      | leave and arm an archive           | —                                        | arm an archive or worktree removal | — | —              | —                      |
 
-Free everywhere: ⌃H, ⌃Y, ⌃Q, ⌃Z. ⌃I and ⌃M arrive as Tab and Enter.
+Free everywhere: ⌃Y, ⌃Q, ⌃Z. ⌃I and ⌃M arrive as Tab and Enter.
 
 ## Other keys
 

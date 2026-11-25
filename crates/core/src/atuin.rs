@@ -49,6 +49,158 @@ pub fn store_program(profile: &str) -> Option<&'static str> {
     }
 }
 
+/// Validate moving a task of `profile` and `harness` to another host through
+/// Atuin Threads, returning `(program, atuin_harness)`.
+///
+/// The personal store (`atuin`) syncs through nas, so threads can be restored
+/// on any pool host. The work store (`atuin-work`) is local-only and not
+/// synced, so moving a work task across hosts is refused clearly rather than
+/// dropping the conversation or crossing profiles.
+///
+/// # Errors
+///
+/// Fails with a clear explanation when `profile` is `work` (unsynced store),
+/// Atuin doesn't capture `profile`, or Atuin doesn't capture `harness`.
+pub fn move_plan(profile: &str, harness: &str) -> Result<(&'static str, &'static str), String> {
+    if profile == "work" {
+        return Err(
+            "work tasks use the local-only atuin-work store (not synced), so they can't be moved across hosts"
+                .into(),
+        );
+    }
+    let program = store_program(profile)
+        .ok_or_else(|| format!("Atuin doesn't capture the {profile} profile"))?;
+    let atuin_harness =
+        harness_name(harness).ok_or_else(|| format!("Atuin doesn't capture {harness} sessions"))?;
+    Ok((program, atuin_harness))
+}
+
+/// Sync `profile`'s Atuin store on this host. Only synced stores (personal)
+/// are allowed; work's local-only store is refused.
+///
+/// # Errors
+///
+/// Fails when `profile` is unsynced or uncaptured, or when `atuin sync`
+/// fails or times out.
+pub fn sync_here(profile: &str) -> Result<(), String> {
+    if profile == "work" {
+        return Err("atuin-work is local-only and cannot be synced".into());
+    }
+    let program = store_program(profile)
+        .ok_or_else(|| format!("Atuin doesn't capture the {profile} profile"))?;
+    run_atuin(program, &["sync"], &[], &crate::rex::home(), "sync failed")?;
+    Ok(())
+}
+
+/// This host's Atuin host ID from `atuin info`, used as `@<host id>` when
+/// resolving a diverged thread branch during a cross-host move.
+#[must_use]
+pub fn host_id_here(profile: &str) -> Option<String> {
+    if profile == "work" {
+        return None;
+    }
+    let program = store_program(profile)?;
+    let out = run_atuin(program, &["info"], &[], &crate::rex::home(), "info failed").ok()?;
+    parse_host_id(&out)
+}
+
+/// Extract `host id: ...` from `atuin info` output.
+#[must_use]
+pub fn parse_host_id(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let id = line.trim().strip_prefix("host id:")?.trim();
+        (!id.is_empty() && !id.chars().any(char::is_whitespace)).then(|| id.to_string())
+    })
+}
+
+/// Whether an Atuin error says the local copy of the thread diverged from
+/// sync and requires `--switch` / `--branch` / `--as-is`.
+#[must_use]
+pub fn needs_branch_switch(err: &str) -> bool {
+    err.contains("--switch")
+        || err.contains("--branch")
+        || err.contains("--as-is")
+        || err.contains("diverged")
+}
+
+/// Restore agent session `id` on this host after syncing for a cross-host
+/// move, into `worktree`.
+///
+/// Unlike `restore`, this also handles a thread that already exists on this
+/// host and diverged from `source_host_id` by switching it in place to
+/// `@<source_host_id>` via `--switch` (never silently falling back to
+/// `--as-is`, which would drop the source host's newer turns), and verifies
+/// that the harness transcript now exists for `worktree`.
+///
+/// # Errors
+///
+/// Fails when `move_plan` refuses the profile/harness, `worktree` is missing,
+/// Atuin fails or has no such thread, or the restored session isn't found for
+/// `worktree`.
+pub fn restore_for_move(
+    profile: &str,
+    harness: &str,
+    env: &[(String, String)],
+    worktree: &Path,
+    id: &str,
+    source_host_id: Option<&str>,
+) -> Result<(), String> {
+    let (program, atuin_harness) = move_plan(profile, harness)?;
+    if id.is_empty() || id.starts_with('-') {
+        return Err(format!("{id} isn't a session ID"));
+    }
+    if !worktree.is_dir() {
+        return Err(format!("worktree {} is missing", worktree.display()));
+    }
+    let missing = format!("no {atuin_harness} thread {id} in {program}");
+    let first = run_atuin(
+        program,
+        &["threads", "resume", "--print", id],
+        env,
+        worktree,
+        &missing,
+    );
+    match first {
+        Ok(_) => {}
+        Err(err) if needs_branch_switch(&err) => {
+            let branch_ref = source_host_id
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("@{s}"));
+            let args: Vec<&str> = match branch_ref.as_deref() {
+                Some(b) => vec![
+                    "threads", "resume", "--print", "--switch", "--branch", b, id,
+                ],
+                None => vec!["threads", "resume", "--print", "--switch", id],
+            };
+            run_atuin(program, &args, env, worktree, &missing)
+                .map_err(|second| if second == missing { err } else { second })?;
+        }
+        Err(err) => return Err(err),
+    }
+    let here = worktree.display().to_string();
+    if !session_exists_with_env(harness, env, &here, id) {
+        return Err(format!(
+            "{program} restored {harness} session {id}, but not for {here}"
+        ));
+    }
+    Ok(())
+}
+
+/// `restore_for_move` on this host.
+///
+/// # Errors
+///
+/// Fails as `restore_for_move` does.
+pub fn restore_for_move_here(
+    profile: &str,
+    harness: &str,
+    worktree: &Path,
+    id: &str,
+    source_host_id: Option<&str>,
+) -> Result<(), String> {
+    restore_for_move(profile, harness, &[], worktree, id, source_host_id)
+}
+
 /// Validate continuing a task of `profile` from `source` to `target` through
 /// Atuin Threads, returning `(program, source_atuin, target_atuin)`.
 ///
@@ -422,5 +574,37 @@ mod tests {
         assert_eq!(first_error("\n"), None);
         let unknown = "Error: the picker needs a terminal; to resume without one, name the thread";
         assert_eq!(first_error(unknown), None);
+    }
+
+    #[test]
+    fn move_plan_allows_personal_captured_harnesses_and_refuses_work_notes_agy() {
+        assert_eq!(
+            move_plan("personal", "claude"),
+            Ok(("atuin", "claude-code"))
+        );
+        assert_eq!(move_plan("personal", "pi"), Ok(("atuin", "pi")));
+        assert_eq!(move_plan("", "claude"), Ok(("atuin", "claude-code")));
+        let work_err = move_plan("work", "claude").unwrap_err();
+        assert!(
+            work_err.contains("atuin-work") && work_err.contains("not synced"),
+            "{work_err}"
+        );
+        assert!(move_plan("notes", "pi").unwrap_err().contains("notes"));
+        assert!(move_plan("personal", "agy").unwrap_err().contains("agy"));
+    }
+
+    #[test]
+    fn parses_host_id_and_detects_divergence_errors() {
+        let info = "Version info:\nversion: 18.24.8\n\nHost info:\nhost id: 01a20f5f535e75018dc129311465cb7c\n";
+        assert_eq!(
+            parse_host_id(info).as_deref(),
+            Some("01a20f5f535e75018dc129311465cb7c")
+        );
+        assert_eq!(parse_host_id("Host info:\nhost id: \n"), None);
+        assert!(needs_branch_switch("use --switch or --as-is"));
+        assert!(needs_branch_switch(
+            "thread diverged on another host; pass --branch"
+        ));
+        assert!(!needs_branch_switch("no claude-code thread abc in atuin"));
     }
 }

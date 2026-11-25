@@ -21,6 +21,7 @@ pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task act snooze HOST SESSION_ID WINDOW_ID UNTIL
        switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
        switchyard task act switch HOST SESSION_ID WINDOW_ID HARNESS
+       switchyard task act move HOST SESSION_ID WINDOW_ID TARGET_HOST
        switchyard task session-of PROFILE HARNESS WORKTREE
        switchyard task convert PROFILE SOURCE TARGET WORKTREE SESSION_ID
 
@@ -42,6 +43,9 @@ tab (force-archive also throws away uncommitted changes), resumes an
 ended task's agent session in a new tab and prints it as launch does,
 switches a live or ended task to another harness in the same worktree via
 Atuin Threads and prints HOST<TAB>SESSION_ID<TAB>WINDOW_ID (switch),
+moves a live or ended personal task (branch, uncommitted changes and Atuin
+thread) to another compatible host or `auto` (least busy) and prints
+HOST<TAB>SESSION_ID<TAB>WINDOW_ID (move),
 prints the URL of the task's main work item (link), pins or unpins an
 open task in the inbox (pin), snoozes it until UNTIL, Unix seconds,
 with 0 waking it (snooze), or sends the agent in the tab the text of the
@@ -124,6 +128,8 @@ pub fn main(args: &[&str]) -> ExitCode {
                 ("message", []) => Err("message takes a PROMPT_REF".into()),
                 ("switch", [harness]) => actions::switch_harness(host, session, window, harness),
                 ("switch", []) => Err("switch takes a HARNESS[:MODEL]".into()),
+                ("move", [target]) => actions::move_host(host, session, window, target),
+                ("move", []) => Err("move takes a HOST or auto".into()),
                 (_, []) => actions::act(action, host, session, window),
                 _ => Err(format!("{action} takes no extra argument")),
             };

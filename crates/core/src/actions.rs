@@ -49,6 +49,11 @@
 //!   updating `harness`, `model`, and `agent_session` in the registry and
 //!   relaunching in the same tab (for a live task) or opening a new tab (for
 //!   an ended task), printing `HOST<TAB>SESSION<TAB>WINDOW`.
+//! - move (`task act move HOST SESSION WINDOW TARGET_HOST`): move a live or
+//!   ended personal task to another compatible pool host (`HOST`, `"config"`,
+//!   or `"auto"` for the least busy), carrying committed and uncommitted
+//!   worktree state and syncing/restoring its Atuin thread (see `move_host`),
+//!   printing `HOST<TAB>SESSION<TAB>WINDOW`.
 //!
 //! Archiving doesn't delete an unmerged branch: only uncommitted work can be
 //! lost, and a resume finds its commits again.
@@ -68,7 +73,7 @@ use crate::tasks::{MERGED_SH, in_window, load_tasks, save_record, update_tasks};
 
 /// The tab's agent pane: the first pane of its tiled layer, which is where
 /// `--run` started the agent.
-fn agent_block(host: &str, session: &str, window: &str) -> Result<String, String> {
+pub(crate) fn agent_block(host: &str, session: &str, window: &str) -> Result<String, String> {
     let list = rex_json(host, &["window", "ls", "-s", session, "--json"])?;
     list["windows"]
         .as_array()
@@ -156,7 +161,7 @@ enum Adopted {
 }
 
 /// A session spawn created for the project goes when its last tab does.
-fn kill_if_empty(host: &str, session: &str) {
+pub(crate) fn kill_if_empty(host: &str, session: &str) {
     // An orphan worktree has no session.
     if session.is_empty() {
         return;
@@ -358,7 +363,24 @@ fn validate_target_spec(spec: &str) -> Result<(&str, Option<&str>), String> {
     Ok((harness, model))
 }
 
-fn find_switch_task(
+/// Move the live or ended task in `window` on `host` to `target_host` (a
+/// compatible host label, `"config"`, or `"auto"` for the least busy).
+///
+/// See `crate::move_host::move_host` for details and safety guarantees.
+///
+/// # Errors
+///
+/// Fails as `crate::move_host::move_host` does.
+pub fn move_host(
+    host: &str,
+    session: &str,
+    window: &str,
+    target_host: &str,
+) -> Result<String, String> {
+    crate::move_host::move_host(host, session, window, target_host)
+}
+
+pub(crate) fn find_switch_task(
     tasks: &[serde_json::Value],
     window: &str,
 ) -> Result<serde_json::Value, String> {
@@ -667,7 +689,7 @@ fn ensure_worktree_script(
 
 /// `branch`'s head commit in the checkout at `repo` on `host`, in full; None
 /// when it can't be read.
-fn branch_head(host: &str, repo: &str, branch: &str) -> Option<String> {
+pub(crate) fn branch_head(host: &str, repo: &str, branch: &str) -> Option<String> {
     if branch.is_empty() {
         return None;
     }
@@ -921,7 +943,7 @@ fn open_task<'a>(
         .ok_or_else(|| "no open task for that tab".to_string())
 }
 
-fn label_of(task: &serde_json::Value) -> String {
+pub(crate) fn label_of(task: &serde_json::Value) -> String {
     format!(
         "{}/{}",
         task["project"].as_str().unwrap_or(""),
@@ -1026,7 +1048,7 @@ fn open_children(tasks: &[serde_json::Value], window: &str) -> Vec<(String, Stri
 
 /// Another open task on task `i`'s host whose worktree is task `i`'s, as
 /// PROJECT/NAME.
-fn worktree_user(tasks: &[serde_json::Value], i: usize) -> Option<String> {
+pub(crate) fn worktree_user(tasks: &[serde_json::Value], i: usize) -> Option<String> {
     let s = |t: &serde_json::Value, k: &str| t[k].as_str().unwrap_or("").to_string();
     let path = |t: &serde_json::Value| s(t, "worktree").trim_end_matches('/').to_string();
     let me = &tasks[i];
@@ -1389,7 +1411,7 @@ fn uncommitted_refusal(label: &str, status: &[&str]) -> String {
 /// Remove the worktree of `repo` on `host` that `target` (its branch, or
 /// its path for a detached HEAD) names with Worktrunk, returning
 /// a note for the outcome (`; ...`) and whether the removal failed.
-fn remove_worktree(
+pub(crate) fn remove_worktree(
     host: &str,
     repo: &str,
     target: &str,

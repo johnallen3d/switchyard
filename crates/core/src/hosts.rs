@@ -122,6 +122,60 @@ pub fn resolve(host: &str) -> String {
     }
 }
 
+/// Resolved compatible hosts for `project` other than `exclude_host`,
+/// deduplicated in preference order. Only called on the config host.
+#[must_use]
+pub fn other_compatible(project: &Project, exclude_host: &str) -> Vec<String> {
+    let local = local_label();
+    if let Ok(c) = config::load() {
+        return other_compatible_in(c, &project.hosts, &project.profile, exclude_host, &local);
+    }
+    let mut out = Vec::new();
+    for h in &project.hosts {
+        let resolved = if h == CONFIG {
+            local.clone()
+        } else {
+            h.clone()
+        };
+        if resolved != exclude_host && !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out
+}
+
+/// `other_compatible` under `config` with `local` as the config host's label.
+#[must_use]
+pub fn other_compatible_in(
+    config: &config::Config,
+    hosts: &[String],
+    profile: &str,
+    exclude_host: &str,
+    local: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for h in compatible_in(config, hosts, profile) {
+        let resolved = if h == CONFIG { local.to_string() } else { h };
+        if resolved != exclude_host && !out.contains(&resolved) {
+            out.push(resolved);
+        }
+    }
+    out
+}
+
+/// Fresh cached probe measurements from switchyard-server for `project`,
+/// keyed by host label. Empty when the server isn't answering.
+#[must_use]
+pub fn cached_probe_summary(project: &str) -> std::collections::HashMap<String, Probe> {
+    let mut out = std::collections::HashMap::new();
+    for entry in crate::server::probes(project).unwrap_or_default() {
+        if let Some(Cached::Measured(p)) = cached_probe(Some(&entry)) {
+            out.insert(p.host.clone(), p);
+        }
+    }
+    out
+}
+
 /// Agents busy on a host (panes reporting working or blocked) and whether it
 /// already has a session for the project. Runs on that host's Rex server.
 const PROBE_SCRIPT: &str = r#"
@@ -352,6 +406,66 @@ pub fn choose(project: &Project, use_cache: bool) -> Result<(String, String), St
     Ok((best.host.clone(), why))
 }
 
+/// Choose the least busy compatible host for `project` other than
+/// `exclude_host`, with a one-line reason for the log.
+///
+/// # Errors
+///
+/// Fails when `project` has no other compatible host or none is reachable.
+pub fn choose_other_host(
+    project: &Project,
+    exclude_host: &str,
+) -> Result<(String, String), String> {
+    let candidates = other_compatible(project, exclude_host);
+    if candidates.is_empty() {
+        return Err(format!("no other compatible host for {}", project.name));
+    }
+    if let [only] = candidates.as_slice() {
+        return Ok((
+            only.clone(),
+            format!("the only other compatible host for {}", project.name),
+        ));
+    }
+    let local = local_label();
+    let linux: Vec<String> = candidates
+        .iter()
+        .filter(|h| *h != &local)
+        .cloned()
+        .collect();
+    let mut probes = probe_all(&linux, &project.name, true);
+    probes.sort_by(|a, b| a.score.total_cmp(&b.score));
+    if let Some(best) = probes.first() {
+        let why = probes
+            .iter()
+            .map(|p| {
+                format!(
+                    "{} {:.2} (load {:.2}/cpu, {:.0} GiB free, {} busy agent{}{}{})",
+                    p.host,
+                    p.score,
+                    p.load,
+                    p.mem_gib,
+                    p.agents,
+                    if p.agents == 1 { "" } else { "s" },
+                    if p.warm { ", has session" } else { "" },
+                    if p.cached { ", cached" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Ok((best.host.clone(), why));
+    }
+    if candidates.contains(&local) {
+        return Ok((
+            local,
+            format!("the only reachable compatible host for {}", project.name),
+        ));
+    }
+    Err(format!(
+        "no other compatible host for {} is reachable",
+        project.name
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,6 +530,18 @@ mod tests {
         assert_eq!(
             compatible_in(&config, &[], "work"),
             s(&["miller", "drummer"])
+        );
+        assert_eq!(
+            other_compatible_in(&config, &s(&["config"]), "personal", "mac", "mac"),
+            s(&["omarchy"])
+        );
+        assert_eq!(
+            other_compatible_in(&config, &[], "personal", "omarchy", "mac"),
+            s(&["mac"])
+        );
+        assert_eq!(
+            other_compatible_in(&config, &[], "work", "miller", "mac"),
+            s(&["drummer"])
         );
     }
 
