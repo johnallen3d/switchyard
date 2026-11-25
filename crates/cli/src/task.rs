@@ -2,9 +2,11 @@
 //! config's Lua on the config host and for core on other hosts. See
 //! switchyard-spawn's crate docs for what each does.
 
+use std::path::Path;
 use std::process::ExitCode;
 
 use switchyard_core::actions;
+use switchyard_core::atuin;
 use switchyard_core::folders;
 use switchyard_core::launch::launch;
 use switchyard_core::rex::log;
@@ -18,7 +20,9 @@ pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task act archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
        switchyard task act snooze HOST SESSION_ID WINDOW_ID UNTIL
        switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
+       switchyard task act switch HOST SESSION_ID WINDOW_ID HARNESS
        switchyard task session-of PROFILE HARNESS WORKTREE
+       switchyard task convert PROFILE SOURCE TARGET WORKTREE SESSION_ID
 
 open finds or creates the session for DIR on HOST (auto: the catalog
 project's least busy host) and prints HOST<TAB>SESSION_ID.
@@ -36,12 +40,15 @@ with live agent status; with --live it only adds the status, without
 checking worktrees or ending tasks. act archives the task in a
 tab (force-archive also throws away uncommitted changes), resumes an
 ended task's agent session in a new tab and prints it as launch does,
+switches a live or ended task to another harness in the same worktree via
+Atuin Threads and prints HOST<TAB>SESSION_ID<TAB>WINDOW_ID (switch),
 prints the URL of the task's main work item (link), pins or unpins an
 open task in the inbox (pin), snoozes it until UNTIL, Unix seconds,
 with 0 waking it (snooze), or sends the agent in the tab the text of the
 prompt file PROMPT_REF as if typed there (message; refused while the
 agent waits on a prompt). session-of prints the newest agent session
-for a worktree on this host.";
+for a worktree on this host. convert converts a captured session on this
+host into another harness via Atuin Threads and prints the new session ID.";
 
 fn usage_error() -> ExitCode {
     eprintln!("{USAGE}");
@@ -115,8 +122,10 @@ pub fn main(args: &[&str]) -> ExitCode {
                     actions::message_ref(host, session, window, prompt_ref)
                 }
                 ("message", []) => Err("message takes a PROMPT_REF".into()),
+                ("switch", [harness]) => actions::switch_harness(host, session, window, harness),
+                ("switch", []) => Err("switch takes a HARNESS[:MODEL]".into()),
                 (_, []) => actions::act(action, host, session, window),
-                _ => Err(format!("{action} takes no UNTIL")),
+                _ => Err(format!("{action} takes no extra argument")),
             };
             match &result {
                 Ok(msg) => log(msg),
@@ -129,6 +138,12 @@ pub fn main(args: &[&str]) -> ExitCode {
                 println!("{id}");
             }
             ExitCode::SUCCESS
+        }
+        ["convert", profile, source, target, worktree, session_id] => {
+            out(
+                atuin::convert_here(profile, source, target, Path::new(worktree), session_id)
+                    .map(|id| format!("{id}\n")),
+            )
         }
         _ => usage_error(),
     }

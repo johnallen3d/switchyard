@@ -364,12 +364,26 @@ pub fn resume_here(p: &Pick) -> Result<(String, String, String), String> {
         "resume",
         actions::act("resume", &p.host, &p.session, &p.window),
     )?;
+    parse_tab_out("resume", &out)
+}
+
+/// Continue a live or ended task in another harness (`HARNESS[:MODEL]`) via
+/// Atuin Threads. Ok is where it runs: host, session and window.
+pub fn switch_harness(p: &Pick, target: &str) -> Result<(String, String, String), String> {
+    let out = logged(
+        "switch",
+        actions::switch_harness(&p.host, &p.session, &p.window, target),
+    )?;
+    parse_tab_out("switch", &out)
+}
+
+fn parse_tab_out(action: &str, out: &str) -> Result<(String, String, String), String> {
     let mut fields = out.trim_end().splitn(3, '\t');
     match (fields.next(), fields.next(), fields.next()) {
         (Some(host), Some(session), Some(window)) => {
             Ok((host.to_string(), session.to_string(), window.to_string()))
         }
-        _ => Err(format!("resume printed no tab: {out}")),
+        _ => Err(format!("{action} printed no tab: {out}")),
     }
 }
 

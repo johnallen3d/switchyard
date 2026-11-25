@@ -125,6 +125,7 @@
 mod changes;
 mod detail;
 mod fed;
+mod harness;
 mod help;
 mod history;
 mod items;
@@ -669,7 +670,7 @@ fn log_session_id(log: &str) -> &str {
 /// floats, which say the same whatever is highlighted.
 fn help_float_sections() -> Vec<help::Section> {
     use help::Section;
-    vec![
+    let mut sections = vec![
         Section::new(
             "Transcript",
             &[
@@ -712,6 +713,15 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⌃S", "collapse or expand the sidebar"),
             ],
         ),
+    ];
+    sections.extend(help_popup_sections());
+    sections
+}
+
+/// The help float's sections for the reply box and modal popups.
+fn help_popup_sections() -> Vec<help::Section> {
+    use help::Section;
+    vec![
         Section::new(
             "Reply box",
             &[
@@ -752,6 +762,15 @@ fn help_float_sections() -> Vec<help::Section> {
                 ("⏎ y", "confirm; other keys go back"),
                 ("↑↓ j k", "move"),
                 ("esc ⌃B", "dismiss"),
+            ],
+        ),
+        Section::new(
+            "Switch harness",
+            &[
+                ("⏎", "continue in highlighted harness/model (asks first)"),
+                ("⏎ y", "confirm; other keys go back"),
+                ("↑↓ j k", "choose"),
+                ("esc ⌃E", "dismiss"),
             ],
         ),
         Section::new(
@@ -815,6 +834,8 @@ struct App {
     armed: Armed,
     /// The open ctrl-b work items float (see items.rs).
     items: Option<items::Items>,
+    /// The open ctrl-e switch-harness float (see harness.rs).
+    harness: Option<harness::Chooser>,
     /// The open ctrl-z snooze prompt; Enter snoozes, Escape closes it.
     snooze: Option<Snooze>,
     /// The reply box while Tab has moved into it; Enter sends, Escape
@@ -950,6 +971,7 @@ impl App {
             offset: 0,
             armed: Armed::No,
             items: None,
+            harness: None,
             snooze: None,
             reply: None,
             idle: PromptBox::new(),
@@ -1080,6 +1102,7 @@ impl App {
         if current.is_empty() {
             if self.projects.is_none()
                 && self.items.is_none()
+                && self.harness.is_none()
                 && self.snooze.is_none()
                 && self.reply.is_none()
             {
@@ -1091,6 +1114,7 @@ impl App {
         self.current = (s.to_string(), w.to_string());
         if self.projects.is_some()
             || self.items.is_some()
+            || self.harness.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
         {
@@ -1161,6 +1185,14 @@ impl App {
         {
             self.items = None;
         }
+        // As does the switch-harness float.
+        if self
+            .harness
+            .as_ref()
+            .is_some_and(|h| self.selected_key().as_ref() != Some(&h.key))
+        {
+            self.harness = None;
+        }
         // The reply box stays on its agent, closing only when it's gone.
         if let Some(key) = self.reply.as_ref().map(|r| r.key.clone())
             && self.selected_key().as_ref() != Some(&key)
@@ -1186,6 +1218,7 @@ impl App {
         }
         if self.projects.is_some()
             || self.items.is_some()
+            || self.harness.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
         {
@@ -2131,6 +2164,7 @@ impl App {
         self.armed = Armed::No;
         self.projects = None;
         self.items = None;
+        self.harness = None;
         self.snooze = None;
         self.close_reply();
         self.view = view;
@@ -2219,6 +2253,80 @@ impl App {
                 None
             }
             run => Some(run),
+        }
+    }
+
+    /// Open the switch-harness float (ctrl-e) for the highlighted task, in
+    /// Inbox or Archive; the footer says why when it can't be switched.
+    fn open_harness(&mut self) {
+        if !matches!(self.view, View::Inbox | View::Archive) {
+            return;
+        }
+        let Some(t) = self.selected_task() else {
+            self.note = Some(("highlight a task to switch its harness".into(), true));
+            return;
+        };
+        let label = t.label();
+        if t.is_orphan() {
+            self.note = Some((
+                format!("{label} is an orphan worktree with no agent session to continue"),
+                true,
+            ));
+            return;
+        }
+        let source = if t.harness.is_empty() {
+            "claude".to_string()
+        } else {
+            t.harness.clone()
+        };
+        if switchyard_core::atuin::store_program(&t.profile).is_none() {
+            self.note = Some((
+                format!(
+                    "Atuin doesn't capture the {} profile, so {label} can't continue in another harness",
+                    t.profile
+                ),
+                true,
+            ));
+            return;
+        }
+        if switchyard_core::atuin::harness_name(&source).is_none() {
+            self.note = Some((
+                format!(
+                    "Atuin doesn't capture {source} sessions, so {label} can't continue in another harness"
+                ),
+                true,
+            ));
+            return;
+        }
+        let (model, ended) = (t.model.clone(), t.ended.is_some());
+        let Some(key) = self.selected_key() else {
+            return;
+        };
+        self.armed = Armed::No;
+        self.moved();
+        self.harness = Some(harness::Chooser::new(key, label, source, model, ended));
+    }
+
+    /// A key for the switch-harness float: what it does here, and what it
+    /// asks the picker to run, if anything.
+    fn harness_key(&mut self, k: KeyEvent) -> Option<harness::Outcome> {
+        let h = self.harness.as_mut()?;
+        self.note = None;
+        match h.key(k) {
+            harness::Outcome::Stay => None,
+            harness::Outcome::Close => {
+                self.harness = None;
+                None
+            }
+            harness::Outcome::Help => {
+                self.help = Some(help::Help::default());
+                None
+            }
+            harness::Outcome::Refuse(why) => {
+                self.note = Some((why, true));
+                None
+            }
+            run @ harness::Outcome::Switch(_) => Some(run),
         }
     }
 
@@ -2608,6 +2716,10 @@ impl App {
             self.items_key(k);
             return;
         }
+        if self.harness.is_some() {
+            self.harness_key(k);
+            return;
+        }
         if self.snooze.is_some() {
             return self.snooze_key(k);
         }
@@ -2655,6 +2767,7 @@ impl App {
             || self.help.is_some()
             || self.scrollback.is_some()
             || self.items.is_some()
+            || self.harness.is_some()
             || self.projects.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
@@ -2789,6 +2902,7 @@ impl App {
             // standalone_key acts on ctrl-r and ctrl-t.
             KeyCode::Char('z') if ctrl => self.open_snooze(),
             KeyCode::Char('b') if ctrl => self.open_items(),
+            KeyCode::Char('e') if ctrl => self.open_harness(),
             KeyCode::Tab | KeyCode::BackTab if self.view == View::Inbox => self.open_reply(),
             KeyCode::Char('s') if ctrl && self.view == View::Inbox => {
                 self.expanded = !self.expanded;
@@ -3214,6 +3328,7 @@ impl App {
         }
         self.draw_projects(f, main);
         self.draw_items(f, main);
+        self.draw_harness(f, main);
         self.draw_snooze(f, main);
     }
 
@@ -3389,6 +3504,7 @@ impl App {
         // Over the reply box, so their backdrop dims it too.
         self.draw_projects(f, body);
         self.draw_items(f, body);
+        self.draw_harness(f, body);
         self.draw_snooze(f, body);
     }
 
@@ -3773,6 +3889,13 @@ impl App {
     fn draw_items(&mut self, f: &mut Frame, area: Rect) {
         if let Some(i) = &mut self.items {
             i.draw(f, area, &self.p);
+        }
+    }
+
+    /// The ctrl-e switch-harness float, when open (see harness.rs).
+    fn draw_harness(&self, f: &mut Frame, area: Rect) {
+        if let Some(h) = &self.harness {
+            h.draw(f, area, &self.p);
         }
     }
 
@@ -4821,6 +4944,8 @@ impl App {
             Some("Snooze prompt")
         } else if self.items.is_some() {
             Some("Work items")
+        } else if self.harness.is_some() {
+            Some("Switch harness")
         } else {
             None
         };
@@ -4861,6 +4986,9 @@ impl App {
         }
         if task.is_some_and(|t| !chooser_links(&t.links).is_empty()) {
             row.push(("⌃B", "work items: open, read, comment, close, mark ready"));
+        }
+        if task.is_some_and(|t| !t.is_orphan()) {
+            row.push(("⌃E", "continue in another harness (claude ↔ pi)"));
         }
         if self.view == View::Inbox && task.is_some_and(|t| t.open_pr().is_some()) {
             row.push(("⌃T", "review its pull request in tuicr; :submit sends it"));
@@ -5222,6 +5350,9 @@ impl App {
         if let Some(i) = &self.items {
             return Some(i.hints());
         }
+        if let Some(h) = &self.harness {
+            return Some(h.hints());
+        }
         self.projects.as_ref().map(|_| projects::Chooser::hints())
     }
 
@@ -5451,6 +5582,11 @@ impl App {
         // what it asks for (see items.rs).
         if self.items.is_some() {
             self.run_items_key(k, term);
+            return true;
+        }
+        // The switch-harness float has every key while it lasts (see harness.rs).
+        if self.harness.is_some() {
+            self.run_harness_key(k, term);
             return true;
         }
         // The Work view's own keys (see work.rs); the rest search and
@@ -5889,6 +6025,45 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Run what the switch-harness float asks for on `k`: continue the live or
+    /// archived task in the chosen harness/model via Atuin Threads, keeping the
+    /// float open on failure so the error stays readable and retryable.
+    fn run_harness_key(&mut self, k: KeyEvent, term: &mut DefaultTerminal) {
+        let Some(harness::Outcome::Switch(spec)) = self.harness_key(k) else {
+            return;
+        };
+        let Some((label, ended)) = self.harness.as_ref().map(|h| (h.label.clone(), h.ended)) else {
+            return;
+        };
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return;
+        };
+        self.busy(term, format!("Continuing {label} in {spec}…"));
+        match standalone::switch_harness(&pick, &spec) {
+            Ok((host, session, window)) => {
+                self.harness = None;
+                if ended {
+                    self.query.clear();
+                    self.set_view(View::Inbox);
+                    self.launched = Some(((session, window), Instant::now()));
+                } else {
+                    self.preview = None;
+                    if let Some(feed) = &self.feed {
+                        feed.preview(None);
+                    }
+                }
+                self.note = Some((format!("continued {label} in {spec} on {host}"), false));
+                self.refetch();
+            }
+            Err(e) => {
+                if let Some(h) = &mut self.harness {
+                    h.failed();
+                }
+                self.note = Some((e, true));
+            }
         }
     }
 
@@ -8233,5 +8408,45 @@ mod tests {
         );
         assert_eq!(folder_project("~"), "~");
         assert_eq!(folder_project("/"), "/");
+    }
+
+    #[test]
+    fn ctrl_e_opens_harness_chooser_and_degrades_clearly_for_agy_and_notes() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.paste(&format!(
+            "{}rows\nS\t-\tmac\ts1\tswitchyard\nT\tw1\tidle\ta\t~\nT\tw2\tidle\tb\t~\nT\tw3\tidle\tc\t~\n",
+            protocol::DATA
+        ));
+        app.paste(&format!(
+            "{}tasks\n[\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w1\",\"project\":\"switchyard\",\"name\":\"a\",\"profile\":\"personal\",\"harness\":\"claude\",\"model\":\"opus\",\"created_at\":1,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w2\",\"project\":\"switchyard\",\"name\":\"b\",\"profile\":\"personal\",\"harness\":\"agy\",\"created_at\":1,\"ended_at\":null}},\
+            {{\"host\":\"mac\",\"session_id\":\"s1\",\"window_id\":\"w3\",\"project\":\"notes\",\"name\":\"c\",\"profile\":\"notes\",\"harness\":\"pi\",\"created_at\":1,\"ended_at\":null}}\
+            ]",
+            protocol::DATA
+        ));
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        // Task a (claude): opens the chooser popup.
+        app.select_key(Some(("s1".into(), "w1".into())));
+        app.key(ctrl_e);
+        assert!(app.harness.is_some());
+        assert_eq!(app.note, None);
+        // Escape closes it.
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.harness.is_none());
+
+        // Task b (agy): refuses with a clear note.
+        app.select_key(Some(("s1".into(), "w2".into())));
+        app.key(ctrl_e);
+        assert!(app.harness.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(*err && msg.contains("agy"), "{msg}");
+
+        // Task c (notes profile): refuses with a clear note.
+        app.select_key(Some(("s1".into(), "w3".into())));
+        app.key(ctrl_e);
+        assert!(app.harness.is_none());
+        let (msg, err) = app.note.as_ref().unwrap();
+        assert!(*err && msg.contains("notes"), "{msg}");
     }
 }

@@ -70,7 +70,18 @@ pub fn due(
 ) -> Vec<Job> {
     let field = |t: &Value, k: &str| t[k].as_str().unwrap_or("").to_string();
     let open: Vec<&Value> = tasks.iter().filter(|t| t["ended_at"].is_null()).collect();
-    waits.retain(|window, _| open.iter().any(|t| t["window_id"].as_str() == Some(window)));
+    waits.retain(|window, w| {
+        let Some(task) = open
+            .iter()
+            .find(|t| t["window_id"].as_str() == Some(window))
+        else {
+            return false;
+        };
+        if !is_claude(task) {
+            w.pending = None;
+        }
+        true
+    });
     let mut jobs = Vec::new();
     for task in open.into_iter().filter(|t| is_claude(t)) {
         let window = field(task, "window_id");
@@ -135,6 +146,9 @@ pub fn apply(tasks: &mut [Value], waits: &HashMap<String, Wake>) {
         if let Some(title) = &w.title {
             task["title"] = title.clone().into();
         }
+        if !is_claude(task) {
+            continue;
+        }
         let Wake {
             at,
             pending: Some((wake_at, reason)),
@@ -185,9 +199,15 @@ mod tests {
         assert_eq!(due(&mut waits, &tasks, &live("idle", 5)).len(), 1);
         assert!(due(&mut waits, &tasks, &live("idle", 5)).is_empty());
         assert_eq!(due(&mut waits, &tasks, &live("done", 9)).len(), 1);
-        // Pi has no timers; a closed task's entry goes.
+        // Pi has no timers; switching a window to pi clears pending Claude wakes.
+        waits.get_mut("w").unwrap().pending = Some((u64::MAX, "CI".into()));
         let pi = vec![json!({"window_id":"w","harness":"pi"})];
         assert!(due(&mut waits, &pi, &live("idle", 12)).is_empty());
+        assert_eq!(waits["w"].pending, None);
+        let mut pi_list =
+            vec![json!({"window_id":"w","harness":"pi","status":"idle","status_at":12})];
+        apply(&mut pi_list, &waits);
+        assert_eq!(pi_list[0]["status"], "idle");
         due(
             &mut waits,
             &[json!({"window_id":"w","ended_at":1})],

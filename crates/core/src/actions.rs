@@ -43,16 +43,24 @@
 //!   a new tab on the task's host that recreates the worktree on its branch
 //!   and resumes the agent session, replace the ended entry with the new
 //!   task, and print the tab as `task launch` does. SESSION is unused here.
+//! - switch (`task act switch HOST SESSION WINDOW HARNESS`): continue a live
+//!   or ended task in another harness (`HARNESS` or `HARNESS:MODEL`) in the
+//!   same worktree through Atuin Threads (`atuin threads resume --print --in`),
+//!   updating `harness`, `model`, and `agent_session` in the registry and
+//!   relaunching in the same tab (for a live task) or opening a new tab (for
+//!   an ended task), printing `HOST<TAB>SESSION<TAB>WINDOW`.
 //!
 //! Archiving doesn't delete an unmerged branch: only uncommitted work can be
 //! lost, and a resume finds its commits again.
 
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::hosts::catalog;
 use crate::images::carry;
 use crate::launch::launch;
+use crate::naming::{HARNESSES, branch_and_slug, harness_spec, models, split_harness};
 use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, local_label, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
@@ -229,6 +237,432 @@ fn resume(host: &str, window: &str) -> Result<String, String> {
         Ok(())
     })?;
     Ok(format!("{host}\t{session}\t{window_id}"))
+}
+
+/// Continue the live or ended task in `window` on `host` in `target_spec`
+/// (`HARNESS` or `HARNESS:MODEL`) through Atuin Threads, keeping the same
+/// worktree (and the same Rex tab for a live task) and recording the new
+/// `harness`, `model`, and `agent_session` in the registry.
+///
+/// Prints `HOST<TAB>SESSION<TAB>WINDOW`, like `resume`.
+///
+/// # Errors
+///
+/// Fails when the target spec is unknown, no matching task exists, the task
+/// is an orphan worktree, Atuin doesn't support the profile or source/target
+/// harness, no source session exists, conversion fails, or Rex can't launch
+/// the new pane/tab.
+pub fn switch_harness(
+    host: &str,
+    session: &str,
+    window: &str,
+    target_spec: &str,
+) -> Result<String, String> {
+    let (target_harness, target_model) = validate_target_spec(target_spec)?;
+    let spec = harness_spec(target_harness, target_model);
+    let tasks = load_tasks()?;
+    let task = find_switch_task(&tasks, window)?;
+    let field = |k: &str| task[k].as_str().unwrap_or("").to_string();
+    let label = format!("{}/{}", field("project"), field("name"));
+    if field("ended_reason") == "orphaned" {
+        return Err(format!(
+            "{label} is an orphan worktree with no agent session to continue"
+        ));
+    }
+    let profile = field("profile");
+    let source_harness = match field("harness").as_str() {
+        "" => "claude".to_string(),
+        h => h.to_string(),
+    };
+    crate::atuin::switch_plan(&profile, &source_harness, target_harness)
+        .map_err(|e| format!("{label}: {e}"))?;
+
+    let task_host = match field("host") {
+        h if !h.is_empty() => h,
+        _ => host.to_string(),
+    };
+    let ended = !task["ended_at"].is_null();
+    let source_session = if ended {
+        match field("agent_session") {
+            id if !id.is_empty() => Some(id),
+            _ => newest_session(&task),
+        }
+    } else {
+        newest_session(&task).or_else(|| {
+            let id = field("agent_session");
+            (!id.is_empty()).then_some(id)
+        })
+    }
+    .ok_or_else(|| format!("{label}: no {source_harness} session found on {task_host}"))?;
+
+    let (path, clone_url) = project_path_and_clone(&field("repo"))?;
+    let name = field("name");
+    let branch = match field("branch") {
+        b if !b.is_empty() => b,
+        _ => branch_and_slug(&name).0,
+    };
+    let result = if ended {
+        switch_ended(
+            &task,
+            window,
+            &task_host,
+            &profile,
+            &source_harness,
+            target_harness,
+            &spec,
+            &path,
+            &name,
+            &branch,
+            &clone_url,
+            &source_session,
+        )
+    } else {
+        let task_session = match field("session_id") {
+            s if !s.is_empty() => s,
+            _ => session.to_string(),
+        };
+        let task_window = match field("window_id") {
+            w if !w.is_empty() => w,
+            _ => window.to_string(),
+        };
+        switch_live(
+            &task,
+            &task_host,
+            &task_session,
+            &task_window,
+            &profile,
+            &source_harness,
+            target_harness,
+            target_model,
+            &spec,
+            &path,
+            &name,
+            &clone_url,
+            &source_session,
+        )
+    };
+    if result.is_ok() {
+        crate::server::refresh();
+    }
+    result
+}
+
+fn validate_target_spec(spec: &str) -> Result<(&str, Option<&str>), String> {
+    let (harness, model) = split_harness(spec.trim());
+    if !HARNESSES.contains(&harness) {
+        return Err(format!("unknown harness {harness}"));
+    }
+    if let Some(model) = model.filter(|m| !models(harness).contains(m)) {
+        return Err(format!("unknown {harness} model {model}"));
+    }
+    Ok((harness, model))
+}
+
+fn find_switch_task(
+    tasks: &[serde_json::Value],
+    window: &str,
+) -> Result<serde_json::Value, String> {
+    tasks
+        .iter()
+        .find(|t| t["ended_at"].is_null() && in_window(t, window))
+        .or_else(|| tasks.iter().rev().find(|t| in_window(t, window)))
+        .cloned()
+        .ok_or_else(|| "no task for that tab".to_string())
+}
+
+fn project_path_and_clone(repo: &str) -> Result<(String, String), String> {
+    Ok(catalog()?
+        .into_iter()
+        .find(|p| crate::folders::home_relative(&p.path) == crate::folders::home_relative(repo))
+        .map_or_else(
+            || (repo.to_string(), String::new()),
+            |p| (p.path, p.clone_url),
+        ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn switch_live(
+    task: &serde_json::Value,
+    host: &str,
+    session: &str,
+    window: &str,
+    profile: &str,
+    source_harness: &str,
+    target_harness: &str,
+    target_model: Option<&str>,
+    spec: &str,
+    path: &str,
+    name: &str,
+    clone_url: &str,
+    source_session: &str,
+) -> Result<String, String> {
+    // Check the tab is still open and locate its agent pane before converting.
+    let old_block = crate::transcript::agent_pane(host, session, window)
+        .ok()
+        .and_then(|p| {
+            p["block"]
+                .as_str()
+                .filter(|b| !b.is_empty())
+                .map(String::from)
+        })
+        .map_or_else(|| agent_block(host, session, window), Ok)?;
+    let worktree = task["worktree"].as_str().unwrap_or("");
+    if worktree.is_empty() {
+        return Err(format!("{}: task has no worktree recorded", label_of(task)));
+    }
+    let new_session = convert_on_host(
+        host,
+        profile,
+        source_harness,
+        target_harness,
+        worktree,
+        source_session,
+    )?;
+    // Launch the new harness in a sibling split of the same tab first, then
+    // close the old agent block so the Rex window (and any other splits) stay
+    // intact with the same window_id and label.
+    let run = [
+        "switchyard",
+        "task",
+        "run",
+        profile,
+        path,
+        name,
+        spec,
+        clone_url,
+        &new_session,
+        "resume",
+    ];
+    let mut args = vec![
+        "split",
+        "-s",
+        session,
+        "-b",
+        &old_block,
+        "--split=right",
+        "--focus=false",
+        "-c",
+        worktree,
+        "--json",
+        "--",
+    ];
+    args.extend(run);
+    rex_json(host, &args)?;
+    let _ = rex(host, &["block", "close", "-s", session, &old_block]);
+    update_tasks(|tasks| {
+        if let Some(record) = tasks
+            .iter_mut()
+            .find(|t| t["ended_at"].is_null() && in_window(t, window))
+        {
+            apply_switched_harness(record, target_harness, target_model, &new_session);
+        }
+        Ok(())
+    })?;
+    Ok(format!("{host}\t{session}\t{window}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn switch_ended(
+    task: &serde_json::Value,
+    old_window: &str,
+    host: &str,
+    profile: &str,
+    source_harness: &str,
+    target_harness: &str,
+    spec: &str,
+    path: &str,
+    name: &str,
+    branch: &str,
+    clone_url: &str,
+    source_session: &str,
+) -> Result<String, String> {
+    let recorded_wt = task["worktree"].as_str().unwrap_or("");
+    let (worktree, created) = ensure_worktree(host, path, name, branch, recorded_wt, clone_url)?;
+    let new_session = match convert_on_host(
+        host,
+        profile,
+        source_harness,
+        target_harness,
+        &worktree,
+        source_session,
+    ) {
+        Ok(id) => id,
+        Err(e) => {
+            if created {
+                let repo = task["repo"]
+                    .as_str()
+                    .filter(|r| !r.is_empty())
+                    .unwrap_or(path);
+                let _ = remove_worktree(host, repo, branch, false);
+            }
+            return Err(e);
+        }
+    };
+    let resume_head = branch_head(host, path, branch);
+    let (new_host, new_session_id, new_window_id) = launch(
+        host,
+        path,
+        name,
+        spec,
+        None,
+        None,
+        Some((&new_session, profile)),
+    )?;
+    update_tasks(|tasks| {
+        tasks.retain(|t| t["ended_at"].is_null() || !in_window(t, old_window));
+        if let Some(new) = tasks
+            .iter_mut()
+            .rev()
+            .find(|t| t["ended_at"].is_null() && in_window(t, &new_window_id))
+        {
+            if task["links"].as_array().is_some_and(|l| !l.is_empty()) {
+                new["links"] = task["links"].clone();
+            }
+            if let Some(head) = &resume_head {
+                new["resume_head"] = head.clone().into();
+            }
+        }
+        Ok(())
+    })?;
+    Ok(format!("{new_host}\t{new_session_id}\t{new_window_id}"))
+}
+
+fn apply_switched_harness(
+    task: &mut serde_json::Value,
+    harness: &str,
+    model: Option<&str>,
+    agent_session: &str,
+) {
+    task["harness"] = harness.into();
+    task["model"] = model.map_or(serde_json::Value::Null, Into::into);
+    task["agent_session"] = agent_session.into();
+}
+
+/// Convert `source_session` on `host` via Atuin Threads, returning the new
+/// `target_harness` session ID written for `worktree`.
+fn convert_on_host(
+    host: &str,
+    profile: &str,
+    source_harness: &str,
+    target_harness: &str,
+    worktree: &str,
+    source_session: &str,
+) -> Result<String, String> {
+    if host == local_label() {
+        return crate::atuin::convert_here(
+            profile,
+            source_harness,
+            target_harness,
+            Path::new(worktree),
+            source_session,
+        );
+    }
+    let script = format!(
+        "switchyard task convert {} {} {} {} {} 2>&1\n",
+        sh_quote(profile),
+        sh_quote(source_harness),
+        sh_quote(target_harness),
+        sh_quote(worktree),
+        sh_quote(source_session),
+    );
+    let out = host_bash(host, &script).ok_or_else(|| format!("{host} can't be reached"))?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !text.is_empty() {
+        return Ok(text);
+    }
+    let msg = text
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map_or("conversion failed", |l| {
+            l.trim().strip_prefix("switchyard: ").unwrap_or(l.trim())
+        });
+    Err(format!("{host}: {msg}"))
+}
+
+/// Ensure the ended task's worktree exists on `host` before Atuin converts
+/// its session (Atuin falls back to the current directory if the session's
+/// original working directory is missing). Returns `(worktree_path, created)`
+/// where `created` is true only when this call created it, so a failed
+/// conversion can remove it again.
+fn ensure_worktree(
+    host: &str,
+    path: &str,
+    name: &str,
+    branch: &str,
+    recorded_wt: &str,
+    clone_url: &str,
+) -> Result<(String, bool), String> {
+    let slug = branch_and_slug(name).1;
+    let template = format!("worktree-path = \"{{{{ repo_path }}}}/.worktrees/{slug}\"");
+    let script = ensure_worktree_script(path, branch, recorded_wt, clone_url, &template);
+    let out = host_bash(host, &script).ok_or_else(|| format!("{host} can't be reached"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        let msg = text
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .map_or("could not prepare worktree", str::trim);
+        return Err(format!("{host}: {msg}"));
+    }
+    let last = text
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    if let Some(wt) = last.strip_prefix("reused\t") {
+        return Ok((wt.to_string(), false));
+    }
+    if let Some(wt) = last.strip_prefix("created\t") {
+        return Ok((wt.to_string(), true));
+    }
+    Err(format!("{host}: unexpected worktree result: {last}"))
+}
+
+fn ensure_worktree_script(
+    path: &str,
+    branch: &str,
+    recorded_wt: &str,
+    clone_url: &str,
+    template: &str,
+) -> String {
+    format!(
+        "expand() {{ case \"$1\" in '~/'*) printf '%s' \"$HOME/${{1#~/}}\" ;; '~') printf '%s' \"$HOME\" ;; *) printf '%s' \"$1\" ;; esac; }}\n\
+         repo=$(expand {})\n\
+         branch={}\n\
+         recorded=$(expand {})\n\
+         clone_url=$(expand {})\n\
+         template={}\n\
+         if [ -n \"$recorded\" ] && [ -d \"$recorded\" ]; then printf 'reused\\t%s\\n' \"$recorded\"; exit 0; fi\n\
+         if [ ! -d \"$repo\" ]; then\n\
+           if [ -z \"$clone_url\" ]; then echo \"Git folder $repo no longer exists\"; exit 1; fi\n\
+           mkdir -p \"$(dirname \"$repo\")\"\n\
+           git clone \"$clone_url\" \"$repo\" 2>&1 || exit 1\n\
+         fi\n\
+         find_wt() {{\n\
+           wt=\n\
+           while IFS= read -r line; do\n\
+             case $line in\n\
+               'worktree '*) wt=${{line#worktree }} ;;\n\
+               \"branch refs/heads/$branch\") printf '%s' \"$wt\"; return 0 ;;\n\
+             esac\n\
+           done < <(git -C \"$repo\" worktree list --porcelain 2>/dev/null)\n\
+           return 1\n\
+         }}\n\
+         if existing=$(find_wt); then printf 'reused\\t%s\\n' \"$existing\"; exit 0; fi\n\
+         if git -C \"$repo\" rev-parse --verify --quiet \"refs/heads/$branch\" >/dev/null 2>&1; then\n\
+           wt -C \"$repo\" --config-set \"$template\" switch \"$branch\" --no-cd --yes 2>&1 || exit 1\n\
+         else\n\
+           wt -C \"$repo\" --config-set \"$template\" switch --create \"$branch\" --no-cd --yes 2>&1 || exit 1\n\
+         fi\n\
+         if made=$(find_wt); then printf 'created\\t%s\\n' \"$made\"; exit 0; fi\n\
+         echo \"wt made no worktree for $branch\"; exit 1\n",
+        sh_quote(path),
+        sh_quote(branch),
+        sh_quote(recorded_wt),
+        sh_quote(clone_url),
+        sh_quote(template),
+    )
 }
 
 /// `branch`'s head commit in the checkout at `repo` on `host`, in full; None
@@ -1348,5 +1782,48 @@ mod tests {
             &cwds(&["/r/.worktrees/xy", "/r"]),
             "/r/.worktrees/x"
         ));
+    }
+
+    #[test]
+    fn switch_harness_validates_target_and_updates_registry_fields() {
+        assert_eq!(validate_target_spec("pi"), Ok(("pi", None)));
+        assert_eq!(
+            validate_target_spec("claude:opus"),
+            Ok(("claude", Some("opus")))
+        );
+        assert!(validate_target_spec("nope").is_err());
+        assert!(validate_target_spec("claude:no-such-model").is_err());
+
+        let mut task = serde_json::json!({
+            "window_id": "w1",
+            "harness": "claude",
+            "model": "opus",
+            "agent_session": "old-id",
+            "ended_at": null,
+        });
+        apply_switched_harness(&mut task, "pi", None, "new-id");
+        assert_eq!(task["harness"], "pi");
+        assert!(task["model"].is_null());
+        assert_eq!(task["agent_session"], "new-id");
+
+        apply_switched_harness(&mut task, "claude", Some("sonnet"), "third-id");
+        assert_eq!(task["harness"], "claude");
+        assert_eq!(task["model"], "sonnet");
+        assert_eq!(task["agent_session"], "third-id");
+
+        let tasks = vec![
+            serde_json::json!({"window_id": "w1", "ended_at": 1, "agent_session": "old"}),
+            serde_json::json!({"window_id": "w1", "ended_at": null, "agent_session": "live"}),
+            serde_json::json!({"window_id": "w2", "ended_at": 2, "agent_session": "arch"}),
+        ];
+        assert_eq!(
+            find_switch_task(&tasks, "w1").unwrap()["agent_session"],
+            "live"
+        );
+        assert_eq!(
+            find_switch_task(&tasks, "w2").unwrap()["agent_session"],
+            "arch"
+        );
+        assert!(find_switch_task(&tasks, "w3").is_err());
     }
 }

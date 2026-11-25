@@ -356,6 +356,8 @@ pub struct Task {
     /// `/rename`; see core's `transcript::title`), or empty.
     pub title: String,
     pub profile: String,
+    pub harness: String,
+    pub model: String,
     /// Uncommitted files in the worktree, and the first few of their paths.
     pub dirty: u64,
     pub dirty_files: Vec<String>,
@@ -481,6 +483,8 @@ pub fn parse_tasks(json: &str) -> Result<Vec<Task>, String> {
             name: s(t, "name"),
             title: s(t, "title"),
             profile: s(t, "profile"),
+            harness: s(t, "harness"),
+            model: s(t, "model"),
             dirty: t["dirty_count"].as_u64().unwrap_or(0),
             dirty_files: t["dirty_files"]
                 .as_array()

@@ -50,8 +50,18 @@ pub(crate) fn session_dir(profile: &str, harness: &str, worktree: &str) -> PathB
     } else {
         Vec::new()
     };
+    session_dir_with_env(harness, &work, worktree)
+}
+
+/// `session_dir` with `env` already loaded for the profile (empty for
+/// personal, `work_env()` for work).
+pub(crate) fn session_dir_with_env(
+    harness: &str,
+    env: &[(String, String)],
+    worktree: &str,
+) -> PathBuf {
     let var = |k: &str| {
-        work.iter()
+        env.iter()
             .find(|(n, _)| n == k)
             .map(|(_, v)| v.clone())
             .or_else(|| std::env::var(k).ok())
@@ -117,11 +127,27 @@ pub fn newest_session_here(profile: &str, harness: &str, worktree: &str) -> Opti
 /// Whether this host has the agent session for `worktree`.
 #[must_use]
 pub fn session_exists_here(profile: &str, harness: &str, worktree: &str, id: &str) -> bool {
+    let work = if profile == "work" {
+        work_env().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    session_exists_with_env(harness, &work, worktree, id)
+}
+
+/// `session_exists_here` with `env` already loaded for the profile.
+#[must_use]
+pub(crate) fn session_exists_with_env(
+    harness: &str,
+    env: &[(String, String)],
+    worktree: &str,
+    id: &str,
+) -> bool {
     // Antigravity keeps conversations in one folder, not per directory.
     if harness == "agy" {
         return !id.contains('/') && agy_dir().join(format!("conversations/{id}.db")).is_file();
     }
-    let dir = session_dir(profile, harness, worktree);
+    let dir = session_dir_with_env(harness, env, worktree);
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries.filter_map(Result::ok).any(|e| {
             let name = e.file_name();

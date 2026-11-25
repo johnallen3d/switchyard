@@ -302,7 +302,7 @@ fn session_here(
     status(&format!(
         "Agent session {id} is gone; restoring it from Atuin"
     ));
-    let why = match crate::atuin::restore(profile, harness, env, worktree, id) {
+    let why = match switchyard_core::atuin::restore(profile, harness, env, worktree, id) {
         Ok(()) if session_exists_here(profile, harness, &here, id) => return true,
         Ok(()) => "Atuin restored it elsewhere".to_string(),
         Err(e) => e,

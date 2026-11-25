@@ -5,6 +5,7 @@
 //! It also holds where switchyard-server listens and how to ask it.
 
 pub mod actions;
+pub mod atuin;
 pub mod autoname;
 pub mod cards;
 pub mod changes;
