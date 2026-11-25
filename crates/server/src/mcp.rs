@@ -9,12 +9,12 @@
 //! A request with a browser `Origin` is refused, so a web page can't reach
 //! it through DNS rebinding.
 //!
-//! Tools (see `TOOLS`) wrap core: `list_tasks` (the snapshot's open tasks
-//! with live agent status), `spawn_task` (`launch_text`), `read_task`
-//! (`transcript`), `message_task` (`actions::message`), `message_parent`
-//! (`notices::send`, to the agent that spawned the caller's task) and
-//! `stop_task` (a plain archive, never force-archive). They name a task
-//! `PROJECT/NAME`, as the pickers label it.
+//! Tools (see `tools`) wrap core: `list_tasks` (the snapshot's open tasks
+//! with live agent status), `list_projects` (`hosts::catalog`), `spawn_task`
+//! (`launch_text`), `read_task` (`transcript`), `message_task`
+//! (`actions::message`), `message_parent` (`notices::send`, to the agent that
+//! spawned the caller's task) and `stop_task` (a plain archive, never
+//! force-archive). They name a task `PROJECT/NAME`, as the pickers label it.
 //!
 //! `spawn_task` nests the new task under the caller's tab when it knows
 //! where the caller is: from its `parent_session` / `parent_block`
@@ -35,7 +35,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use switchyard_core::hosts::catalog;
+use switchyard_core::hosts::{Project, catalog};
 use switchyard_core::launch::{Parent, Placement, launch_text};
 use switchyard_core::naming::{
     HARNESSES, default_harness, harness_spec, models, name_char, split_harness,
@@ -64,7 +64,8 @@ const READ_MAX: usize = 150;
 const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claude, pi or agy, the Antigravity CLI) in a Rex tab, \
 working in a Git worktree of a catalog project on one of John's hosts. Tasks are named PROJECT/NAME. \
 list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
-spawn_task starts one with a first prompt; read_task shows what its agent has been saying; \
+list_projects shows the catalog projects you can spawn into; \
+spawn_task starts a task with a first prompt; read_task shows what its agent has been saying; \
 message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes). \
 A task spawned with your parent_block tells you when its agent stops working, so wait for that rather than polling; \
 a spawned agent can write to its spawner with message_parent.";
@@ -417,13 +418,19 @@ fn tools() -> Value {
             "annotations": { "readOnlyHint": true },
         },
         {
+            "name": "list_projects",
+            "description": "List the configured catalog projects that spawn_task accepts.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
             "name": "spawn_task",
             "description": "Start an agent task: a new worktree branch of a catalog project, \
     with an agent working on PROMPT in its own Rex tab. Returns the task's PROJECT/NAME.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path." },
+                    "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path (see list_projects)." },
                     "name": { "type": "string", "description": "Task name, normalised as the picker does (lowercase, spaces become dashes); the branch is feature/NAME." },
                     "harness": { "type": "string", "enum": HARNESSES, "description": "Omit for the project's profile default (the config's [harnesses], else claude)." },
                     "model": { "type": "string", "description": model_help() },
@@ -512,6 +519,7 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
         "list_tasks" => {
             Ok(json!({ "tasks": open_tasks(endpoint)?.iter().map(summary).collect::<Vec<_>>() }))
         }
+        "list_projects" => Ok(projects_list(&catalog()?, default_harness)),
         "spawn_task" => spawn(args, caller, endpoint),
         "read_task" => {
             let task = find_open(str_arg(args, "task")?, endpoint)?;
@@ -615,6 +623,33 @@ fn summary(task: &Value) -> Value {
         if let Some(v) = task.get(key).filter(|v| !v.is_null()) {
             out[key] = v.clone();
         }
+    }
+    out
+}
+
+/// Response payload for `list_projects`.
+fn projects_list(projects: &[Project], harness: impl Fn(&str) -> String) -> Value {
+    json!({
+        "projects": projects
+            .iter()
+            .map(|p| project_summary(p, &harness(&p.profile)))
+            .collect::<Vec<_>>()
+    })
+}
+
+/// What a caller needs of a catalog project.
+fn project_summary(project: &Project, default_harness: &str) -> Value {
+    let mut out = json!({
+        "name": project.name,
+        "path": project.path,
+        "profile": project.profile,
+        "default_harness": default_harness,
+    });
+    if !project.hosts.is_empty() {
+        out["hosts"] = json!(project.hosts);
+    }
+    if !project.tracker.is_empty() {
+        out["tracker"] = json!(project.tracker);
     }
     out
 }
@@ -767,7 +802,7 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
     let found = projects
         .iter()
         .find(|p| p.name == project || p.path == project)
-        .ok_or_else(|| format!("{project} is not a catalog project"))?;
+        .ok_or_else(|| format!("{project} is not a catalog project (see list_projects)"))?;
     let harness = spawn_harness(
         opt_arg(args, "harness"),
         opt_arg(args, "model"),
@@ -977,23 +1012,85 @@ mod tests {
     }
 
     #[test]
-    fn lists_six_tools() {
-        let names: Vec<String> = tools()
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|t| t["name"].as_str().unwrap().into())
-            .collect();
+    fn lists_seven_tools() {
+        let e = endpoint();
+        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
+        let reply = route(&post(&body.to_string()), &e).1.unwrap();
+        let tools = reply["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
             names,
             [
                 "list_tasks",
+                "list_projects",
                 "spawn_task",
                 "read_task",
                 "message_task",
                 "message_parent",
                 "stop_task"
             ]
+        );
+        let list_projects = tools.iter().find(|t| t["name"] == "list_projects").unwrap();
+        assert_eq!(list_projects["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            list_projects["inputSchema"],
+            json!({ "type": "object", "properties": {} })
+        );
+        let spawn = tools.iter().find(|t| t["name"] == "spawn_task").unwrap();
+        assert!(
+            spawn["inputSchema"]["properties"]["project"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("list_projects")
+        );
+        assert!(INSTRUCTIONS.contains("list_projects"));
+    }
+
+    #[test]
+    fn project_summary_keeps_useful_fields_and_omits_empty_ones() {
+        let full = Project {
+            name: "switchyard".into(),
+            path: "~/dev/src/playground/switchyard".into(),
+            profile: "personal".into(),
+            clone_url: "git@github.com:johnallen3d/switchyard.git".into(),
+            hosts: vec!["omarchy".into(), "config".into()],
+            tracker: "fizzy:6284043/board-1".into(),
+        };
+        let minimal = Project {
+            name: "rex".into(),
+            path: "~/dev/src/rex".into(),
+            profile: "work".into(),
+            clone_url: "git@github.com:example/rex.git".into(),
+            hosts: Vec::new(),
+            tracker: String::new(),
+        };
+        assert_eq!(
+            projects_list(&[full, minimal], |profile| match profile {
+                "personal" => "agy:gemini-4-neon".into(),
+                _ => "claude".into(),
+            }),
+            json!({
+                "projects": [
+                    {
+                        "name": "switchyard",
+                        "path": "~/dev/src/playground/switchyard",
+                        "profile": "personal",
+                        "default_harness": "agy:gemini-4-neon",
+                        "hosts": ["omarchy", "config"],
+                        "tracker": "fizzy:6284043/board-1",
+                    },
+                    {
+                        "name": "rex",
+                        "path": "~/dev/src/rex",
+                        "profile": "work",
+                        "default_harness": "claude",
+                    },
+                ]
+            })
+        );
+        assert_eq!(
+            projects_list(&[], |_| "claude".into()),
+            json!({ "projects": [] })
         );
     }
 

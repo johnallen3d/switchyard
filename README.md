@@ -150,6 +150,7 @@ are refused.
 | Tool             | Does                                                     |
 | ---------------- | -------------------------------------------------------- |
 | `list_tasks`     | Open tasks with live agent status                        |
+| `list_projects`  | Catalog projects that `spawn_task` accepts               |
 | `spawn_task`     | Start a task: catalog project, name, prompt, harness     |
 | `read_task`      | Status and the last transcript entries                   |
 | `message_task`   | Type text into the agent's tab (not while it's blocked)  |
