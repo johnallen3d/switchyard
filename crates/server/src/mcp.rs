@@ -20,10 +20,13 @@
 //! - A Rex caller, from its `parent_session` / `parent_block` arguments, else
 //!   from the request's `X-Rex-Session` / `X-Rex-Block` headers (which a
 //!   client config fills from `REX_SESSION` / `REX_BLOCK`): nested under the
-//!   caller's tab in the picker and notified there when it settles.
+//!   caller's tab in the picker, exposed as `parent_task` (`PROJECT/NAME`) in
+//!   `list_tasks`/`read_task` when that parent is an open task, and notified
+//!   there when it settles.
 //! - A non-Rex caller, from `parent_url` / `X-Parent-Url` (and optional
 //!   `parent_label` / `X-Parent-Label`): left top-level in the picker
-//!   (`parent_window` unset) and notified by JSON `POST` to `parent_url`.
+//!   (`parent_window` unset), exposed via `parent_label` (with `parent_task`
+//!   omitted), and notified by JSON `POST` to `parent_url`.
 //!
 //! Settle notices are sent unless `notify_parent` is false (see `notices`).
 //! `message_parent` finds the caller's task from its `session` / `block`
@@ -466,7 +469,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "list_tasks",
-            "description": "List the open agent tasks with each agent's live status.",
+            "description": "List the open agent tasks with each agent's live status (including parent_task as PROJECT/NAME when spawned by another open task, or parent_label for callback parents).",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
@@ -490,7 +493,7 @@ fn tools() -> Value {
                     "prompt": { "type": "string", "description": "The agent's first message." },
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
-                    "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
+                    "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker and reports parent_task in list_tasks/read_task." },
                     "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set. Cannot be combined with an explicit parent_url." },
                     "parent_url": { "type": "string", "description": "Optional HTTP callback URL (http:// to loopback or tailnet only) for non-Rex callers to receive settle notices and message_parent JSON POSTs. Cannot be combined with an explicit parent_block; overrides X-Parent-Url and ignores Rex headers." },
                     "parent_label": { "type": "string", "description": "Optional human-readable label for a callback parent (e.g. \"marvin\" or \"Marvin #42\"), exposed in list_tasks/read_task summaries. Overrides X-Parent-Label." },
@@ -501,9 +504,9 @@ fn tools() -> Value {
         },
         {
             "name": "read_task",
-            "description": "What a task's agent has been saying: its live status and the last entries of its \
-    transcript (user and assistant messages, tool calls, questions). An agent just spawned may have \
-    no transcript yet (transcript_error says why).",
+            "description": "What a task's agent has been saying: its live status, parent_task/parent_label \
+    when present, and the last entries of its transcript (user and assistant messages, tool calls, \
+    questions). An agent just spawned may have no transcript yet (transcript_error says why).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -572,39 +575,33 @@ fn label(task: &Value) -> String {
 fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
     match name {
         "list_tasks" => {
-            Ok(json!({ "tasks": open_tasks(endpoint)?.iter().map(summary).collect::<Vec<_>>() }))
+            let open = open_tasks(endpoint)?;
+            let tasks: Vec<Value> = open.iter().map(|t| summary(t, &open)).collect();
+            Ok(json!({ "tasks": tasks }))
         }
         "list_projects" => Ok(projects_list(&catalog()?, default_harness)),
         "spawn_task" => spawn(args, caller, endpoint),
         "read_task" => {
-            let task = find_open(str_arg(args, "task")?, endpoint)?;
             let wanted = args["entries"].as_u64().map_or(READ_DEFAULT, |n| {
                 usize::try_from(n).unwrap_or(usize::MAX).clamp(1, READ_MAX)
             });
-            let (host, session, window) = tab(&task);
-            let mut log = transcript::fetch_on(host, session, window);
-            let mut out = summary(&task);
-            // The task is there even when its log isn't (yet: an agent just
-            // spawned writes none until it starts), so a poller still gets
-            // its status.
-            if let Some(entries) = log["entries"].as_array_mut() {
-                let skip = entries.len().saturating_sub(wanted);
-                out["transcript"] = entries.drain(skip..).collect::<Vec<_>>().into();
-            } else {
-                out["transcript"] = json!([]);
-                out["transcript_error"] = log["error"].take();
-            }
-            Ok(out)
+            read_task_with(
+                str_arg(args, "task")?,
+                wanted,
+                open_tasks(endpoint)?,
+                load_tasks,
+                transcript::fetch_on,
+            )
         }
         "message_task" => {
             let text = str_arg(args, "text")?;
-            let task = find_open(str_arg(args, "task")?, endpoint)?;
+            let (task, _) = find_open(str_arg(args, "task")?, endpoint)?;
             let (host, session, window) = tab(&task);
             actions::message(host, session, window, text).map(|msg| json!({ "message": msg }))
         }
         "message_parent" => message_parent(args, caller, endpoint),
         "stop_task" => {
-            let task = find_open(str_arg(args, "task")?, endpoint)?;
+            let (task, _) = find_open(str_arg(args, "task")?, endpoint)?;
             let (host, session, window) = tab(&task);
             let result = actions::act("archive", host, session, window);
             let _ = endpoint.asks.refresh.send("mcp");
@@ -641,6 +638,13 @@ fn tab(task: &Value) -> (&str, &str, &str) {
     (f("host"), f("session_id"), f("window_id"))
 }
 
+fn open_only(tasks: Vec<Value>) -> Vec<Value> {
+    tasks
+        .into_iter()
+        .filter(|t| t["ended_at"].is_null())
+        .collect()
+}
+
 /// The open tasks with live status: the snapshot's, or a direct look
 /// before the server's first check.
 fn open_tasks(endpoint: &Endpoint) -> Result<Vec<Value>, String> {
@@ -649,14 +653,23 @@ fn open_tasks(endpoint: &Endpoint) -> Result<Vec<Value>, String> {
         Some(tasks) => tasks.clone(),
         None => live_tasks()?,
     };
-    Ok(tasks
-        .into_iter()
-        .filter(|t| t["ended_at"].is_null())
-        .collect())
+    Ok(open_only(tasks))
+}
+
+/// The open parent task (`PROJECT/NAME`) that spawned `task`, when
+/// `parent_window` matches another currently open task's `window_id`.
+fn parent_task(task: &Value, open: &[Value]) -> Option<String> {
+    let parent_window = task["parent_window"].as_str().filter(|w| !w.is_empty())?;
+    if in_window(task, parent_window) {
+        return None;
+    }
+    open.iter()
+        .find(|other| other["ended_at"].is_null() && in_window(other, parent_window))
+        .map(label)
 }
 
 /// What a caller needs of a task record.
-fn summary(task: &Value) -> Value {
+fn summary(task: &Value, open: &[Value]) -> Value {
     let mut out = json!({ "task": label(task) });
     for key in [
         "project",
@@ -678,6 +691,9 @@ fn summary(task: &Value) -> Value {
         if let Some(v) = task.get(key).filter(|v| !v.is_null()) {
             out[key] = v.clone();
         }
+    }
+    if let Some(parent) = parent_task(task, open) {
+        out["parent_task"] = parent.into();
     }
     out
 }
@@ -709,17 +725,52 @@ fn project_summary(project: &Project, default_harness: &str) -> Value {
     out
 }
 
-/// The open task `wanted` names (see `find_task`): from the snapshot, for
-/// its live status, else from the registry, which has a task just spawned
-/// before the server's next check does.
-fn find_open(wanted: &str, endpoint: &Endpoint) -> Result<Value, String> {
-    find_task(wanted, &open_tasks(endpoint)?).or_else(|e| {
-        let registry: Vec<Value> = load_tasks()?
-            .into_iter()
-            .filter(|t| t["ended_at"].is_null())
-            .collect();
-        find_task(wanted, &registry).map_err(|_| e)
-    })
+/// The open task `wanted` names (see `find_task`) alongside the open task
+/// list it was resolved against: from the snapshot, for its live status, else
+/// from the registry, which has a task just spawned before the server's next
+/// check does.
+fn find_open(wanted: &str, endpoint: &Endpoint) -> Result<(Value, Vec<Value>), String> {
+    find_open_with(wanted, open_tasks(endpoint)?, load_tasks)
+}
+
+fn find_open_with(
+    wanted: &str,
+    open: Vec<Value>,
+    fallback: impl FnOnce() -> Result<Vec<Value>, String>,
+) -> Result<(Value, Vec<Value>), String> {
+    match find_task(wanted, &open) {
+        Ok(task) => Ok((task, open)),
+        Err(e) => {
+            let registry = open_only(fallback()?);
+            find_task(wanted, &registry)
+                .map(|task| (task, registry))
+                .map_err(|_| e)
+        }
+    }
+}
+
+fn read_task_with(
+    wanted_task: &str,
+    wanted_entries: usize,
+    open: Vec<Value>,
+    fallback: impl FnOnce() -> Result<Vec<Value>, String>,
+    fetch_log: impl FnOnce(&str, &str, &str) -> Value,
+) -> Result<Value, String> {
+    let (task, open) = find_open_with(wanted_task, open, fallback)?;
+    let (host, session, window) = tab(&task);
+    let mut log = fetch_log(host, session, window);
+    let mut out = summary(&task, &open);
+    // The task is there even when its log isn't (yet: an agent just
+    // spawned writes none until it starts), so a poller still gets
+    // its status.
+    if let Some(entries) = log["entries"].as_array_mut() {
+        let skip = entries.len().saturating_sub(wanted_entries);
+        out["transcript"] = entries.drain(skip..).collect::<Vec<_>>().into();
+    } else {
+        out["transcript"] = json!([]);
+        out["transcript_error"] = log["error"].take();
+    }
+    Ok(out)
 }
 
 /// The open task named `PROJECT/NAME`, or a bare NAME only one has.
@@ -1155,15 +1206,266 @@ mod tests {
         let with_cb = json!({
             "project": "switchyard",
             "name": "cb",
+            "window_id": "w-cb",
             "parent_url": "http://127.0.0.1:8080/cb",
             "parent_label": "Marvin #42",
         });
-        let s = summary(&with_cb);
+        let s = summary(&with_cb, std::slice::from_ref(&with_cb));
         assert_eq!(s["parent_label"], "Marvin #42");
         assert!(s.get("parent_url").is_none());
+        assert!(s.get("parent_task").is_none());
 
         let without = json!({ "project": "switchyard", "name": "plain" });
-        assert!(summary(&without).get("parent_label").is_none());
+        let plain = summary(&without, &[]);
+        assert!(plain.get("parent_label").is_none());
+        assert!(plain.get("parent_task").is_none());
+    }
+
+    #[test]
+    fn summary_resolves_parent_task_and_omits_unresolved_parents() {
+        let root = json!({
+            "project": "marvin",
+            "name": "lead",
+            "window_id": "w-root",
+            "ended_at": null,
+        });
+        let child = json!({
+            "project": "switchyard",
+            "name": "child",
+            "window_id": "w-child",
+            "parent_window": "w-root",
+            "ended_at": null,
+        });
+        let grandchild = json!({
+            "project": "rex",
+            "name": "grand",
+            "window_id": "w-grand",
+            "parent_window": "w-child",
+            "ended_at": null,
+        });
+        let ended_parent = json!({
+            "project": "switchyard",
+            "name": "old-parent",
+            "window_id": "w-ended",
+            "ended_at": 1_700_000_000,
+        });
+        let after_ended = json!({
+            "project": "switchyard",
+            "name": "after-ended",
+            "window_id": "w-after",
+            "parent_window": "w-ended",
+            "ended_at": null,
+        });
+        let missing_parent = json!({
+            "project": "switchyard",
+            "name": "missing-parent",
+            "window_id": "w-missing",
+            "parent_window": "w-gone",
+            "ended_at": null,
+        });
+        let empty_parent = json!({
+            "project": "switchyard",
+            "name": "empty-parent",
+            "window_id": "w-empty",
+            "parent_window": "",
+            "ended_at": null,
+        });
+        let self_parent = json!({
+            "project": "switchyard",
+            "name": "self-ref",
+            "window_id": "w-self",
+            "parent_window": "w-self",
+            "ended_at": null,
+        });
+        let callback_child = json!({
+            "project": "switchyard",
+            "name": "cb-child",
+            "window_id": "w-cb",
+            "parent_url": "http://127.0.0.1:8080/cb",
+            "parent_label": "Marvin #42",
+            "ended_at": null,
+        });
+        let tasks = vec![
+            root.clone(),
+            child.clone(),
+            grandchild.clone(),
+            ended_parent,
+            after_ended.clone(),
+            missing_parent.clone(),
+            empty_parent.clone(),
+            self_parent.clone(),
+            callback_child.clone(),
+        ];
+
+        assert!(summary(&root, &tasks).get("parent_task").is_none());
+
+        let child_summary = summary(&child, &tasks);
+        assert_eq!(child_summary["parent_task"], "marvin/lead");
+        assert!(child_summary.get("parent_window").is_none());
+        assert!(child_summary.get("window_id").is_none());
+
+        let grand_summary = summary(&grandchild, &tasks);
+        assert_eq!(grand_summary["parent_task"], "switchyard/child");
+
+        assert!(summary(&after_ended, &tasks).get("parent_task").is_none());
+        assert!(
+            summary(&missing_parent, &tasks)
+                .get("parent_task")
+                .is_none()
+        );
+        assert!(summary(&empty_parent, &tasks).get("parent_task").is_none());
+        assert!(summary(&self_parent, &tasks).get("parent_task").is_none());
+
+        let cb_summary = summary(&callback_child, &tasks);
+        assert_eq!(cb_summary["parent_label"], "Marvin #42");
+        assert!(cb_summary.get("parent_task").is_none());
+        assert!(cb_summary.get("parent_url").is_none());
+    }
+
+    fn task_record(project: &str, name: &str, window: &str, parent_window: Option<&str>) -> Value {
+        let mut task = json!({
+            "project": project,
+            "name": name,
+            "host": "omarchy",
+            "session_id": format!("s-{name}"),
+            "window_id": window,
+            "status": "idle",
+            "ended_at": null,
+        });
+        if let Some(parent) = parent_window {
+            task["parent_window"] = parent.into();
+        }
+        task
+    }
+
+    #[test]
+    fn list_tasks_and_read_task_resolve_parent_task_consistently() {
+        let e = endpoint();
+        let ended_parent = json!({
+            "project": "switchyard",
+            "name": "ended",
+            "window_id": "w-ended",
+            "ended_at": 1_700_000_000,
+        });
+        let cb = json!({
+            "project": "switchyard",
+            "name": "cb",
+            "host": "omarchy",
+            "session_id": "s-cb",
+            "window_id": "w-cb",
+            "parent_url": "http://127.0.0.1:8080/cb",
+            "parent_label": "Marvin #42",
+            "status": "idle",
+            "ended_at": null,
+        });
+        e.shared.lock().set_tasks(
+            Ok(vec![
+                task_record("marvin", "lead", "w-root", None),
+                task_record("switchyard", "child", "w-child", Some("w-root")),
+                task_record("rex", "grand", "w-grand", Some("w-child")),
+                ended_parent,
+                task_record("switchyard", "orphan", "w-orphan", Some("w-ended")),
+                task_record("switchyard", "self-ref", "w-self", Some("w-self")),
+                cb,
+            ]),
+            true,
+            Instant::now(),
+        );
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": { "name": "list_tasks", "arguments": {} }
+        });
+        let reply = route(&post(&body.to_string()), &e).1.unwrap();
+        assert_eq!(reply["result"]["isError"], false);
+        let listed = reply["result"]["structuredContent"]["tasks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listed.len(), 6);
+
+        let by_name = |name: &str| listed.iter().find(|t| t["task"] == name).unwrap();
+        assert!(by_name("marvin/lead").get("parent_task").is_none());
+        assert_eq!(by_name("switchyard/child")["parent_task"], "marvin/lead");
+        assert_eq!(by_name("rex/grand")["parent_task"], "switchyard/child");
+        assert!(by_name("switchyard/orphan").get("parent_task").is_none());
+        assert!(by_name("switchyard/self-ref").get("parent_task").is_none());
+        assert!(by_name("switchyard/cb").get("parent_task").is_none());
+        assert_eq!(by_name("switchyard/cb")["parent_label"], "Marvin #42");
+
+        // Every summary field in read_task matches list_tasks identically.
+        let open = open_tasks(&e).unwrap();
+        for item in listed {
+            let name = item["task"].as_str().unwrap();
+            let mut read = read_task_with(
+                name,
+                READ_DEFAULT,
+                open.clone(),
+                || panic!("snapshot hit should not read registry"),
+                |_, _, _| json!({ "entries": [] }),
+            )
+            .unwrap();
+            assert_eq!(
+                read.as_object_mut().unwrap().remove("transcript"),
+                Some(json!([]))
+            );
+            assert_eq!(&read, item);
+        }
+    }
+
+    #[test]
+    fn read_task_registry_fallback_resolves_parent_task() {
+        let root = task_record("marvin", "lead", "w-root", None);
+        let ended_parent = json!({
+            "project": "switchyard",
+            "name": "ended",
+            "window_id": "w-ended",
+            "ended_at": 1_700_000_000,
+        });
+        let fresh_child = task_record("switchyard", "fresh", "w-fresh", Some("w-root"));
+        let fresh_orphan = task_record("switchyard", "fresh-orphan", "w-fo", Some("w-ended"));
+        let snapshot_open = vec![root.clone()];
+        let registry = vec![root, ended_parent, fresh_child, fresh_orphan];
+
+        // Freshly spawned child not yet in the snapshot resolves its open parent.
+        let read_fresh = read_task_with(
+            "switchyard/fresh",
+            READ_DEFAULT,
+            snapshot_open.clone(),
+            || Ok(registry.clone()),
+            |_, _, _| json!({ "error": "no log yet" }),
+        )
+        .unwrap();
+        assert_eq!(read_fresh["parent_task"], "marvin/lead");
+        assert_eq!(read_fresh["transcript"], json!([]));
+        assert_eq!(read_fresh["transcript_error"], "no log yet");
+
+        // Ended parent in the registry is not resolved.
+        let read_orphan = read_task_with(
+            "switchyard/fresh-orphan",
+            READ_DEFAULT,
+            snapshot_open,
+            || Ok(registry),
+            |_, _, _| json!({ "entries": [] }),
+        )
+        .unwrap();
+        assert!(read_orphan.get("parent_task").is_none());
+
+        // Both parent and child freshly spawned before the next snapshot tick.
+        let both_fresh = vec![
+            task_record("marvin", "fresh-lead", "w-fl", None),
+            task_record("switchyard", "fresh-kid", "w-fk", Some("w-fl")),
+        ];
+        let read_both = read_task_with(
+            "switchyard/fresh-kid",
+            READ_DEFAULT,
+            Vec::new(),
+            || Ok(both_fresh),
+            |_, _, _| json!({ "entries": [] }),
+        )
+        .unwrap();
+        assert_eq!(read_both["parent_task"], "marvin/fresh-lead");
     }
 
     #[test]
@@ -1281,6 +1583,20 @@ mod tests {
                 "message_parent",
                 "stop_task"
             ]
+        );
+        let list_tasks = tools.iter().find(|t| t["name"] == "list_tasks").unwrap();
+        assert!(
+            list_tasks["description"]
+                .as_str()
+                .unwrap()
+                .contains("parent_task")
+        );
+        let read_task = tools.iter().find(|t| t["name"] == "read_task").unwrap();
+        assert!(
+            read_task["description"]
+                .as_str()
+                .unwrap()
+                .contains("parent_task")
         );
         let list_projects = tools.iter().find(|t| t["name"] == "list_projects").unwrap();
         assert_eq!(list_projects["annotations"]["readOnlyHint"], true);

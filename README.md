@@ -163,10 +163,12 @@ the new task's parent when it knows how to reach it:
 - **Rex callers**: from `parent_session` and `parent_block` arguments, else
   from the `X-Rex-Session` and `X-Rex-Block` request headers. The registry
   records `parent_window`, `parent_host`, and `parent_session`, and the tab
-  picker's Inbox nests the task under the agent's row. A client config sends
-  the headers from the agent's environment, so agents needn't pass anything.
-  Empty values and unexpanded placeholders (such as a literal `${REX_BLOCK}`)
-  are ignored.
+  picker's Inbox nests the task under the agent's row. When `parent_window`
+  matches another open task, `list_tasks` and `read_task` summaries include
+  `parent_task` as that parent's `PROJECT/NAME` (omitted when the parent is
+  missing, ended, or not an open task). A client config sends the headers from
+  the agent's environment, so agents needn't pass anything. Empty values and
+  unexpanded placeholders (such as a literal `${REX_BLOCK}`) are ignored.
 - **Non-Rex callers** (such as services or chat bots): from `parent_url`
   (else `X-Parent-Url`) and optional `parent_label` (else `X-Parent-Label`).
   `parent_url` must be `http://` targeting loopback or the tailnet (or a DNS
@@ -174,7 +176,7 @@ the new task's parent when it knows how to reach it:
   explicit `parent_block` and `parent_url` is rejected; when `parent_url` is
   set, Rex headers are ignored and `parent_window` stays unset so the task
   stays top-level in the Inbox. When set, `parent_label` is included in
-  `list_tasks` and `read_task` summaries.
+  `list_tasks` and `read_task` summaries (and `parent_task` is omitted).
 
 The server tells the parent when a child settles, so it needn't poll or set
 a timer: each time the child's agent stops working (idle, done, or waiting
