@@ -16,14 +16,18 @@
 //! spawned the caller's task) and `stop_task` (a plain archive, never
 //! force-archive). They name a task `PROJECT/NAME`, as the pickers label it.
 //!
-//! `spawn_task` nests the new task under the caller's tab when it knows
-//! where the caller is: from its `parent_session` / `parent_block`
-//! arguments, else from the request's `X-Rex-Session` / `X-Rex-Block`
-//! headers, which a client config fills from `REX_SESSION` / `REX_BLOCK`,
-//! and records where the caller is, so the server can tell it when the
-//! task settles (see `notices`) unless `notify_parent` is false.
-//! `message_parent` finds the caller's task the same way, from its
-//! `session` / `block` arguments or those headers.
+//! `spawn_task` records who spawned the task when it knows how to reach them:
+//! - A Rex caller, from its `parent_session` / `parent_block` arguments, else
+//!   from the request's `X-Rex-Session` / `X-Rex-Block` headers (which a
+//!   client config fills from `REX_SESSION` / `REX_BLOCK`): nested under the
+//!   caller's tab in the picker and notified there when it settles.
+//! - A non-Rex caller, from `parent_url` / `X-Parent-Url` (and optional
+//!   `parent_label` / `X-Parent-Label`): left top-level in the picker
+//!   (`parent_window` unset) and notified by JSON `POST` to `parent_url`.
+//!
+//! Settle notices are sent unless `notify_parent` is false (see `notices`).
+//! `message_parent` finds the caller's task from its `session` / `block`
+//! arguments or Rex headers and delivers transparently to either parent type.
 //! Empty values and unexpanded placeholders (`${REX_BLOCK}`) count as
 //! absent.
 
@@ -68,7 +72,7 @@ list_tasks shows the open ones with live status (working, idle, blocked on a pro
 list_projects shows the catalog projects you can spawn into; \
 spawn_task starts a task with a first prompt; read_task shows what its agent has been saying; \
 message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes). \
-A task spawned with your parent_block tells you when its agent stops working, so wait for that rather than polling; \
+A task spawned with your parent_block or parent_url tells you when its agent stops working (typed into your Rex tab, or POSTed as JSON to parent_url), so wait for that rather than polling; \
 a spawned agent can write to its spawner with message_parent.";
 
 #[derive(Clone)]
@@ -143,7 +147,7 @@ fn tailscale_ipv4() -> Option<Ipv4Addr> {
 }
 
 /// Tailscale's address ranges: 100.64.0.0/10 and `fd7a:115c:a1e0::/48`.
-fn in_tailnet(ip: IpAddr) -> bool {
+pub(crate) fn in_tailnet(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
@@ -156,12 +160,17 @@ fn in_tailnet(ip: IpAddr) -> bool {
     }
 }
 
-fn allowed_peer(peer: SocketAddr) -> bool {
-    let ip = match peer.ip() {
+/// Whether `ip` is loopback or on the tailnet (unwrapping IPv4-mapped IPv6).
+pub(crate) fn allowed_ip(ip: IpAddr) -> bool {
+    let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         ip @ IpAddr::V4(_) => ip,
     };
     ip.is_loopback() || in_tailnet(ip)
+}
+
+fn allowed_peer(peer: SocketAddr) -> bool {
+    allowed_ip(peer.ip())
 }
 
 fn accept(listener: &TcpListener, endpoint: &Endpoint) {
@@ -203,11 +212,14 @@ pub struct Request {
     pub body: Vec<u8>,
 }
 
-/// Where the caller says it is in Rex, from its request headers.
+/// Who the caller says it is, from its request headers (Rex location and/or
+/// non-Rex callback URL + label).
 #[derive(Debug, Default, Clone, PartialEq)]
 struct Caller {
     session: Option<String>,
     block: Option<String>,
+    parent_url: Option<String>,
+    parent_label: Option<String>,
 }
 
 /// A Rex location value, or None for an empty one or a placeholder the
@@ -262,6 +274,8 @@ fn read_request(reader: &mut impl BufRead) -> io::Result<Option<Result<Request, 
             "origin" => req.origin = Some(value.to_string()),
             "x-rex-session" => req.caller.session = location(value).map(String::from),
             "x-rex-block" => req.caller.block = location(value).map(String::from),
+            "x-parent-url" => req.caller.parent_url = location(value).map(String::from),
+            "x-parent-label" => req.caller.parent_label = location(value).map(String::from),
             "connection" => match value.to_ascii_lowercase().as_str() {
                 "close" => req.close = true,
                 "keep-alive" => req.close = false,
@@ -477,8 +491,10 @@ fn tools() -> Value {
                     "host": { "type": "string", "description": "Rex host label, or auto (the default) for the project's least busy host." },
                     "work_item": { "type": "string", "description": "Optional issue or card the work is for (a ref or URL)." },
                     "parent_session": { "type": "string", "description": "Your own Rex session: the REX_SESSION environment variable, if set. With parent_block, the new task is shown under yours in the tab picker." },
-                    "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set." },
-                    "notify_parent": { "type": "boolean", "default": true, "description": "With parent_block known, type a short notice into your tab each time the task's agent stops working (idle, done, or waiting on a prompt), with its last message, so you needn't poll it or set a timer." },
+                    "parent_block": { "type": "string", "description": "Your own Rex pane: the REX_BLOCK environment variable, if set. Cannot be combined with an explicit parent_url." },
+                    "parent_url": { "type": "string", "description": "Optional HTTP callback URL (http:// to loopback or tailnet only) for non-Rex callers to receive settle notices and message_parent JSON POSTs. Cannot be combined with an explicit parent_block; overrides X-Parent-Url and ignores Rex headers." },
+                    "parent_label": { "type": "string", "description": "Optional human-readable label for a callback parent (e.g. \"marvin\" or \"Marvin #42\"), exposed in list_tasks/read_task summaries. Overrides X-Parent-Label." },
+                    "notify_parent": { "type": "boolean", "default": true, "description": "With parent_block or parent_url known, notify the parent each time the task's agent stops working (idle, done, or waiting on a prompt), with its last message, so you needn't poll it or set a timer." },
                 },
                 "required": ["project", "name", "prompt"],
             },
@@ -510,9 +526,9 @@ fn tools() -> Value {
         },
         {
             "name": "message_parent",
-            "description": "From a task spawned by another agent: send that agent text, typed into its tab \
-    (as message_task does), to report progress or ask it something without ending your turn. Refused \
-    while it waits on a prompt.",
+            "description": "From a spawned task: send text to its spawner (typed into a Rex parent's tab as \
+    message_task does, or POSTed as JSON to its parent_url callback) to report progress or ask it \
+    something without ending your turn. Refused while a Rex parent waits on a prompt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -617,8 +633,7 @@ fn message_parent(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<
         .into_iter()
         .find(|t| t["ended_at"].is_null() && in_window(t, &tab.window))
         .ok_or("your tab isn't an open Switchyard task")?;
-    let text = format!("[switchyard] From your child task {}: {text}", label(&task));
-    notices::send(&task, &text).map(|msg| json!({ "message": msg }))
+    notices::send(&task, text).map(|msg| json!({ "message": msg }))
 }
 
 fn tab(task: &Value) -> (&str, &str, &str) {
@@ -657,6 +672,7 @@ fn summary(task: &Value) -> Value {
         "status_at",
         "wake_at",
         "created_at",
+        "parent_label",
         "links",
     ] {
         if let Some(v) = task.get(key).filter(|v| !v.is_null()) {
@@ -779,19 +795,67 @@ fn caller_tab(endpoint: &Endpoint, session: Option<&str>, block: Option<&str>) -
     found
 }
 
-/// The spawner's Rex session and block: each from the tool arguments
-/// when given, else from the request headers.
-fn parent_location<'a>(args: &'a Value, caller: &'a Caller) -> (Option<&'a str>, Option<&'a str>) {
-    let pick = |key: &str, header: &'a Option<String>| {
-        args[key]
+/// How `spawn_task` should record the caller as parent.
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnParent<'a> {
+    None,
+    Rex {
+        session: Option<&'a str>,
+        block: &'a str,
+    },
+    Callback {
+        url: &'a str,
+        label: Option<&'a str>,
+    },
+}
+
+/// Resolve the spawner's parent from tool arguments and request headers.
+///
+/// Explicit tool arguments take precedence over headers. Passing both an
+/// explicit `parent_block` and an explicit `parent_url` is rejected. When a
+/// callback `parent_url` is selected (by argument or `X-Parent-Url` header),
+/// Rex headers are ignored so `parent_window` stays unset.
+fn resolve_spawn_parent<'a>(
+    args: &'a Value,
+    caller: &'a Caller,
+) -> Result<SpawnParent<'a>, String> {
+    let explicit_block = args["parent_block"].as_str().and_then(location);
+    let explicit_url = args["parent_url"].as_str().and_then(location);
+    if explicit_block.is_some() && explicit_url.is_some() {
+        return Err("cannot set both parent_block and parent_url".into());
+    }
+    let header_block = caller.block.as_deref().and_then(location);
+    let header_url = caller.parent_url.as_deref().and_then(location);
+    let label = args["parent_label"]
+        .as_str()
+        .and_then(location)
+        .or_else(|| caller.parent_label.as_deref().and_then(location));
+    let session = || {
+        args["parent_session"]
             .as_str()
             .and_then(location)
-            .or_else(|| header.as_deref().and_then(location))
+            .or_else(|| caller.session.as_deref().and_then(location))
     };
-    (
-        pick("parent_session", &caller.session),
-        pick("parent_block", &caller.block),
-    )
+
+    if let Some(url) = explicit_url {
+        return Ok(SpawnParent::Callback { url, label });
+    }
+    if let Some(block) = explicit_block {
+        return Ok(SpawnParent::Rex {
+            session: session(),
+            block,
+        });
+    }
+    if let Some(url) = header_url {
+        return Ok(SpawnParent::Callback { url, label });
+    }
+    if let Some(block) = header_block {
+        return Ok(SpawnParent::Rex {
+            session: session(),
+            block,
+        });
+    }
+    Ok(SpawnParent::None)
 }
 
 fn normalise(name: &str) -> String {
@@ -835,6 +899,11 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
     let name = name.as_str();
     let prompt = str_arg(args, "prompt")?;
     let host = opt_arg(args, "host").unwrap_or("auto");
+    // Validate parent arguments before touching the catalog or opening a tab.
+    let spawn_parent = resolve_spawn_parent(args, caller)?;
+    if let SpawnParent::Callback { url, .. } = spawn_parent {
+        notices::validate_callback_url(url)?;
+    }
     // Catalog projects only: a folder outside it would need its host's
     // checkout, which a remote caller can't see.
     let projects = catalog()?;
@@ -848,16 +917,23 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         &default_harness(&found.profile),
     );
     let harness = harness.as_str();
-    // The spawner's tab, so the picker can nest the task under it. Not
-    // finding it only costs the nesting.
-    let (parent_session, parent_block) = parent_location(args, caller);
-    let parent_tab = caller_tab(endpoint, parent_session, parent_block);
-    let parent = parent_tab.as_ref().map(|tab| Parent {
-        host: &tab.host,
-        session: &tab.session,
-        window: &tab.window,
-        notify: args["notify_parent"].as_bool().unwrap_or(true),
-    });
+    let notify = args["notify_parent"].as_bool().unwrap_or(true);
+    let parent_tab;
+    let parent = match spawn_parent {
+        SpawnParent::None => None,
+        SpawnParent::Rex { session, block } => {
+            // The spawner's tab, so the picker can nest the task under it. Not
+            // finding it only costs the nesting.
+            parent_tab = caller_tab(endpoint, session, Some(block));
+            parent_tab.as_ref().map(|tab| Parent::Rex {
+                host: &tab.host,
+                session: &tab.session,
+                window: &tab.window,
+                notify,
+            })
+        }
+        SpawnParent::Callback { url, label } => Some(Parent::Callback { url, label, notify }),
+    };
     let (host, session, window) = launch_text(
         host,
         &found.path,
@@ -956,8 +1032,8 @@ mod tests {
     }
 
     #[test]
-    fn reads_the_callers_rex_location_headers() {
-        let raw = "POST /mcp HTTP/1.1\r\nx-rex-session: session:a\r\nX-REX-BLOCK:  block:b \r\nContent-Length: 0\r\n\r\n";
+    fn reads_the_callers_rex_and_callback_headers() {
+        let raw = "POST /mcp HTTP/1.1\r\nx-rex-session: session:a\r\nX-REX-BLOCK:  block:b \r\nX-Parent-Url: http://127.0.0.1:8080/cb \r\nX-Parent-Label: Marvin #42\r\nContent-Length: 0\r\n\r\n";
         let req = read_request(&mut Cursor::new(raw))
             .unwrap()
             .unwrap()
@@ -966,11 +1042,13 @@ mod tests {
             req.caller,
             Caller {
                 session: Some("session:a".into()),
-                block: Some("block:b".into())
+                block: Some("block:b".into()),
+                parent_url: Some("http://127.0.0.1:8080/cb".into()),
+                parent_label: Some("Marvin #42".into()),
             }
         );
         // An unset variable leaves an empty value or the literal placeholder.
-        let raw = "POST /mcp HTTP/1.1\r\nX-Rex-Session: ${REX_SESSION}\r\nX-Rex-Block: \r\n\r\n";
+        let raw = "POST /mcp HTTP/1.1\r\nX-Rex-Session: ${REX_SESSION}\r\nX-Rex-Block: \r\nX-Parent-Url: ${PARENT_URL}\r\nX-Parent-Label:  \r\n\r\n";
         let req = read_request(&mut Cursor::new(raw))
             .unwrap()
             .unwrap()
@@ -979,31 +1057,164 @@ mod tests {
     }
 
     #[test]
-    fn spawn_arguments_override_the_headers() {
-        let caller = Caller {
+    fn spawn_parent_precedence_and_conflict_rules() {
+        let rex_headers = Caller {
             session: Some("session:h".into()),
             block: Some("block:h".into()),
+            ..Caller::default()
+        };
+        let cb_headers = Caller {
+            parent_url: Some("http://127.0.0.1:8080/hdr".into()),
+            parent_label: Some("marvin".into()),
+            ..Caller::default()
         };
         let none = json!({});
+
+        // Rex headers fallback & tool arg override
         assert_eq!(
-            parent_location(&none, &caller),
-            (Some("session:h"), Some("block:h"))
+            resolve_spawn_parent(&none, &rex_headers).unwrap(),
+            SpawnParent::Rex {
+                session: Some("session:h"),
+                block: "block:h",
+            }
         );
-        let both = json!({ "parent_session": "session:a", "parent_block": "block:a" });
+        let both_rex = json!({ "parent_session": "session:a", "parent_block": "block:a" });
         assert_eq!(
-            parent_location(&both, &caller),
-            (Some("session:a"), Some("block:a"))
+            resolve_spawn_parent(&both_rex, &rex_headers).unwrap(),
+            SpawnParent::Rex {
+                session: Some("session:a"),
+                block: "block:a",
+            }
         );
-        let blank = json!({ "parent_session": " ", "parent_block": "${REX_BLOCK}" });
+        let blank_rex = json!({ "parent_session": " ", "parent_block": "${REX_BLOCK}" });
         assert_eq!(
-            parent_location(&blank, &caller),
-            (Some("session:h"), Some("block:h"))
+            resolve_spawn_parent(&blank_rex, &rex_headers).unwrap(),
+            SpawnParent::Rex {
+                session: Some("session:h"),
+                block: "block:h",
+            }
         );
+
+        // Callback header fallback & tool arg override
         assert_eq!(
-            parent_location(&both, &Caller::default()),
-            (Some("session:a"), Some("block:a"))
+            resolve_spawn_parent(&none, &cb_headers).unwrap(),
+            SpawnParent::Callback {
+                url: "http://127.0.0.1:8080/hdr",
+                label: Some("marvin"),
+            }
         );
-        assert_eq!(parent_location(&none, &Caller::default()), (None, None));
+        let arg_cb = json!({
+            "parent_url": "http://127.0.0.1:9090/arg",
+            "parent_label": "Marvin #42",
+        });
+        assert_eq!(
+            resolve_spawn_parent(&arg_cb, &cb_headers).unwrap(),
+            SpawnParent::Callback {
+                url: "http://127.0.0.1:9090/arg",
+                label: Some("Marvin #42"),
+            }
+        );
+
+        // Explicit parent_url ignores Rex headers
+        assert_eq!(
+            resolve_spawn_parent(&arg_cb, &rex_headers).unwrap(),
+            SpawnParent::Callback {
+                url: "http://127.0.0.1:9090/arg",
+                label: Some("Marvin #42"),
+            }
+        );
+        // Header X-Parent-Url ignores Rex headers too
+        let mixed_headers = Caller {
+            session: Some("session:h".into()),
+            block: Some("block:h".into()),
+            parent_url: Some("http://127.0.0.1:8080/hdr".into()),
+            parent_label: Some("marvin".into()),
+        };
+        assert_eq!(
+            resolve_spawn_parent(&none, &mixed_headers).unwrap(),
+            SpawnParent::Callback {
+                url: "http://127.0.0.1:8080/hdr",
+                label: Some("marvin"),
+            }
+        );
+
+        // Passing both explicit parent_block and parent_url is rejected
+        let conflict = json!({
+            "parent_block": "block:a",
+            "parent_url": "http://127.0.0.1:8080/cb",
+        });
+        assert!(resolve_spawn_parent(&conflict, &Caller::default()).is_err());
+        assert_eq!(
+            resolve_spawn_parent(&none, &Caller::default()).unwrap(),
+            SpawnParent::None
+        );
+    }
+
+    #[test]
+    fn summary_exposes_parent_label_when_set_and_hides_parent_url() {
+        let with_cb = json!({
+            "project": "switchyard",
+            "name": "cb",
+            "parent_url": "http://127.0.0.1:8080/cb",
+            "parent_label": "Marvin #42",
+        });
+        let s = summary(&with_cb);
+        assert_eq!(s["parent_label"], "Marvin #42");
+        assert!(s.get("parent_url").is_none());
+
+        let without = json!({ "project": "switchyard", "name": "plain" });
+        assert!(summary(&without).get("parent_label").is_none());
+    }
+
+    #[test]
+    fn spawn_task_rejects_bad_parent_url_and_conflicting_parent_args() {
+        let e = endpoint();
+        let bad_url = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "spawn_task",
+                "arguments": {
+                    "project": "switchyard",
+                    "name": "test",
+                    "prompt": "hi",
+                    "parent_url": "https://127.0.0.1:8080/cb",
+                }
+            }
+        });
+        let reply = route(&post(&bad_url.to_string()), &e).1.unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("http://")
+        );
+
+        let conflict = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "spawn_task",
+                "arguments": {
+                    "project": "switchyard",
+                    "name": "test",
+                    "prompt": "hi",
+                    "parent_block": "block:1",
+                    "parent_url": "http://127.0.0.1:8080/cb",
+                }
+            }
+        });
+        let reply = route(&post(&conflict.to_string()), &e).1.unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(
+            reply["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("both parent_block and parent_url")
+        );
     }
 
     #[test]
@@ -1084,7 +1295,10 @@ mod tests {
                 .unwrap()
                 .contains("list_projects")
         );
+        assert!(spawn["inputSchema"]["properties"]["parent_url"].is_object());
+        assert!(spawn["inputSchema"]["properties"]["parent_label"].is_object());
         assert!(INSTRUCTIONS.contains("list_projects"));
+        assert!(INSTRUCTIONS.contains("parent_url"));
     }
 
     #[test]

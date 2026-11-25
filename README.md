@@ -154,27 +154,46 @@ are refused.
 | `spawn_task`     | Start a task: catalog project, name, prompt, harness     |
 | `read_task`      | Status and the last transcript entries                   |
 | `message_task`   | Type text into the agent's tab (not while it's blocked)  |
-| `message_parent` | From a spawned task: type text into its spawner's tab    |
+| `message_parent` | From a spawned task: send text to its spawner (Rex tab or callback URL) |
 | `stop_task`      | Archive (refused with uncommitted changes)               |
 
-Tasks are named `PROJECT/NAME`. `spawn_task` records the new task as the
-calling agent's child (`parent_window`, `parent_host` and
-`parent_session` in the registry), and the tab
-picker's Inbox shows it nested under the agent's row, when it knows the
-agent's Rex location: from the `parent_session` and `parent_block`
-arguments, else from the `X-Rex-Session` and `X-Rex-Block` request headers.
-A client config sends the headers from the agent's environment, so agents
-needn't pass anything. Empty values and unexpanded placeholders (such as a
-literal `${REX_BLOCK}`) are ignored.
+Tasks are named `PROJECT/NAME`. `spawn_task` records the calling agent as
+the new task's parent when it knows how to reach it:
+
+- **Rex callers**: from `parent_session` and `parent_block` arguments, else
+  from the `X-Rex-Session` and `X-Rex-Block` request headers. The registry
+  records `parent_window`, `parent_host`, and `parent_session`, and the tab
+  picker's Inbox nests the task under the agent's row. A client config sends
+  the headers from the agent's environment, so agents needn't pass anything.
+  Empty values and unexpanded placeholders (such as a literal `${REX_BLOCK}`)
+  are ignored.
+- **Non-Rex callers** (such as services or chat bots): from `parent_url`
+  (else `X-Parent-Url`) and optional `parent_label` (else `X-Parent-Label`).
+  `parent_url` must be `http://` targeting loopback or the tailnet (or a DNS
+  hostname resolving exclusively to loopback/tailnet IPs). Passing both an
+  explicit `parent_block` and `parent_url` is rejected; when `parent_url` is
+  set, Rex headers are ignored and `parent_window` stays unset so the task
+  stays top-level in the Inbox. When set, `parent_label` is included in
+  `list_tasks` and `read_task` summaries.
 
 The server tells the parent when a child settles, so it needn't poll or set
 a timer: each time the child's agent stops working (idle, done, or waiting
-on a prompt), it types a short notice into the parent's agent with the
-child's last message. A child with a timer or background job pending will
-resume by itself and gets no notice until it settles for good. Pass
-`notify_parent: false` to `spawn_task` to turn this off. A child can also
-write to its parent mid-work with `message_parent`, which finds the
-child's task from its Rex block the same way.
+on a prompt), it either types a short notice into a Rex parent's tab or
+`POST`s a JSON payload (`Content-Type: application/json`) to `parent_url`:
+
+- Settle/blocked notice: `{ "event": "settled", "task", "project", "name",
+  "host", "state", "status_msg", "last_message", "summary" }`
+  (`last_message` capped at 2000 chars; retried with short backoff on
+  connect/network/5xx errors, never on 4xx).
+- Mid-work message (`message_parent`): `{ "event": "message", "task",
+  "project", "name", "host", "message", "summary" }`.
+
+A child with a timer or background job pending will resume by itself and
+gets no notice until it settles for good. Pass `notify_parent: false` to
+`spawn_task` to turn settle notices off. A child can also write to its
+parent mid-work with `message_parent`, which finds the child's task from
+its Rex block and delivers transparently to either a Rex parent tab or
+`parent_url`.
 
 To add it to Claude Code on another host:
 

@@ -1097,6 +1097,8 @@ fn migrate_registry(
             "parent_window",
             "parent_host",
             "parent_session",
+            "parent_url",
+            "parent_label",
             "notify_parent",
         ] {
             if !old_task[key].is_null() {
@@ -1658,5 +1660,58 @@ mod tests {
         assert_eq!(kid["parent_host"], "omarchy");
         assert_eq!(kid["parent_session"], "s-new");
         assert_eq!(kid["parent_window"], "w-new");
+    }
+
+    #[test]
+    fn migrate_registry_preserves_callback_parent_fields() {
+        let old = serde_json::json!({
+            "host": "mac",
+            "session_id": "s-old",
+            "window_id": "w-old",
+            "project": "switchyard",
+            "name": "cb-task",
+            "branch": "feature/cb-task",
+            "worktree": "/Users/j/dev/switchyard/.worktrees/cb-task",
+            "parent_url": "http://127.0.0.1:8080/hooks/switchyard",
+            "parent_label": "Marvin #42",
+            "notify_parent": false,
+            "ended_at": null
+        });
+        let new = serde_json::json!({
+            "host": "omarchy",
+            "session_id": "s-new",
+            "window_id": "w-new",
+            "project": "switchyard",
+            "name": "cb-task",
+            "branch": "feature/cb-task",
+            "worktree": "/home/j/dev/switchyard/.worktrees/cb-task",
+            "links": [],
+            "ended_at": null
+        });
+        let mut tasks = vec![old.clone(), new];
+        migrate_registry(
+            &mut tasks,
+            &old,
+            false,
+            "w-old",
+            &MovedRecord {
+                host: "omarchy",
+                session: "s-new",
+                window: "w-new",
+                name: "cb-task",
+                branch: "feature/cb-task",
+                worktree: "/home/j/dev/switchyard/.worktrees/cb-task",
+                resume_head: None,
+            },
+        );
+        assert_eq!(tasks.len(), 1);
+        let moved = &tasks[0];
+        assert_eq!(
+            moved["parent_url"],
+            "http://127.0.0.1:8080/hooks/switchyard"
+        );
+        assert_eq!(moved["parent_label"], "Marvin #42");
+        assert_eq!(moved["notify_parent"], false);
+        assert!(moved.get("parent_window").is_none());
     }
 }

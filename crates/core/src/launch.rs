@@ -218,22 +218,36 @@ fn kept_prompt(prompt_ref: &str) -> String {
 /// it has no parent.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Placement<'a> {
-    /// The agent that spawned it, if known: the registry keeps it as
-    /// `parent_window`, `parent_host` and `parent_session`, and the tab
-    /// picker nests the task under that tab.
+    /// Who spawned the task, if known: either another agent in a Rex tab
+    /// or a non-Rex caller reachable at an HTTP callback URL.
     pub parent: Option<Parent<'a>>,
 }
 
-/// Where the agent that spawned a task is.
+/// Who spawned a task, and whether to tell them when it settles.
 #[derive(Clone, Copy, Debug)]
-pub struct Parent<'a> {
-    /// The Rex label of its host.
-    pub host: &'a str,
-    pub session: &'a str,
-    pub window: &'a str,
-    /// Tell it when the task settles (see switchyard-server's `notices`);
-    /// kept as `notify_parent: false` when off.
-    pub notify: bool,
+pub enum Parent<'a> {
+    /// Another agent in a Rex tab: the registry keeps `parent_window`,
+    /// `parent_host`, and `parent_session`, and the tab picker nests the
+    /// task under that tab.
+    Rex {
+        /// The Rex label of its host.
+        host: &'a str,
+        session: &'a str,
+        window: &'a str,
+        /// Tell it when the task settles (see switchyard-server's `notices`);
+        /// kept as `notify_parent: false` when off.
+        notify: bool,
+    },
+    /// A non-Rex caller reachable at an HTTP callback URL: the registry
+    /// keeps `parent_url` and optional `parent_label`, leaving
+    /// `parent_window` unset so the task stays top-level in the Inbox.
+    Callback {
+        url: &'a str,
+        label: Option<&'a str>,
+        /// Post to `url` when the task settles (see switchyard-server's
+        /// `notices`); kept as `notify_parent: false` when off.
+        notify: bool,
+    },
 }
 
 /// `launch` with the prompt's text itself rather than a prompt file, for
@@ -465,13 +479,30 @@ fn task_record(
         "ended_at": null,
         "ended_reason": null,
     });
-    if let Some(parent) = placement.parent.filter(|p| !p.window.is_empty()) {
-        task["parent_window"] = parent.window.into();
-        task["parent_host"] = parent.host.into();
-        task["parent_session"] = parent.session.into();
-        if !parent.notify {
-            task["notify_parent"] = false.into();
+    match placement.parent {
+        Some(Parent::Rex {
+            host,
+            session,
+            window,
+            notify,
+        }) if !window.is_empty() => {
+            task["parent_window"] = window.into();
+            task["parent_host"] = host.into();
+            task["parent_session"] = session.into();
+            if !notify {
+                task["notify_parent"] = false.into();
+            }
         }
+        Some(Parent::Callback { url, label, notify }) if !url.is_empty() => {
+            task["parent_url"] = url.into();
+            if let Some(label) = label.filter(|s| !s.is_empty()) {
+                task["parent_label"] = label.into();
+            }
+            if !notify {
+                task["notify_parent"] = false.into();
+            }
+        }
+        _ => {}
     }
     task
 }
@@ -858,5 +889,74 @@ mod tests {
         let out = Command::new("bash").args(["-c", &script]).output().unwrap();
         assert!(out.status.success());
         assert_eq!(out.stdout, b"/primary repo");
+    }
+
+    #[test]
+    fn task_record_persists_rex_and_callback_parents() {
+        let project = Project {
+            profile: "personal".into(),
+            path: "~/dev/p".into(),
+            clone_url: String::new(),
+            name: "p".into(),
+            hosts: vec![],
+            tracker: String::new(),
+        };
+        let mk = |placement| {
+            task_record(
+                &project,
+                "omarchy",
+                "s1",
+                "w1",
+                "/home/j/dev/p",
+                "t",
+                "feature/t",
+                "t",
+                "claude",
+                None,
+                "ag1",
+                &[],
+                placement,
+            )
+        };
+
+        let rex = mk(Placement {
+            parent: Some(Parent::Rex {
+                host: "mac",
+                session: "s0",
+                window: "w0",
+                notify: false,
+            }),
+        });
+        assert_eq!(rex["parent_host"], "mac");
+        assert_eq!(rex["parent_session"], "s0");
+        assert_eq!(rex["parent_window"], "w0");
+        assert_eq!(rex["notify_parent"], false);
+        assert!(rex.get("parent_url").is_none());
+
+        let cb = mk(Placement {
+            parent: Some(Parent::Callback {
+                url: "http://127.0.0.1:8080/cb",
+                label: Some("Marvin #42"),
+                notify: true,
+            }),
+        });
+        assert_eq!(cb["parent_url"], "http://127.0.0.1:8080/cb");
+        assert_eq!(cb["parent_label"], "Marvin #42");
+        assert!(cb.get("parent_window").is_none());
+        assert!(cb.get("parent_host").is_none());
+        assert!(cb.get("parent_session").is_none());
+        assert!(cb.get("notify_parent").is_none());
+
+        let cb_quiet = mk(Placement {
+            parent: Some(Parent::Callback {
+                url: "http://127.0.0.1:8080/cb",
+                label: None,
+                notify: false,
+            }),
+        });
+        assert_eq!(cb_quiet["parent_url"], "http://127.0.0.1:8080/cb");
+        assert_eq!(cb_quiet["notify_parent"], false);
+        assert!(cb_quiet.get("parent_label").is_none());
+        assert!(cb_quiet.get("parent_window").is_none());
     }
 }
