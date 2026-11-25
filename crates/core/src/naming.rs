@@ -27,6 +27,9 @@ pub fn models(harness: &str) -> &'static [&'static str] {
             "",
             "gemini-4-neon",
             "gemini-4-neon-xhigh",
+            "gemini-4-neon-high",
+            "gemini-4-neon-medium",
+            "gemini-4-neon-low",
             "gemini-3.8-flash-high",
             "gemini-3.8-flash-medium",
             "gemini-3.8-flash-low",
@@ -135,6 +138,22 @@ mod tests {
     #[test]
     fn configured_defaults_keep_only_known_harnesses_and_models() {
         assert_eq!(known_harness("agy:gemini-4-neon"), "agy:gemini-4-neon");
+        assert_eq!(
+            known_harness("agy:gemini-4-neon-xhigh"),
+            "agy:gemini-4-neon-xhigh"
+        );
+        assert_eq!(
+            known_harness("agy:gemini-4-neon-high"),
+            "agy:gemini-4-neon-high"
+        );
+        assert_eq!(
+            known_harness("agy:gemini-4-neon-medium"),
+            "agy:gemini-4-neon-medium"
+        );
+        assert_eq!(
+            known_harness("agy:gemini-4-neon-low"),
+            "agy:gemini-4-neon-low"
+        );
         assert_eq!(known_harness("pi"), "pi");
         assert_eq!(known_harness("agy:no-such-model"), "agy");
         assert_eq!(known_harness("nope:opus"), HARNESSES[0]);
