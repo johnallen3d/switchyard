@@ -6121,11 +6121,10 @@ impl App {
     }
 
     /// Start a session from a work item in the background: auto host,
-    /// claude, named from the item (see core's `launch`). The registry and
-    /// Rex hosts it needs are reached from the Mac.
+    /// claude, named from the item (see core's `launch`).
     fn launch(&mut self, path: String, url: String, name: String) {
-        if !cfg!(target_os = "macos") {
-            self.note = Some(("sessions start from the Mac's picker".into(), true));
+        if !switchyard_core::config::has_control_plane() {
+            self.note = Some(("no control plane configured to start sessions".into(), true));
             return;
         }
         self.note = Some((format!("Starting {name}…"), false));

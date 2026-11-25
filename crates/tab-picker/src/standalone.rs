@@ -188,7 +188,7 @@ fn follow_server(
 /// Send a snapshot's pastes; false once the picker has gone.
 fn send_pastes(tx: &Sender<String>, snap: &serde_json::Value) -> bool {
     let mut pastes = server::pastes(snap);
-    if !cfg!(target_os = "macos") {
+    if !switchyard_core::config::has_control_plane() {
         // A server elsewhere has no registry worth showing.
         pastes.retain(|(kind, _)| !matches!(*kind, "live" | "tasks" | "tasks-error"));
         pastes.push(("tasks-error", NO_REGISTRY.into()));
@@ -198,7 +198,7 @@ fn send_pastes(tx: &Sender<String>, snap: &serde_json::Value) -> bool {
         .all(|(kind, body)| tx.send(format!("{DATA}{kind}\n{body}")).is_ok())
 }
 
-const NO_REGISTRY: &str = "the task registry is on the Mac";
+const NO_REGISTRY: &str = "no control plane configured for the task registry";
 
 /// Fetch directly whenever the server isn't answering: at once, after
 /// REFRESH and on a poke. With it answering, a poke gets one snapshot.
@@ -246,7 +246,7 @@ fn fetch(tx: &Sender<String>) -> bool {
 }
 
 fn fetch_tasks(tx: &Sender<String>) -> bool {
-    if !cfg!(target_os = "macos") {
+    if !switchyard_core::config::has_control_plane() {
         return tx.send(format!("{DATA}tasks-error\n{NO_REGISTRY}")).is_ok();
     }
     for kind in ["live", "tasks"] {

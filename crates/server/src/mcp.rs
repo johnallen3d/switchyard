@@ -30,7 +30,6 @@
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -44,7 +43,9 @@ use switchyard_core::rex::local_label;
 use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
 use switchyard_core::{actions, transcript};
 
+use crate::api;
 use crate::notices;
+use crate::socket::Asks;
 use crate::state::Shared;
 
 /// Protocol revisions this endpoint speaks, newest first: it uses only
@@ -73,29 +74,36 @@ a spawned agent can write to its spawner with message_parent.";
 #[derive(Clone)]
 pub struct Endpoint {
     pub shared: Arc<Shared>,
-    /// The task check (see `tasks::run`), prompted after a change.
-    pub refresh: Sender<&'static str>,
+    /// Background work channels (task refresh, zoxide folder refresh).
+    pub asks: Asks,
+    /// Whether `POST /mcp` is served (remote `/api/*` is always served).
+    pub mcp_enabled: bool,
 }
 
 /// Listen on loopback now and on the Tailscale address once there is one.
 pub fn start(endpoint: Endpoint, port: u16) {
+    let label = if endpoint.mcp_enabled {
+        "http/mcp"
+    } else {
+        "http"
+    };
     match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
         Ok(l) => {
-            crate::log(&format!("mcp: listening on http://127.0.0.1:{port}/mcp"));
+            crate::log(&format!("{label}: listening on http://127.0.0.1:{port}"));
             let endpoint = endpoint.clone();
             thread::spawn(move || accept(&l, &endpoint));
         }
-        Err(e) => crate::log(&format!("mcp: 127.0.0.1:{port}: {e}")),
+        Err(e) => crate::log(&format!("{label}: 127.0.0.1:{port}: {e}")),
     }
     thread::spawn(move || {
         loop {
             if let Some(ip) = tailscale_ipv4() {
                 match TcpListener::bind((ip, port)) {
                     Ok(l) => {
-                        crate::log(&format!("mcp: listening on http://{ip}:{port}/mcp"));
+                        crate::log(&format!("{label}: listening on http://{ip}:{port}"));
                         return accept(&l, &endpoint);
                     }
-                    Err(e) => crate::log(&format!("mcp: {ip}:{port}: {e}")),
+                    Err(e) => crate::log(&format!("{label}: {ip}:{port}: {e}")),
                 }
             }
             thread::sleep(TAILSCALE_RETRY);
@@ -170,15 +178,29 @@ fn accept(listener: &TcpListener, endpoint: &Endpoint) {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn accept_once(listener: &TcpListener, endpoint: &Endpoint) -> bool {
+    match listener.accept() {
+        Ok((stream, _)) => {
+            let endpoint = endpoint.clone();
+            thread::spawn(move || {
+                let _ = connection(stream, &endpoint);
+            });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// One HTTP request, as far as this endpoint reads it.
 #[derive(Debug, Default)]
-struct Request {
-    method: String,
-    path: String,
-    origin: Option<String>,
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub origin: Option<String>,
     caller: Caller,
     close: bool,
-    body: Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 /// Where the caller says it is in Rex, from its request headers.
@@ -308,6 +330,20 @@ fn connection(stream: TcpStream, endpoint: &Endpoint) -> io::Result<()> {
             Ok(req) => req,
             Err(status) => return respond(&mut out, status, None, true),
         };
+        if req.path == "/api/subscribe" {
+            if req.origin.is_some() {
+                return respond(
+                    &mut out,
+                    403,
+                    Some(&json!({ "error": "browser requests are refused" })),
+                    true,
+                );
+            }
+            if req.method != "GET" {
+                return respond(&mut out, 405, None, true);
+            }
+            return api::subscribe(&mut out, &endpoint.shared);
+        }
         let (status, body) = route(&req, endpoint);
         respond(&mut out, status, body.as_ref(), req.close)?;
         if req.close {
@@ -328,8 +364,11 @@ fn route(req: &Request, endpoint: &Endpoint) -> (u16, Option<Value>) {
             )),
         );
     }
-    if req.path != "/mcp" {
-        return (404, None);
+    match req.path.as_str() {
+        "/api/snapshot" => return api::route_snapshot(req, endpoint),
+        "/api/rpc" => return api::route_rpc(req, endpoint),
+        "/mcp" if endpoint.mcp_enabled => {}
+        _ => return (404, None),
     }
     if req.method != "POST" {
         return (405, None);
@@ -552,7 +591,7 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
             let task = find_open(str_arg(args, "task")?, endpoint)?;
             let (host, session, window) = tab(&task);
             let result = actions::act("archive", host, session, window);
-            let _ = endpoint.refresh.send("mcp");
+            let _ = endpoint.asks.refresh.send("mcp");
             result.map(|msg| json!({ "message": msg }))
         }
         _ => Err(format!("unknown tool {name}")),
@@ -828,7 +867,7 @@ fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, St
         opt_arg(args, "work_item"),
         Placement { parent },
     )?;
-    let _ = endpoint.refresh.send("mcp");
+    let _ = endpoint.asks.refresh.send("mcp");
     // The registry has it now: name it as list_tasks will.
     let label = load_tasks()
         .ok()
@@ -864,9 +903,11 @@ mod tests {
 
     fn endpoint() -> Endpoint {
         let (refresh, _) = mpsc::channel();
+        let (folders, _) = mpsc::channel();
         Endpoint {
             shared: Arc::new(Shared::new()),
-            refresh,
+            asks: Asks { refresh, folders },
+            mcp_enabled: true,
         }
     }
 

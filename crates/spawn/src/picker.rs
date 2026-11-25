@@ -321,8 +321,9 @@ impl App {
             }
         }
         let here = local_label();
+        let control = config::configured_control_host().unwrap_or_default();
         let mut hosts = vec![AUTO.to_string()];
-        for h in [here.clone(), home.clone()].into_iter().chain(dev) {
+        for h in [here.clone(), home.clone(), control].into_iter().chain(dev) {
             if !h.is_empty() && !hosts.contains(&h) {
                 hosts.push(h);
             }
@@ -778,11 +779,17 @@ impl App {
         if self.allowed(host) { host } else { AUTO }
     }
 
-    /// A pool entry as its host label: the config host by its own name.
+    /// A pool entry as its host label: `"config"` resolves to the configured
+    /// control-plane host, else the picker's home host.
     fn host_label(&self, host: &str) -> String {
         match host {
-            CONFIG if !self.home.is_empty() => self.home.clone(),
-            CONFIG => "Mac".to_string(),
+            CONFIG => config::configured_control_host().unwrap_or_else(|| {
+                if self.home.is_empty() {
+                    "Mac".to_string()
+                } else {
+                    self.home.clone()
+                }
+            }),
             h => h.to_string(),
         }
     }
@@ -2125,12 +2132,11 @@ pub fn run_picker(
     result
 }
 
-/// The picker run from a shell on the config host, which is where launches
-/// run (the task registry lives there and it reaches every Rex host).
+/// The picker run from a shell on any host with access to the control plane.
 pub fn run_standalone(kind: Kind) -> io::Result<()> {
-    if !cfg!(target_os = "macos") {
+    if !config::has_control_plane() {
         return Err(io::Error::other(
-            "spawning runs on the Mac; run switchyard new there, or press ctrl+cmd+n in Rex",
+            "spawning needs a control plane; configure [control_plane] or run on the control-plane host",
         ));
     }
     // Act as the config's action does: rex CLI calls name their own targets

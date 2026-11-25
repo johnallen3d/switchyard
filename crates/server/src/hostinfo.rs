@@ -34,8 +34,18 @@ const TICK: Duration = Duration::from_secs(5);
 
 /// The hosts to keep folders for (this machine first, then the dev hosts)
 /// and to measure (every host in a pool `auto` chooses from, that is one
-/// with more than one host, except this machine, which has no /proc).
+/// with more than one host; macOS skips `local` since it has no `/proc`).
 pub fn tracked(config: &Config, local: &str) -> (Vec<String>, Vec<String>) {
+    tracked_with(config, local, cfg!(target_os = "linux"))
+}
+
+/// `tracked` with an explicit `local_is_linux` flag so Linux control planes
+/// (which have `/proc`) measure themselves when in a multi-host pool.
+pub fn tracked_with(
+    config: &Config,
+    local: &str,
+    local_is_linux: bool,
+) -> (Vec<String>, Vec<String>) {
     let mut folders = vec![local.to_string()];
     for h in &config.hosts {
         if !folders.contains(h) {
@@ -49,8 +59,12 @@ pub fn tracked(config: &Config, local: &str) -> (Vec<String>, Vec<String>) {
             continue;
         }
         for h in pool {
-            let h = if h == CONFIG { local.to_string() } else { h };
-            if h != local && !probes.contains(&h) {
+            let h = if h == CONFIG {
+                config.control_host_on(local)
+            } else {
+                h
+            };
+            if (local_is_linux || h != local) && !probes.contains(&h) {
                 probes.push(h);
             }
         }
@@ -162,7 +176,7 @@ mod tests {
         config
             .pools
             .insert("work".into(), vec!["miller".into(), "drummer".into()]);
-        let (folders, probes) = tracked(&config, "mac");
+        let (folders, probes) = tracked_with(&config, "mac", false);
         assert_eq!(folders, ["mac", "miller", "drummer", "omarchy"]);
         // Single-host pools never get probed.
         assert_eq!(probes, ["miller", "drummer"]);
@@ -170,7 +184,10 @@ mod tests {
         // profile means every dev host.
         config.projects.push(project("other", &[]));
         config.projects.push(project("work", &["config", "nas"]));
-        let (_, probes) = tracked(&config, "mac");
+        let (_, probes) = tracked_with(&config, "mac", false);
         assert_eq!(probes, ["miller", "drummer", "omarchy", "nas"]);
+        // On a Linux control plane, `local` itself is probed when in a pool.
+        let (_, linux_probes) = tracked_with(&config, "omarchy", true);
+        assert!(linux_probes.contains(&"omarchy".to_string()));
     }
 }

@@ -27,6 +27,7 @@
 //! prints the running server's snapshot as JSON; `subscribe` prints one
 //! line per change until interrupted.
 
+mod api;
 mod hostinfo;
 mod mcp;
 mod notices;
@@ -116,11 +117,16 @@ fn serve() -> Result<(), String> {
     // Core's background lookup failures go to this log (see core's
     // `rex::diagnose`).
     switchyard_core::rex::set_diagnostics(log);
+    // This process IS the control plane: never forward core RPCs back out to
+    // a remote `control_plane.url`.
+    server::set_local_server_mode();
     let path = server::socket_path().ok_or("no private runtime directory for the socket")?;
     let listener = socket::listen(&path)?;
     log(&format!("listening on {}", path.display()));
 
+    let local = switchyard_core::rex::local_label();
     let shared = Arc::new(Shared::new());
+    shared.lock().info.local.clone_from(&local);
     let (closed, triggers) = mpsc::channel();
     let (hosts, hosts_changed) = mpsc::channel();
     let (wake, wakes) = mpsc::channel();
@@ -132,18 +138,15 @@ fn serve() -> Result<(), String> {
         refresh: closed.clone(),
         folders: wake,
     };
-    let mcp = switchyard_core::config::read()
-        .map(|c| c.mcp)
-        .unwrap_or_default();
-    if mcp.enabled {
-        mcp::start(
-            mcp::Endpoint {
-                shared: shared.clone(),
-                refresh: closed.clone(),
-            },
-            mcp.port,
-        );
-    }
+    let cfg = switchyard_core::config::read().unwrap_or_default();
+    mcp::start(
+        mcp::Endpoint {
+            shared: shared.clone(),
+            asks: asks.clone(),
+            mcp_enabled: cfg.mcp_enabled_on(&local),
+        },
+        cfg.mcp.port,
+    );
     {
         let shared = shared.clone();
         thread::spawn(move || tasks::run(&shared, &triggers));

@@ -4,7 +4,7 @@
 use std::process::{Command, Stdio};
 
 use crate::config;
-use crate::rex::{local_label, ssh};
+use crate::rex::{host_bash, local_label, rex_json};
 
 #[derive(Clone)]
 pub struct Project {
@@ -112,28 +112,29 @@ pub fn compatible_in(config: &config::Config, hosts: &[String], profile: &str) -
     out
 }
 
-/// A pool entry as a Rex host label; only called on the config host.
+/// A pool entry as a Rex host label, resolving `"config"` to the configured
+/// control-plane host (or this host when unset).
 #[must_use]
 pub fn resolve(host: &str) -> String {
     if host == CONFIG {
-        local_label()
+        config::control_host()
     } else {
         host.to_string()
     }
 }
 
 /// Resolved compatible hosts for `project` other than `exclude_host`,
-/// deduplicated in preference order. Only called on the config host.
+/// deduplicated in preference order.
 #[must_use]
 pub fn other_compatible(project: &Project, exclude_host: &str) -> Vec<String> {
-    let local = local_label();
+    let control = config::control_host();
     if let Ok(c) = config::load() {
-        return other_compatible_in(c, &project.hosts, &project.profile, exclude_host, &local);
+        return other_compatible_in(c, &project.hosts, &project.profile, exclude_host, &control);
     }
     let mut out = Vec::new();
     for h in &project.hosts {
         let resolved = if h == CONFIG {
-            local.clone()
+            control.clone()
         } else {
             h.clone()
         };
@@ -222,25 +223,16 @@ fn parse_metrics(text: &str) -> Option<Metrics> {
     })
 }
 
-/// Load per CPU and free memory of `host` over SSH (by its Rex label, as
-/// the project picker does); Err when it can't be reached or read (the
-/// config host, a Mac, has no /proc). switchyard-server keeps these for
-/// every dev host.
+/// Load per CPU and free memory of `host` (locally on a Linux control plane,
+/// else over SSH by Rex label); Err when it can't be reached or read (macOS
+/// hosts have no `/proc`). switchyard-server keeps these for every probed host.
 ///
 /// # Errors
 ///
-/// Fails when ssh can't run or reach `host`, or its output has no load or
-/// memory figures.
+/// Fails when `host` can't be reached or its output has no load or memory
+/// figures.
 pub fn metrics(host: &str) -> Result<Metrics, String> {
-    let out = ssh(host)
-        .arg(METRICS_SCRIPT)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|e| format!("ssh: {e}"))?;
-    if out.status.code() == Some(255) {
-        return Err(format!("couldn't reach {host}"));
-    }
+    let out = host_bash(host, METRICS_SCRIPT).ok_or_else(|| format!("couldn't reach {host}"))?;
     parse_metrics(&String::from_utf8_lossy(&out.stdout))
         .ok_or_else(|| format!("no load or memory from {host}"))
 }
@@ -277,19 +269,16 @@ impl Probe {
     }
 }
 
-/// Measure one dev host now: load and memory over SSH, busy agents and an
+/// Measure one dev host now: load and memory via `metrics`, busy agents and an
 /// existing project session over Rex. None when the host can't be reached.
 fn probe(host: &str, project: &str) -> Option<Probe> {
     let m = metrics(host).ok()?;
-    let rex = Command::new("rex")
-        .args([
-            "-S",
-            host,
-            "do",
-            "-e",
-            PROBE_SCRIPT,
-            &format!("project={project}"),
-        ])
+    let mut cmd = Command::new("rex");
+    if host != local_label() {
+        cmd.args(["-S", host]);
+    }
+    let rex = cmd
+        .args(["do", "-e", PROBE_SCRIPT, &format!("project={project}")])
         .stdin(Stdio::null())
         .output()
         .ok()
@@ -426,13 +415,7 @@ pub fn choose_other_host(
             format!("the only other compatible host for {}", project.name),
         ));
     }
-    let local = local_label();
-    let linux: Vec<String> = candidates
-        .iter()
-        .filter(|h| *h != &local)
-        .cloned()
-        .collect();
-    let mut probes = probe_all(&linux, &project.name, true);
+    let mut probes = probe_all(&candidates, &project.name, true);
     probes.sort_by(|a, b| a.score.total_cmp(&b.score));
     if let Some(best) = probes.first() {
         let why = probes
@@ -454,11 +437,17 @@ pub fn choose_other_host(
             .join("; ");
         return Ok((best.host.clone(), why));
     }
-    if candidates.contains(&local) {
-        return Ok((
-            local,
-            format!("the only reachable compatible host for {}", project.name),
-        ));
+    // Non-Linux hosts (e.g. macOS) have no /proc metrics, so fall back to the
+    // first candidate whose Rex server answers.
+    for host in candidates {
+        if (cfg!(target_os = "macos") && host == local_label())
+            || rex_json(&host, &["api", "call", "server.whoami"]).is_ok()
+        {
+            return Ok((
+                host,
+                format!("the only reachable compatible host for {}", project.name),
+            ));
+        }
     }
     Err(format!(
         "no other compatible host for {} is reachable",

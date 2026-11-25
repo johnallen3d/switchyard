@@ -151,6 +151,39 @@ pub fn launch(
     work_item: Option<&str>,
     resume: Option<(&str, &str)>,
 ) -> Result<(String, String, String), String> {
+    if crate::server::remote_url().is_some() && resume.is_none() {
+        let local = local_label();
+        let local_ref = prompt_ref.filter(|r| parse_prompt_ref(r).is_ok_and(|(h, _)| h == local));
+        let typed = local_ref.map(fetch_prompt).transpose()?;
+        let req = crate::server::LaunchRequest {
+            host,
+            path,
+            name,
+            harness,
+            prompt: typed.as_deref(),
+            prompt_ref: if local_ref.is_some() {
+                None
+            } else {
+                prompt_ref
+            },
+            from_host: local_ref.map(|_| local.as_str()),
+            work_item,
+        };
+        return match crate::server::remote_launch(&req) {
+            Ok(tab) => {
+                if let Some(r) = local_ref {
+                    discard_prompt(r);
+                }
+                Ok(tab)
+            }
+            Err(e) => match local_ref {
+                Some(r) if typed.as_deref().is_some_and(|t| !t.trim().is_empty()) => {
+                    Err(format!("{e}\n{}", kept_prompt(r)))
+                }
+                _ => Err(e),
+            },
+        };
+    }
     // Fetch the prompt first: without it the agent would start on nothing.
     let typed = prompt_ref.map(fetch_prompt).transpose()?;
     launch_with(
@@ -219,12 +252,47 @@ pub fn launch_text(
     work_item: Option<&str>,
     placement: Placement,
 ) -> Result<(String, String, String), String> {
+    if crate::server::remote_url().is_some() {
+        let local = local_label();
+        return crate::server::remote_launch(&crate::server::LaunchRequest {
+            host,
+            path,
+            name,
+            harness,
+            prompt: Some(prompt),
+            prompt_ref: None,
+            from_host: Some(&local),
+            work_item,
+        });
+    }
+    launch_text_from(
+        host, path, name, harness, prompt, None, work_item, placement,
+    )
+}
+
+/// `launch_text` with an optional source host (`from_host`) for pasted upload
+/// files, used by the remote control-plane RPC endpoint.
+///
+/// # Errors
+///
+/// Fails as `launch` does.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_text_from(
+    host: &str,
+    path: &str,
+    name: &str,
+    harness: &str,
+    prompt: &str,
+    from_host: Option<&str>,
+    work_item: Option<&str>,
+    placement: Placement,
+) -> Result<(String, String, String), String> {
     launch_with(
         host,
         path,
         name,
         harness,
-        Prompt::Text(prompt),
+        Prompt::Text(prompt, from_host),
         work_item,
         None,
         placement,
@@ -237,7 +305,7 @@ enum Prompt<'a> {
     /// A prompt file's text (see `prompts`) and its reference, or none; the
     /// file is removed once the tab holds it.
     Ref(&'a str, Option<&'a str>),
-    Text(&'a str),
+    Text(&'a str, Option<&'a str>),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -264,9 +332,9 @@ fn launch_with(
     // `task run` takes the whole spec; the registry keeps its parts.
     let spec = harness;
     let (harness, model) = split_harness(spec);
-    let (typed, prompt_ref) = match prompt {
-        Prompt::Ref(text, r) => (text.to_string(), r),
-        Prompt::Text(text) => (text.to_string(), None),
+    let (typed, prompt_ref, text_from) = match prompt {
+        Prompt::Ref(text, r) => (text.to_string(), r, None),
+        Prompt::Text(text, from) => (text.to_string(), None, from),
     };
     if name.is_empty() && typed.trim().is_empty() && work_item.is_none() {
         return Err("name the work, or give it a prompt or work item to name it from".into());
@@ -275,9 +343,14 @@ fn launch_with(
     let host = host.as_str();
     // Images pasted into the prompt are files on the prompt's host; give
     // the agent copies on its own.
-    let from = prompt_ref
-        .and_then(|r| parse_prompt_ref(r).ok())
-        .map_or_else(local_label, |(label, _)| label.to_string());
+    let from = text_from.map_or_else(
+        || {
+            prompt_ref
+                .and_then(|r| parse_prompt_ref(r).ok())
+                .map_or_else(local_label, |(label, _)| label.to_string())
+        },
+        String::from,
+    );
     let typed = carry(&from, host, &typed)?;
 
     let cwd = launch_cwd(host, &project)?;
@@ -328,6 +401,49 @@ fn launch_with(
         discard_prompt(r);
     }
     let links = spawn_links(work_item, &prompt, &tracker);
+    let task = task_record(
+        &project,
+        host,
+        &session,
+        &window_id,
+        &cwd,
+        name,
+        &branch,
+        &slug,
+        harness,
+        model,
+        &agent_session,
+        &links,
+        placement,
+    );
+    // The tab is already open: a registry failure only costs the inbox entry.
+    if let Err(e) = record_task(task) {
+        log(&format!("could not record {}/{name}: {e}", project.name));
+    }
+    // List the new task now rather than at the server's next registry poll;
+    // a resume does it once it has updated the registry (see `actions`).
+    if resume.is_none() {
+        crate::server::refresh();
+    }
+    Ok((host.to_string(), session, window_id))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn task_record(
+    project: &Project,
+    host: &str,
+    session: &str,
+    window_id: &str,
+    cwd: &str,
+    name: &str,
+    branch: &str,
+    slug: &str,
+    harness: &str,
+    model: Option<&str>,
+    agent_session: &str,
+    links: &[serde_json::Value],
+    placement: Placement,
+) -> serde_json::Value {
     let mut task = serde_json::json!({
         "host": host,
         "session_id": session,
@@ -357,16 +473,7 @@ fn launch_with(
             task["notify_parent"] = false.into();
         }
     }
-    // The tab is already open: a registry failure only costs the inbox entry.
-    if let Err(e) = record_task(task) {
-        log(&format!("could not record {}/{name}: {e}", project.name));
-    }
-    // List the new task now rather than at the server's next registry poll;
-    // a resume does it once it has updated the registry (see `actions`).
-    if resume.is_none() {
-        crate::server::refresh();
-    }
-    Ok((host.to_string(), session, window_id))
+    task
 }
 
 /// The catalog project at `path`, or a project for the Git folder there on

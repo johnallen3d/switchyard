@@ -85,6 +85,61 @@ in {
       type = types.submodule {
         freeformType = toml.type;
         options = {
+          control_plane = mkOption {
+            default = {};
+            description = ''
+              Where switchyard-server and the task registry live. Leave empty
+              for the legacy setup where macOS is the control plane.
+            '';
+            type = types.submodule {
+              options = {
+                host = mkOption {
+                  type = types.str;
+                  default = "";
+                  example = "omarchy";
+                  description = ''
+                    Rex host label of the control-plane host. When set, only
+                    this host runs as the local control plane and `"config"` in
+                    project pools resolves to it.
+                  '';
+                };
+                url = mkOption {
+                  type = types.str;
+                  default = "";
+                  example = "http://omarchy.taila14c2.ts.net:7391";
+                  description = ''
+                    Tailnet HTTP base URL of the control-plane server for
+                    clients on other hosts. Ignored on the control-plane host
+                    itself.
+                  '';
+                };
+              };
+            };
+          };
+          mcp = mkOption {
+            default = {};
+            description = "switchyard-server's tailnet HTTP and MCP endpoint settings.";
+            type = types.submodule {
+              options = {
+                enabled = mkOption {
+                  type = types.nullOr types.bool;
+                  default = null;
+                  description = ''
+                    Serve the `/mcp` endpoint. When null (the default), enabled
+                    on the control-plane host.
+                  '';
+                };
+                port = mkOption {
+                  type = types.port;
+                  default = 7391;
+                  description = ''
+                    TCP port on loopback and Tailscale for `/mcp` and the remote
+                    control-plane HTTP API.
+                  '';
+                };
+              };
+            };
+          };
           hosts = mkOption {
             type = types.listOf types.str;
             default = [];
@@ -214,7 +269,7 @@ in {
     {
       home.packages = [cfg.package];
       xdg.configFile = {
-        "switchyard/config.toml".source = toml.generate "switchyard-config.toml" cfg.settings;
+        "switchyard/config.toml".source = toml.generate "switchyard-config.toml" (lib.filterAttrsRecursive (_: v: v != null) cfg.settings);
         "rex/switchyard" = mkIf cfg.rexLua {source = ../lua/switchyard;};
       };
     }

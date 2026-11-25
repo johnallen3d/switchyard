@@ -293,11 +293,72 @@ pub fn record_task(task: serde_json::Value) -> Result<(), String> {
 ///
 /// Fails as `update_tasks` does.
 pub fn unlink_task_refs(worktree: &Path, refs: &[&str]) -> Result<Vec<Unlinked>, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_unlink(&local_label(), &worktree.display().to_string(), refs);
+    }
     let path = tasks_path();
     if !path.exists() {
         return Ok(refs.iter().map(|_| Unlinked::Absent).collect());
     }
     unlink_at(&path, &local_label(), &home(), worktree, refs)
+}
+
+/// Remove each of `refs` from the links of the open tasks on `host` whose
+/// worktree is `worktree` (used by the control-plane RPC endpoint for remote
+/// `switchyard unlink` callers).
+///
+/// # Errors
+///
+/// Fails as `update_tasks` does.
+pub fn unlink_task_refs_on(
+    host: &str,
+    worktree: &str,
+    refs: &[&str],
+) -> Result<Vec<Unlinked>, String> {
+    let path = tasks_path();
+    if !path.exists() {
+        return Ok(refs.iter().map(|_| Unlinked::Absent).collect());
+    }
+    if host == local_label() {
+        let wt = Path::new(worktree);
+        let canon = std::fs::canonicalize(wt).unwrap_or_else(|_| wt.to_path_buf());
+        return unlink_at(&path, host, &home(), &canon, refs);
+    }
+    unlink_remote_at(&path, host, worktree, refs)
+}
+
+fn unlink_remote_at(
+    path: &Path,
+    host: &str,
+    worktree: &str,
+    refs: &[&str],
+) -> Result<Vec<Unlinked>, String> {
+    let want = worktree.trim_end_matches('/');
+    let want_rel = crate::folders::home_relative(want);
+    update_at(path, |tasks| {
+        let mut mine: Vec<&mut serde_json::Value> = tasks
+            .iter_mut()
+            .filter(|t| t["ended_at"].is_null() && t["host"].as_str() == Some(host))
+            .filter(|t| {
+                let w = field(t, "worktree");
+                let w = w.trim_end_matches('/');
+                w == want || crate::folders::home_relative(w) == want_rel
+            })
+            .collect();
+        Ok(refs
+            .iter()
+            .map(|r| {
+                let outcomes: Vec<Unlinked> = mine.iter_mut().map(|t| unlink(t, r)).collect();
+                if outcomes.contains(&Unlinked::Removed) {
+                    Unlinked::Removed
+                } else if outcomes.contains(&Unlinked::Derived) {
+                    Unlinked::Derived
+                } else {
+                    Unlinked::Absent
+                }
+            })
+            .collect())
+    })
 }
 
 fn unlink_at(
@@ -753,6 +814,9 @@ impl Worktree {
 ///
 /// Fails when the registry can't be loaded.
 pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_tasks(true);
+    }
     let mut tasks = load_tasks()?;
     let mut hosts: Vec<String> = tasks
         .iter()
@@ -801,6 +865,9 @@ pub fn live_tasks() -> Result<Vec<serde_json::Value>, String> {
 /// Fails when the registry can't be loaded, or the check's changes can't be
 /// saved.
 pub fn reconcile_tasks() -> Result<Vec<serde_json::Value>, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_tasks(false);
+    }
     let mut tasks = load_tasks()?;
     let checks = check_hosts(&tasks);
     let stamp = now();
@@ -1798,5 +1865,38 @@ mod tests {
         follow_rename(&mut task, &w[0]);
         assert_eq!(task["branch"], "feature/open");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unlink_remote_at_matches_host_and_home_relative_worktree() {
+        let dir = std::env::temp_dir().join(format!(
+            "switchyard-remote-unlink-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("spawn-tasks.json");
+        let records = vec![serde_json::json!({
+            "host": "m4-mbp",
+            "window_id": "w1",
+            "created_at": 1,
+            "ended_at": null,
+            "worktree": "/Users/john.allen/dev/repo/.worktrees/feat",
+            "links": [
+                {"system": "fizzy", "kind": "card", "ref": "1519", "source": "spawn"}
+            ]
+        })];
+        save_at(&path, &records, false).unwrap();
+        let outcomes = unlink_remote_at(
+            &path,
+            "m4-mbp",
+            "~/dev/repo/.worktrees/feat/",
+            &["1519", "9999"],
+        )
+        .unwrap();
+        assert_eq!(outcomes, [Unlinked::Removed, Unlinked::Absent]);
+        let after = load_at(&path).unwrap();
+        assert_eq!(after[0]["links"], serde_json::json!([]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

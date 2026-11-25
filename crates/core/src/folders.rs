@@ -105,6 +105,9 @@ pub fn home_relative(dir: &str) -> String {
 /// Fails when `host` is `auto` and `dir` is not a catalog project or none of
 /// its hosts is reachable, or as `open` does.
 pub fn open_on(host: &str, dir: &str) -> Result<(String, String), String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_open(host, dir);
+    }
     let host = if host == AUTO {
         let projects = catalog()?;
         let project = projects

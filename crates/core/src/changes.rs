@@ -50,7 +50,17 @@ pub fn fetch(target: &str, session: &str, window: &str) -> Value {
     } else {
         unhex(target)
     };
-    fetch_inner(&host, session, window).unwrap_or_else(|e| json!({ "error": e }))
+    fetch_on(&host, session, window)
+}
+
+/// `fetch` for a tab on the host with Rex label `host`.
+#[must_use]
+pub fn fetch_on(host: &str, session: &str, window: &str) -> Value {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_changes(host, session, window)
+            .unwrap_or_else(|e| json!({ "error": e }));
+    }
+    fetch_inner(host, session, window).unwrap_or_else(|e| json!({ "error": e }))
 }
 
 fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String> {
@@ -75,6 +85,9 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
 ///
 /// Fails when neither is known, or the agent pane can't be looked up.
 pub fn task_dir(host: &str, session: &str, window: &str) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_task_dir(host, session, window);
+    }
     let worktree = load_tasks().ok().and_then(|tasks| {
         tasks
             .into_iter()

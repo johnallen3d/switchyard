@@ -351,6 +351,7 @@ impl State {
         });
         json!({
             "seq": self.seq,
+            "server_host": self.info.local,
             "hosts": hosts,
             "tasks": tasks,
             "tasks_checked": self.tasks.checked,

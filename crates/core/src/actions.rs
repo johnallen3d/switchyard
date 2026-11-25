@@ -263,6 +263,9 @@ pub fn switch_harness(
     window: &str,
     target_spec: &str,
 ) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_switch(host, session, window, target_spec);
+    }
     let (target_harness, target_model) = validate_target_spec(target_spec)?;
     let spec = harness_spec(target_harness, target_model);
     let tasks = load_tasks()?;
@@ -377,6 +380,9 @@ pub fn move_host(
     window: &str,
     target_host: &str,
 ) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_move(host, session, window, target_host);
+    }
     crate::move_host::move_host(host, session, window, target_host)
 }
 
@@ -746,6 +752,9 @@ fn pin(window: &str) -> Result<String, String> {
 ///
 /// Fails when `window` has no open task or the registry can't be updated.
 pub fn snooze(window: &str, until: u64) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_snooze(window, until);
+    }
     let label = update_tasks(|tasks| {
         let task = open_task(tasks, window)?;
         set_or_remove(task, "snoozed_until", (until > 0).then(|| until.into()));
@@ -825,11 +834,19 @@ fn typing(text: &str) -> Vec<Typing> {
 /// the agent is waiting on a prompt, a pasted file can't be carried over,
 /// or Rex refuses the typing or the Enter.
 pub fn message(host: &str, session: &str, window: &str, text: &str) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        let local = local_label();
+        return crate::server::remote_message(host, session, window, text, Some(&local));
+    }
     message_from(&local_label(), host, session, window, text)
 }
 
 /// `message` with pasted files taken from host `from`.
-fn message_from(
+///
+/// # Errors
+///
+/// Fails as `message` does.
+pub fn message_from(
     from: &str,
     host: &str,
     session: &str,
@@ -886,6 +903,9 @@ fn message_from(
 /// Fails when the tab or its agent pane can't be found, the agent isn't
 /// working, or Rex refuses the key.
 pub fn interrupt(host: &str, session: &str, window: &str) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_interrupt(host, session, window);
+    }
     let pane = crate::transcript::agent_pane(host, session, window)?;
     let block = pane["block"]
         .as_str()
@@ -926,6 +946,16 @@ pub fn message_ref(
     window: &str,
     prompt_ref: &str,
 ) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        let (from, _) = parse_prompt_ref(prompt_ref)?;
+        if from == local_label() {
+            let text = fetch_prompt(prompt_ref)?;
+            let sent = crate::server::remote_message(host, session, window, &text, Some(from))?;
+            discard_prompt(prompt_ref);
+            return Ok(sent);
+        }
+        return crate::server::remote_message_ref(host, session, window, prompt_ref);
+    }
     let text = fetch_prompt(prompt_ref)?;
     let (from, _) = parse_prompt_ref(prompt_ref)?;
     let sent = message_from(from, host, session, window, &text)?;
@@ -971,6 +1001,9 @@ fn set_or_remove(task: &mut serde_json::Value, key: &str, value: Option<serde_js
 ///
 /// Fails with the action's message when it is unknown or doesn't succeed.
 pub fn act(action: &str, host: &str, session: &str, window: &str) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_act(action, host, session, window);
+    }
     let result = match action {
         "pin" => pin(window),
         _ => run_action(action, host, session, window),
@@ -1000,6 +1033,9 @@ pub fn archive_family(
     session: &str,
     window: &str,
 ) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_archive_family(action, host, session, window);
+    }
     let mut outcome = run_action(action, host, session, window);
     if outcome.is_ok() {
         let mut seen = std::collections::HashSet::from([window.to_string()]);

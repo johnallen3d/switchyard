@@ -211,12 +211,16 @@ pub fn fetch(target: &str, session: &str, window: &str) -> Value {
     } else {
         unhex(target)
     };
-    fetch_inner(&host, session, window).unwrap_or_else(|e| json!({ "error": e }))
+    fetch_on(&host, session, window)
 }
 
 /// `fetch` for a tab on the host with Rex label `host`.
 #[must_use]
 pub fn fetch_on(host: &str, session: &str, window: &str) -> Value {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_transcript(host, session, window)
+            .unwrap_or_else(|e| json!({ "error": e }));
+    }
     fetch_inner(host, session, window).unwrap_or_else(|e| json!({ "error": e }))
 }
 

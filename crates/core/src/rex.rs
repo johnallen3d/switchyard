@@ -216,16 +216,24 @@ pub fn rex(host: &str, args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The home directory of `host`'s account: this host's own, or a dev host's
-/// /home/ACCOUNT (the dev hosts are Linux and their Rex server's account is
-/// the one that works there). Empty when the account can't be read.
+/// The home directory of `host`'s account: this host's own, or a remote host's
+/// `$HOME` over SSH (falling back to `/home/ACCOUNT` from `server.whoami` for
+/// Linux Rex servers when SSH isn't available). Empty when it can't be read.
 ///
 /// # Errors
 ///
-/// Fails when `host`'s Rex server can't be asked who it runs as.
+/// Fails when neither SSH nor `host`'s Rex server can answer.
 pub fn host_home(host: &str) -> Result<String, String> {
     if host == local_label() {
         return Ok(home().display().to_string());
+    }
+    if let Some(out) = host_bash(host, "printf '%s' \"$HOME\"\n")
+        && out.status.success()
+    {
+        let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if dir.starts_with('/') {
+            return Ok(dir);
+        }
     }
     let account = rex_json(host, &["api", "call", "server.whoami"])?["account"]
         .as_str()
