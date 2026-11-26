@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::rex::{home, host_bash, sh_quote};
@@ -108,7 +108,9 @@ fn agy_last_conversation(worktree: &str) -> Option<String> {
 /// Extract an Antigravity conversation ID from an open fd symlink target:
 /// `presence/<id>.lock` (primary) or `conversations/<id>.db` (secondary,
 /// ignoring `.db-wal`/`.db-shm` and unlinked ` (deleted)` entries).
-pub(crate) fn agy_conversation_from_fd_dir(fd_dir: &Path) -> io::Result<Option<String>> {
+// Only Linux has `/proc/<pid>/fd`; the tests use a fake fd directory anywhere.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn agy_conversation_from_fd_dir(fd_dir: &std::path::Path) -> io::Result<Option<String>> {
     let mut db_id: Option<String> = None;
     for entry in std::fs::read_dir(fd_dir)? {
         let Ok(entry) = entry else { continue };
@@ -133,6 +135,8 @@ pub(crate) fn agy_conversation_from_fd_dir(fd_dir: &Path) -> io::Result<Option<S
     Ok(db_id)
 }
 
+// Only Linux has `/proc/<pid>/fd`; the tests use a fake fd directory anywhere.
+#[cfg(any(target_os = "linux", test))]
 fn parse_agy_fd_target<'a>(target: &'a str, marker: &str, suffix: &str) -> Option<&'a str> {
     let rest = target
         .rsplit_once(marker)
