@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::rex::{home, host_bash, sh_quote};
@@ -105,11 +105,94 @@ fn agy_last_conversation(worktree: &str) -> Option<String> {
         .map(String::from)
 }
 
+/// Extract an Antigravity conversation ID from an open fd symlink target:
+/// `presence/<id>.lock` (primary) or `conversations/<id>.db` (secondary,
+/// ignoring `.db-wal`/`.db-shm` and unlinked ` (deleted)` entries).
+pub(crate) fn agy_conversation_from_fd_dir(fd_dir: &Path) -> io::Result<Option<String>> {
+    let mut db_id: Option<String> = None;
+    for entry in std::fs::read_dir(fd_dir)? {
+        let Ok(entry) = entry else { continue };
+        let Ok(target) = std::fs::read_link(entry.path()) else {
+            continue;
+        };
+        let Some(target) = target.to_str() else {
+            continue;
+        };
+        if target.ends_with(" (deleted)") {
+            continue;
+        }
+        if let Some(id) = parse_agy_fd_target(target, "/presence/", ".lock") {
+            return Ok(Some(id.to_string()));
+        }
+        if db_id.is_none()
+            && let Some(id) = parse_agy_fd_target(target, "/conversations/", ".db")
+        {
+            db_id = Some(id.to_string());
+        }
+    }
+    Ok(db_id)
+}
+
+fn parse_agy_fd_target<'a>(target: &'a str, marker: &str, suffix: &str) -> Option<&'a str> {
+    let rest = target
+        .rsplit_once(marker)
+        .map(|(_, rest)| rest)
+        .or_else(|| target.strip_prefix(marker.trim_start_matches('/')))?;
+    let id = rest.strip_suffix(suffix)?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+/// The Antigravity conversation currently open in process `pid`, by inspecting
+/// `/proc/<pid>/fd` on Linux for `presence/<id>.lock` (primary) and
+/// `conversations/<id>.db` (secondary).
+///
+/// Returns `Ok(Some(id))` when an open lock/db is found, `Ok(None)` when
+/// `/proc/<pid>/fd` is readable (the process is alive) but has not opened a
+/// conversation yet, and `Err` when `/proc/<pid>/fd` is unavailable (non-Linux,
+/// `pid == 0`, exited process, or permission denied).
+pub(crate) fn agy_conversation_for_pid(pid: u64) -> io::Result<Option<String>> {
+    #[cfg(target_os = "linux")]
+    {
+        if pid == 0 {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "no pid"));
+        }
+        agy_conversation_from_fd_dir(&PathBuf::from(format!("/proc/{pid}/fd")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "/proc/<pid>/fd is only available on Linux",
+        ))
+    }
+}
+
 /// The newest agent session for `worktree` on this host, by file time:
 /// Claude names its files `ID.jsonl`, Pi `TIMESTAMP_ID.jsonl`; Antigravity
 /// says which it last used there.
+#[must_use]
 pub fn newest_session_here(profile: &str, harness: &str, worktree: &str) -> Option<String> {
+    newest_session_here_for_pid(profile, harness, worktree, 0)
+}
+
+/// Like `newest_session_here`, but when `harness == "agy"` and `pid > 0` on
+/// Linux, resolves the exact conversation open in `/proc/<pid>/fd` without
+/// falling back to `last_conversations.json` when the live process hasn't
+/// opened one yet.
+#[must_use]
+pub fn newest_session_here_for_pid(
+    profile: &str,
+    harness: &str,
+    worktree: &str,
+    pid: u64,
+) -> Option<String> {
     if harness == "agy" {
+        if pid > 0
+            && let Ok(found) = agy_conversation_for_pid(pid)
+        {
+            return found;
+        }
         return agy_last_conversation(worktree);
     }
     let dir = session_dir(profile, harness, worktree);
@@ -174,6 +257,22 @@ pub fn newest_session(task: &serde_json::Value) -> Option<String> {
         sh_quote(&harness),
         sh_quote(&f("worktree"))
     );
+    if harness == "agy" && task["ended_at"].is_null() {
+        let session = f("session_id");
+        let window = f("window_id");
+        let pid = (!session.is_empty() && !window.is_empty())
+            .then(|| crate::transcript::agent_pane(&host, &session, &window).ok())
+            .flatten()
+            .and_then(|p| p["pid"].as_u64())
+            .unwrap_or(0);
+        if pid > 0 {
+            let with_pid = format!("{script} {pid}");
+            if let Some(out) = host_bash(&host, &with_pid).filter(|o| o.status.success()) {
+                let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                return (!id.is_empty()).then_some(id);
+            }
+        }
+    }
     let out = host_bash(&host, &script).filter(|o| o.status.success())?;
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!id.is_empty()).then_some(id)
@@ -204,4 +303,88 @@ pub fn work_env() -> Result<Vec<(String, String)>, String> {
         .into_iter()
         .filter_map(|(k, v)| Some((k, v.as_str()?.to_string())))
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn temp_fd_dir(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "switchyard-agy-fd-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn agy_fd_prefers_presence_lock_over_conversation_db() {
+        let dir = temp_fd_dir("lock-wins");
+        symlink(
+            "/home/u/.gemini/antigravity-cli/conversations/db-id.db",
+            dir.join("10"),
+        )
+        .unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/conversations/db-id.db-wal",
+            dir.join("11"),
+        )
+        .unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/presence/lock-id.lock",
+            dir.join("12"),
+        )
+        .unwrap();
+        assert_eq!(
+            agy_conversation_from_fd_dir(&dir).unwrap(),
+            Some("lock-id".into())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_fd_falls_back_to_db_and_ignores_wal_shm_and_deleted() {
+        let dir = temp_fd_dir("db-only");
+        symlink("/dev/pts/1", dir.join("0")).unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/presence/old-id.lock (deleted)",
+            dir.join("5"),
+        )
+        .unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/conversations/wal-only.db-wal",
+            dir.join("6"),
+        )
+        .unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/conversations/shm-only.db-shm",
+            dir.join("7"),
+        )
+        .unwrap();
+        symlink(
+            "/home/u/.gemini/antigravity-cli/conversations/active-db.db",
+            dir.join("8"),
+        )
+        .unwrap();
+        assert_eq!(
+            agy_conversation_from_fd_dir(&dir).unwrap(),
+            Some("active-db".into())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn agy_fd_returns_ok_none_when_readable_without_conversation_and_err_when_missing() {
+        let dir = temp_fd_dir("empty");
+        symlink("/dev/pts/1", dir.join("0")).unwrap();
+        assert_eq!(agy_conversation_from_fd_dir(&dir).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(agy_conversation_from_fd_dir(&dir).is_err());
+    }
 }

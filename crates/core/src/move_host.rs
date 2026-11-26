@@ -42,7 +42,7 @@ use crate::launch::launch;
 use crate::naming::{branch_and_slug, harness_spec};
 use crate::rex::{host_bash, local_label, log, rex, sh_quote};
 use crate::sessions::newest_session;
-use crate::tasks::{in_window, load_tasks, update_tasks};
+use crate::tasks::{in_window, is_in_place, load_tasks, update_tasks};
 
 /// Maximum tar payload for untracked files carried across hosts (100 MiB).
 const MAX_UNTRACKED_BYTES: usize = 100 * 1024 * 1024;
@@ -193,22 +193,15 @@ fn validate_move(
     };
     let source_repo = field("repo");
     let source_worktree = field("worktree");
-    if !source_worktree.is_empty()
-        && source_worktree.trim_end_matches('/') == source_repo.trim_end_matches('/')
-    {
-        return Err(format!(
-            "{label} is in the primary checkout {source_worktree}, not a task worktree"
-        ));
-    }
-    if let Some(i) = tasks
-        .iter()
-        .position(|t| t["ended_at"].is_null() == task["ended_at"].is_null() && in_window(t, window))
-        && let Some(other) = worktree_user(&tasks, i)
-    {
-        return Err(format!(
-            "{label}: {other} still uses {source_worktree} on {source_host}"
-        ));
-    }
+    check_moveable_worktree(
+        &tasks,
+        &task,
+        window,
+        &label,
+        &source_host,
+        &source_repo,
+        &source_worktree,
+    )?;
 
     let name = field("name");
     let branch = field("branch");
@@ -269,6 +262,39 @@ fn validate_move(
         agent_session,
         target_host,
     })
+}
+
+fn check_moveable_worktree(
+    tasks: &[serde_json::Value],
+    task: &serde_json::Value,
+    window: &str,
+    label: &str,
+    source_host: &str,
+    source_repo: &str,
+    source_worktree: &str,
+) -> Result<(), String> {
+    if is_in_place(task) {
+        return Err(format!(
+            "{label} is an in-place project and can't be moved to another host"
+        ));
+    }
+    if !source_worktree.is_empty()
+        && source_worktree.trim_end_matches('/') == source_repo.trim_end_matches('/')
+    {
+        return Err(format!(
+            "{label} is in the primary checkout {source_worktree}, not a task worktree"
+        ));
+    }
+    if let Some(i) = tasks
+        .iter()
+        .position(|t| t["ended_at"].is_null() == task["ended_at"].is_null() && in_window(t, window))
+        && let Some(other) = worktree_user(tasks, i)
+    {
+        return Err(format!(
+            "{label}: {other} still uses {source_worktree} on {source_host}"
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_target_host(
@@ -1430,6 +1456,7 @@ mod tests {
                 name: "repo".into(),
                 hosts: vec![],
                 tracker: String::new(),
+                worktree: true,
             },
             profile: "personal".into(),
             harness: "claude".into(),

@@ -148,6 +148,16 @@ fn prepare(path: &str, name: &str, clone_url: &str) -> Result<PathBuf, (String, 
     worktree_for(&repo, &branch).ok_or_else(|| fail(format!("wt made no worktree for {branch}")))
 }
 
+/// Prepare an in-place (`worktree = false`) project directory without running
+/// any Git or Worktrunk commands.
+fn prepare_in_place(path: &str) -> Result<PathBuf, (String, PathBuf)> {
+    let dir = expand(path);
+    if !dir.is_dir() {
+        return Err((format!("Folder {path} does not exist"), home()));
+    }
+    Ok(dir)
+}
+
 /// The system-prompt note that keeps a task's agent on the worktree and
 /// branch Switchyard made for it. Switchyard learns a task's commits and
 /// links only from its branch, so work an agent moves to a worktree of its
@@ -164,6 +174,12 @@ fn task_note(worktree: &Path, branch: &str) -> String {
          in place with `git branch -m` rather than making a new branch. Switchyard \
          tracks the task's commits, issues and pull requests only on this branch."
     )
+}
+
+/// Light Switchyard task framing for an in-place (`worktree = false`) project,
+/// with no Git, branch, or worktree instructions.
+fn in_place_note(dir: &Path) -> String {
+    format!("You are running as a Switchyard task in {}.", dir.display())
 }
 
 /// Mark the repository, and a worktree outside it, trusted in the Claude
@@ -190,7 +206,9 @@ fn trust_folders(env: &[(String, String)], repo: &Path, worktree: &Path) {
 /// `session` is the agent session to start (`mode` "new") or resume
 /// ("resume"); None when the command gave none. A new session
 /// starts on `prompt` when there is one. `harness` is `HARNESS` or
-/// `HARNESS:MODEL` (see `split_harness`).
+/// `HARNESS:MODEL` (see `split_harness`). When `in_place` is true, skips all
+/// Git/Worktrunk setup and runs directly in `path`.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     profile: &str,
     path: &str,
@@ -199,8 +217,14 @@ pub fn run(
     clone_url: &str,
     session: Option<(&str, &str)>,
     prompt: &str,
+    in_place: bool,
 ) -> ! {
-    let dir = match prepare(path, name, clone_url) {
+    let prepared = if in_place {
+        prepare_in_place(path)
+    } else {
+        prepare(path, name, clone_url)
+    };
+    let dir = match prepared {
         Ok(worktree) => {
             // Move this process too: the agent it becomes is the tab's
             // program, and a split starts where the tab's program is.
@@ -226,12 +250,19 @@ pub fn run(
                 }
             }
             agent.envs(env.iter().map(|(k, v)| (k, v)));
-            let branch = branch_and_slug(name).0;
-            agent
-                .env("SWITCHYARD_TASK_WORKTREE", &worktree)
-                .env("SWITCHYARD_TASK_BRANCH", &branch);
+            let branch = if in_place {
+                String::new()
+            } else {
+                branch_and_slug(name).0
+            };
+            agent.env("SWITCHYARD_TASK_WORKTREE", &worktree);
+            if !in_place {
+                agent.env("SWITCHYARD_TASK_BRANCH", &branch);
+            }
             if harness == "agy" {
-                agy_args(&mut agent, profile, &worktree, &branch, session, prompt);
+                agy_args(
+                    &mut agent, profile, &worktree, &branch, in_place, session, prompt,
+                );
                 let e = agent.current_dir(&worktree).exec();
                 eprintln!("\x1b[31m{harness}: {e}\x1b[0m");
                 fail(&worktree);
@@ -243,9 +274,12 @@ pub fn run(
                 trust_folders(&env, &expand(path), &worktree);
             }
             // On resume too: an older session never had the note.
-            agent
-                .arg("--append-system-prompt")
-                .arg(task_note(&worktree, &branch));
+            let note = if in_place {
+                in_place_note(&worktree)
+            } else {
+                task_note(&worktree, &branch)
+            };
+            agent.arg("--append-system-prompt").arg(note);
             let mut resuming = false;
             if let Some((id, mode)) = session {
                 if mode == "resume" && !session_here(profile, harness, &env, &worktree, id) {
@@ -321,6 +355,7 @@ fn agy_args(
     profile: &str,
     worktree: &Path,
     branch: &str,
+    in_place: bool,
     session: Option<(&str, &str)>,
     prompt: &str,
 ) {
@@ -339,7 +374,13 @@ fn agy_args(
         _ if !prompt.is_empty() => {
             // `=` keeps a prompt starting with - as the flag's value.
             let rex = |k| std::env::var(k).unwrap_or_default();
-            let note = agy_note(worktree, branch, &rex("REX_SESSION"), &rex("REX_BLOCK"));
+            let note = agy_note(
+                worktree,
+                branch,
+                in_place,
+                &rex("REX_SESSION"),
+                &rex("REX_BLOCK"),
+            );
             agent.arg(format!("--prompt-interactive={note}\n\n{prompt}"));
         }
         _ => {}
@@ -351,8 +392,12 @@ fn agy_args(
 /// session and block known, it tells the agent to pass them to Switchyard's
 /// tools itself, so `message_parent` finds its task and `spawn_task` nests
 /// children under it.
-fn agy_note(worktree: &Path, branch: &str, session: &str, block: &str) -> String {
-    let note = task_note(worktree, branch);
+fn agy_note(worktree: &Path, branch: &str, in_place: bool, session: &str, block: &str) -> String {
+    let note = if in_place {
+        in_place_note(worktree)
+    } else {
+        task_note(worktree, branch)
+    };
     if session.is_empty() || block.is_empty() {
         return note;
     }
@@ -378,10 +423,13 @@ mod tests {
     #[test]
     fn agy_note_adds_the_rex_location_when_known() {
         let wt = Path::new("/r/.worktrees/x");
-        let note = agy_note(wt, "fix/x", "session:s", "block:b");
+        let note = agy_note(wt, "fix/x", false, "session:s", "block:b");
         assert!(note.starts_with(&task_note(wt, "fix/x")));
         assert!(note.contains("Rex session is session:s and your Rex block is block:b"));
-        assert_eq!(agy_note(wt, "fix/x", "", "block:b"), task_note(wt, "fix/x"));
+        assert_eq!(
+            agy_note(wt, "fix/x", false, "", "block:b"),
+            task_note(wt, "fix/x")
+        );
     }
 
     #[test]
@@ -389,5 +437,35 @@ mod tests {
         let note = task_note(Path::new("/r/.worktrees/x"), "fix/x");
         assert!(note.contains("worktree is /r/.worktrees/x, on branch fix/x"));
         assert!(note.contains("Do not create another worktree or branch"));
+    }
+
+    #[test]
+    fn in_place_prepare_and_note_skip_git_and_worktree_framing() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "switchyard-in-place-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Plain non-Git directory succeeds without Git/Worktrunk checks.
+        assert_eq!(prepare_in_place(dir.to_str().unwrap()).unwrap(), dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(prepare_in_place(dir.to_str().unwrap()).is_err());
+
+        let notes = Path::new("/home/johna/notes");
+        let note = in_place_note(notes);
+        assert!(note.contains("/home/johna/notes"));
+        assert!(!note.contains("worktree"));
+        assert!(!note.contains("branch"));
+        assert!(!note.contains("git"));
+
+        let agy = agy_note(notes, "", true, "session:s", "block:b");
+        assert!(agy.starts_with(&note));
+        assert!(agy.contains("message_parent"));
+        assert!(!agy.contains("worktree"));
+        assert!(!agy.contains("branch"));
     }
 }

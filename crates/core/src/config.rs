@@ -170,7 +170,11 @@ pub fn control_host() -> String {
     configured_control_host().unwrap_or_else(local_label)
 }
 
-#[derive(Debug, Default, Deserialize)]
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct ProjectEntry {
     pub profile: String,
@@ -180,6 +184,23 @@ pub struct ProjectEntry {
     /// What the project's refs mean (see `links::Tracker`):
     /// `github:OWNER/REPO` and/or `fizzy:ACCOUNT/BOARD`.
     pub tracker: String,
+    /// Whether tasks create a Git worktree (`true`, the default) or run
+    /// directly in `path` (`false`, for non-worktree folders like `~/notes`).
+    #[serde(default = "default_true")]
+    pub worktree: bool,
+}
+
+impl Default for ProjectEntry {
+    fn default() -> Self {
+        Self {
+            profile: String::new(),
+            path: String::new(),
+            clone_url: String::new(),
+            hosts: Vec::new(),
+            tracker: String::new(),
+            worktree: true,
+        }
+    }
 }
 
 pub fn path() -> PathBuf {
@@ -298,5 +319,32 @@ mod tests {
             cfg.remote_control_url_on("m4-mbp"),
             Some("http://omarchy.taila14c2.ts.net:7391")
         );
+    }
+
+    #[test]
+    fn project_worktree_defaults_to_true_and_supports_in_place() {
+        assert!(ProjectEntry::default().worktree);
+        let cfg: Config = toml::from_str(
+            r#"
+            [[projects]]
+            profile = "personal"
+            path = "~/dev/switchyard"
+            clone_url = "git@github.com:johnallen3d/switchyard.git"
+
+            [[projects]]
+            profile = "personal"
+            path = "~/notes"
+            worktree = false
+            hosts = ["omarchy"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.projects.len(), 2);
+        assert!(cfg.projects[0].worktree);
+        assert!(!cfg.projects[1].worktree);
+        assert_eq!(cfg.projects[1].path, "~/notes");
+        assert_eq!(cfg.projects[1].clone_url, "");
+        assert_eq!(cfg.projects[1].tracker, "");
+        assert_eq!(cfg.projects[1].hosts, ["omarchy"]);
     }
 }

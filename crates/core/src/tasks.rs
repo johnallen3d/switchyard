@@ -895,10 +895,19 @@ fn field(t: &serde_json::Value, k: &str) -> String {
     t[k].as_str().unwrap_or("").to_string()
 }
 
-/// Whether `reconcile_tasks` checks task `t`: it is open, ended with only
-/// its tab closed, or an orphan worktree (see `orphans`).
+/// Whether `task` runs directly in its project directory (`worktree = false`)
+/// rather than in a Git worktree.
+#[must_use]
+pub fn is_in_place(task: &serde_json::Value) -> bool {
+    task["in_place"].as_bool() == Some(true)
+}
+
+/// Whether `reconcile_tasks` checks task `t`: it is open, or (for worktree
+/// tasks) ended with only its tab closed or an orphan worktree (see `orphans`).
 pub(crate) fn checked(t: &serde_json::Value) -> bool {
-    t["ended_at"].is_null() || matches!(t["ended_reason"].as_str(), Some("tab closed" | "orphaned"))
+    t["ended_at"].is_null()
+        || (!is_in_place(t)
+            && matches!(t["ended_reason"].as_str(), Some("tab closed" | "orphaned")))
 }
 
 /// A task's `HOST/WINDOW_ID`, which keys a check's worktrees and PRs.
@@ -923,17 +932,36 @@ fn check_hosts(tasks: &[serde_json::Value]) -> Vec<std::thread::JoinHandle<HostC
     hosts
         .into_iter()
         .map(|host| {
-            let pairs: Vec<(String, String, String)> = tasks
+            let mut has_worktree = Vec::new();
+            let mut pairs: Vec<(String, String, String)> = Vec::new();
+            for t in tasks
                 .iter()
                 .filter(|t| checked(t) && field(t, "host") == host)
-                .map(|t| (field(t, "repo"), field(t, "branch"), field(t, "worktree")))
-                .collect();
+            {
+                if is_in_place(t) {
+                    has_worktree.push(false);
+                } else {
+                    has_worktree.push(true);
+                    pairs.push((field(t, "repo"), field(t, "branch"), field(t, "worktree")));
+                }
+            }
             // The tab listing (Rex) and the worktree check (SSH) don't depend
-            // on each other, so a host costs the slower of the two.
+            // on each other, so a host costs the slower of the two. In-place
+            // tasks skip Git worktree checks completely.
             std::thread::spawn(move || {
                 let (windows, worktrees) = std::thread::scope(|s| {
                     let windows = s.spawn(|| host_windows(&host));
-                    let worktrees = host_worktrees(&host, &pairs);
+                    let worktrees = if pairs.is_empty() {
+                        Some(vec![None; has_worktree.len()])
+                    } else {
+                        host_worktrees(&host, &pairs).map(|found| {
+                            let mut it = found.into_iter();
+                            has_worktree
+                                .iter()
+                                .map(|&check_wt| if check_wt { it.next().flatten() } else { None })
+                                .collect()
+                        })
+                    };
                     (windows.join().ok().flatten(), worktrees)
                 });
                 (host, windows, worktrees)
@@ -970,7 +998,11 @@ fn apply_checks(
             let window_id = window_id.as_str();
             let session_id = field(task, "session_id");
             let key = format!("{host}/{window_id}");
-            let worktree = worktrees.as_ref().and_then(|w| w.get(i).cloned().flatten());
+            let worktree = if is_in_place(task) {
+                None
+            } else {
+                worktrees.as_ref().and_then(|w| w.get(i).cloned().flatten())
+            };
             if !task["ended_at"].is_null() {
                 match worktree {
                     Some(w) if w.path.is_empty() => {
@@ -1898,5 +1930,64 @@ mod tests {
         let after = load_at(&path).unwrap();
         assert_eq!(after[0]["links"], serde_json::json!([]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn in_place_tasks_skip_worktree_checks_and_end_only_when_tab_closes() {
+        let open_in_place = serde_json::json!({
+            "host": "omarchy",
+            "session_id": "s1",
+            "window_id": "w1",
+            "project": "notes",
+            "name": "chat-1",
+            "repo": "/home/johna/notes",
+            "worktree": "/home/johna/notes",
+            "branch": "",
+            "in_place": true,
+            "created_at": 10,
+            "ended_at": null,
+            "ended_reason": null,
+        });
+        assert!(is_in_place(&open_in_place));
+        assert!(checked(&open_in_place));
+
+        // Even if a bogus empty Worktree were somehow passed, apply_checks
+        // ignores worktree state for in-place tasks and keeps live Rex status.
+        let mut tasks = vec![open_in_place.clone()];
+        let windows = HostWindows::parse("L\ts1\nS\ts1\nw1\tidle\t50\tready\n");
+        let bogus_gone = Worktree {
+            path: String::new(),
+            branch: String::new(),
+            dirty: 0,
+            files: Vec::new(),
+            merged: String::new(),
+            head: String::new(),
+            origin: String::new(),
+            fizzy: String::new(),
+            links: Vec::new(),
+            fixes: Vec::new(),
+        };
+        let handle = std::thread::spawn(move || {
+            (
+                "omarchy".to_string(),
+                Some(windows),
+                Some(vec![Some(bogus_gone)]),
+            )
+        });
+        let (live, dirty) = apply_checks(&mut tasks, vec![handle], 10_000);
+        assert!(tasks[0]["ended_at"].is_null());
+        assert_eq!(live["w1"].state, "idle");
+        assert!(dirty.is_empty());
+
+        // When Rex reports the tab gone, the in-place task ends as "tab closed"
+        // and is no longer checked (no leftover worktree to clean up).
+        let windows_gone = HostWindows::parse("L\ts1\nS\ts1\n");
+        let handle = std::thread::spawn(move || {
+            ("omarchy".to_string(), Some(windows_gone), Some(vec![None]))
+        });
+        apply_checks(&mut tasks, vec![handle], 10_001);
+        assert_eq!(tasks[0]["ended_at"], 10_001);
+        assert_eq!(tasks[0]["ended_reason"], "tab closed");
+        assert!(!checked(&tasks[0]));
     }
 }

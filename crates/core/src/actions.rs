@@ -69,7 +69,7 @@ use crate::naming::{HARNESSES, branch_and_slug, harness_spec, models, split_harn
 use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
 use crate::rex::{host_bash, local_label, now, rex, rex_json, sh_quote};
 use crate::sessions::newest_session;
-use crate::tasks::{MERGED_SH, in_window, load_tasks, save_record, update_tasks};
+use crate::tasks::{MERGED_SH, in_window, is_in_place, load_tasks, save_record, update_tasks};
 
 /// The tab's agent pane: the first pane of its tiled layer, which is where
 /// `--run` started the agent.
@@ -305,9 +305,13 @@ pub fn switch_harness(
 
     let (path, clone_url) = project_path_and_clone(&field("repo"))?;
     let name = field("name");
-    let branch = match field("branch") {
-        b if !b.is_empty() => b,
-        _ => branch_and_slug(&name).0,
+    let branch = if is_in_place(&task) {
+        String::new()
+    } else {
+        match field("branch") {
+            b if !b.is_empty() => b,
+            _ => branch_and_slug(&name).0,
+        }
     };
     let result = if ended {
         switch_ended(
@@ -449,18 +453,11 @@ fn switch_live(
     // Launch the new harness in a sibling split of the same tab first, then
     // close the old agent block so the Rex window (and any other splits) stay
     // intact with the same window_id and label.
-    let run = [
-        "switchyard",
-        "task",
-        "run",
-        profile,
-        path,
-        name,
-        spec,
-        clone_url,
-        &new_session,
-        "resume",
-    ];
+    let mut run = vec!["switchyard", "task", "run"];
+    if is_in_place(task) {
+        run.push("--in-place");
+    }
+    run.extend([profile, path, name, spec, clone_url, &new_session, "resume"]);
     let mut args = vec![
         "split",
         "-s",
@@ -505,7 +502,17 @@ fn switch_ended(
     source_session: &str,
 ) -> Result<String, String> {
     let recorded_wt = task["worktree"].as_str().unwrap_or("");
-    let (worktree, created) = ensure_worktree(host, path, name, branch, recorded_wt, clone_url)?;
+    let in_place = is_in_place(task);
+    let (worktree, created) = if in_place {
+        let dir = if recorded_wt.is_empty() {
+            path
+        } else {
+            recorded_wt
+        };
+        (dir.to_string(), false)
+    } else {
+        ensure_worktree(host, path, name, branch, recorded_wt, clone_url)?
+    };
     let new_session = match convert_on_host(
         host,
         profile,
@@ -526,7 +533,11 @@ fn switch_ended(
             return Err(e);
         }
     };
-    let resume_head = branch_head(host, path, branch);
+    let resume_head = if in_place {
+        None
+    } else {
+        branch_head(host, path, branch)
+    };
     let (new_host, new_session_id, new_window_id) = launch(
         host,
         path,
@@ -1135,6 +1146,12 @@ fn run_action(action: &str, host: &str, session: &str, window: &str) -> Result<S
             .and_then(|l| l["url"].as_str())
             .map(String::from)
             .ok_or_else(|| format!("{label} has no linked work item")),
+        // An in-place project (`worktree = false`) has no worktree to check or
+        // remove: capture its session, close the tab, and mark it archived.
+        "archive" | "force-archive" if is_in_place(&tasks[i]) => {
+            end_keeping_worktree(&mut tasks[i], host, session, window)?;
+            Ok(format!("archived {label}"))
+        }
         // A primary checkout is never removed: close the tab and end the task.
         "archive" | "force-archive"
             if !worktree.is_empty()
@@ -1179,16 +1196,34 @@ fn end_keeping_worktree(
     session: &str,
     window: &str,
 ) -> Result<(), String> {
+    end_keeping_worktree_with(
+        task,
+        newest_session,
+        || {
+            let _ = rex(host, &["window", "close", "-s", session, window]);
+        },
+        || kill_if_empty(host, session),
+        save_record,
+    )
+}
+
+fn end_keeping_worktree_with(
+    task: &mut serde_json::Value,
+    find_session: impl FnOnce(&serde_json::Value) -> Option<String>,
+    close_tab: impl FnOnce(),
+    cleanup_session: impl FnOnce(),
+    save: impl FnOnce(&serde_json::Value) -> Result<(), String>,
+) -> Result<(), String> {
     if task["ended_at"].is_null() {
-        if let Some(id) = newest_session(task) {
+        if let Some(id) = find_session(task) {
             task["agent_session"] = id.into();
         }
-        let _ = rex(host, &["window", "close", "-s", session, window]);
+        close_tab();
         task["ended_at"] = now().into();
     }
-    kill_if_empty(host, session);
+    cleanup_session();
     task["ended_reason"] = "archived".into();
-    save_record(task)
+    save(task)
 }
 
 /// Archive `task`, whose worktree is its own (not the primary checkout):
@@ -1883,5 +1918,58 @@ mod tests {
             "arch"
         );
         assert!(find_switch_task(&tasks, "w3").is_err());
+    }
+
+    #[test]
+    fn in_place_archive_closes_tab_and_keeps_directory_without_git_checks() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let notes = std::env::temp_dir().join(format!(
+            "switchyard-notes-archive-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&notes).unwrap();
+        let note_file = notes.join("todo.md");
+        std::fs::write(&note_file, "keep me").unwrap();
+
+        let mut task = serde_json::json!({
+            "host": "omarchy",
+            "session_id": "s1",
+            "window_id": "w1",
+            "project": "notes",
+            "name": "chat-1",
+            "repo": notes.to_str().unwrap(),
+            "worktree": notes.to_str().unwrap(),
+            "branch": "",
+            "in_place": true,
+            "harness": "agy",
+            "ended_at": null,
+            "ended_reason": null,
+        });
+        assert!(is_in_place(&task));
+        assert!(!auto_archivable(&task, 10_000));
+
+        let mut closed = false;
+        let mut cleaned = false;
+        let mut saved = false;
+        end_keeping_worktree_with(
+            &mut task,
+            |_| Some("conv-123".into()),
+            || closed = true,
+            || cleaned = true,
+            |t| {
+                assert_eq!(t["ended_reason"], "archived");
+                assert_eq!(t["agent_session"], "conv-123");
+                assert!(t["ended_at"].as_u64().is_some());
+                saved = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(closed && cleaned && saved);
+        assert!(note_file.is_file());
+        std::fs::remove_dir_all(notes).unwrap();
     }
 }

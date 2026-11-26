@@ -16,6 +16,8 @@ pub struct Project {
     pub hosts: Vec<String>,
     /// The catalog's `tracker` (see `links::Tracker`); may be empty.
     pub tracker: String,
+    /// Whether tasks create a Git worktree (`true`) or run in-place in `path`.
+    pub worktree: bool,
 }
 
 /// The catalog projects (from projects.toml), or why the config is unreadable.
@@ -41,6 +43,7 @@ pub fn catalog() -> Result<Vec<Project>, String> {
                 name: name.into(),
                 hosts: p.hosts.clone(),
                 tracker: p.tracker.clone(),
+                worktree: p.worktree,
             }
         })
         .collect())

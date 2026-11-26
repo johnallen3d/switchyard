@@ -15,8 +15,11 @@
 //!   its current session (which changes on /clear); failing that, the
 //!   task's agent session, then the newest session for the directory.
 //! - Pi: the newest session for the directory, which follows /new.
-//! - Antigravity (`agy`): the conversation it last used in the directory,
-//!   else the task's agent session; its log is
+//! - Antigravity (`agy`): on Linux, the conversation open in the running
+//!   agent's `/proc/<pid>/fd` (`presence/<id>.lock` primary,
+//!   `conversations/<id>.db` secondary); when `/proc/<pid>/fd` is unavailable
+//!   (non-Linux or exited process), `agent_session` then the conversation it
+//!   last used in the directory. Its log is
 //!   `brain/ID/.system_generated/logs/transcript_full.jsonl`.
 //!
 //! It reads only the end of the log and returns its last messages, tool
@@ -40,7 +43,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use crate::rex::{host_bash, local_label, rex_json, sh_quote};
-use crate::sessions::{newest_session_here, session_dir};
+use crate::sessions::{agy_conversation_for_pid, newest_session_here, session_dir};
 use crate::tasks::{in_window, load_tasks, rfc3339_secs};
 
 /// How much of the end of a log to read.
@@ -368,7 +371,7 @@ fn started(profile: &str, harness: &str, dir: &str, pid: u64) -> u64 {
 
 fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) -> Option<PathBuf> {
     if harness == "agy" {
-        return agy_log(profile, dir, agent_session);
+        return agy_log(profile, dir, agent_session, pid);
     }
     let sessions = session_dir(profile, harness, dir);
     let newest = || newest_log(&sessions);
@@ -404,24 +407,59 @@ fn find(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: u64) 
         .or_else(newest)
 }
 
-/// Antigravity's log for the conversation it last used in `dir`, else for
-/// `agent_session`. Its data folder has no profile variable, so both
-/// profiles share it.
-fn agy_log(profile: &str, dir: &str, agent_session: &str) -> Option<PathBuf> {
-    let logs = |id: &str| {
-        crate::rex::home()
-            .join(".gemini/antigravity-cli/brain")
+/// Antigravity's log for a tab: on Linux, from the live process's
+/// `/proc/<pid>/fd` (`presence/<id>.lock` primary, `conversations/<id>.db`
+/// secondary) so concurrent `agy` tabs in the same directory never collide and
+/// a newly started or `/clear`ing process doesn't flash stale history from
+/// `last_conversations.json`. Falls back to `agent_session` then
+/// `agy_last_conversation(dir)` only when `/proc/<pid>/fd` is unavailable.
+fn agy_log(profile: &str, dir: &str, agent_session: &str, pid: u64) -> Option<PathBuf> {
+    let root = crate::rex::home().join(".gemini/antigravity-cli");
+    agy_log_with(
+        &root,
+        agy_conversation_for_pid(pid),
+        || newest_session_here(profile, "agy", dir),
+        agent_session,
+    )
+}
+
+fn agy_log_with(
+    agy_root: &Path,
+    fd_lookup: std::io::Result<Option<String>>,
+    last_conv: impl FnOnce() -> Option<String>,
+    agent_session: &str,
+) -> Option<PathBuf> {
+    let log_for = |id: &str| -> Option<PathBuf> {
+        if id.is_empty() || id.contains('/') {
+            return None;
+        }
+        let logs = agy_root
+            .join("brain")
             .join(id)
-            .join(".system_generated/logs")
+            .join(".system_generated/logs");
+        if !logs.is_dir() {
+            return None;
+        }
+        ["transcript_full.jsonl", "transcript.jsonl"]
+            .into_iter()
+            .map(|name| logs.join(name))
+            .find(|p| p.is_file())
     };
-    let id = newest_session_here(profile, "agy", dir)
-        .into_iter()
-        .chain((!agent_session.is_empty()).then(|| agent_session.to_string()))
-        .find(|id| !id.contains('/') && logs(id).is_dir())?;
-    ["transcript_full.jsonl", "transcript.jsonl"]
-        .into_iter()
-        .map(|name| logs(&id).join(name))
-        .find(|p| p.is_file())
+    match fd_lookup {
+        // Live process with an open presence lock or conversation db: read ONLY
+        // that conversation's log.
+        Ok(Some(id)) => log_for(&id),
+        // Live process readable via /proc/<pid>/fd, but no lock/db opened yet
+        // (just started or mid-/clear): do NOT fall back to stale history.
+        Ok(None) => None,
+        // /proc/<pid>/fd unavailable (non-Linux, pid == 0, or exited process):
+        // fall back to the recorded agent_session, then last_conversations.json.
+        Err(_) => (!agent_session.is_empty())
+            .then(|| agent_session.to_string())
+            .into_iter()
+            .chain(last_conv())
+            .find_map(|id| log_for(&id)),
+    }
 }
 
 fn newest_log(dir: &Path) -> Option<PathBuf> {
@@ -1281,6 +1319,77 @@ mod tests {
         assert_eq!(found, Some(projects.join("elsewhere/live.jsonl")));
         let found = with_claude_config(&root, || find("personal", "claude", "/w", "old", 7));
         assert_eq!(found, Some(sessions.join("old.jsonl")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agy_log_isolates_concurrent_live_processes_and_falls_back_when_unavailable() {
+        use std::os::unix::fs::symlink;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "switchyard-agy-log-{}-{unique}",
+            std::process::id()
+        ));
+        let make_log = |id: &str| {
+            let dir = root.join("brain").join(id).join(".system_generated/logs");
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("transcript_full.jsonl");
+            std::fs::write(&path, "").unwrap();
+            path
+        };
+        let log_a = make_log("conv-a");
+        let log_b = make_log("conv-b");
+        let log_stale = make_log("conv-stale");
+
+        let fd_a = root.join("fd-a");
+        let fd_empty = root.join("fd-empty");
+        std::fs::create_dir_all(&fd_a).unwrap();
+        std::fs::create_dir_all(&fd_empty).unwrap();
+        symlink(root.join("presence/conv-a.lock"), fd_a.join("15")).unwrap();
+
+        // Live process with open presence lock resolves its exact log even when
+        // last_conversations.json and agent_session point elsewhere.
+        let found = agy_log_with(
+            &root,
+            crate::sessions::agy_conversation_from_fd_dir(&fd_a),
+            || Some("conv-stale".into()),
+            "conv-b",
+        );
+        assert_eq!(found, Some(log_a));
+
+        // Live readable /proc/<pid>/fd with no lock/db yet (starting or /clear)
+        // must NOT fall back to stale last_conversations.json or agent_session.
+        let found = agy_log_with(
+            &root,
+            crate::sessions::agy_conversation_from_fd_dir(&fd_empty),
+            || Some("conv-stale".into()),
+            "conv-b",
+        );
+        assert_eq!(found, None);
+
+        // Unavailable /proc/<pid>/fd (exited process / non-Linux) falls back to
+        // agent_session first, then last_conversations.json.
+        let missing = root.join("no-such-fd");
+        let found = agy_log_with(
+            &root,
+            crate::sessions::agy_conversation_from_fd_dir(&missing),
+            || Some("conv-stale".into()),
+            "conv-b",
+        );
+        assert_eq!(found, Some(log_b));
+
+        let found = agy_log_with(
+            &root,
+            crate::sessions::agy_conversation_from_fd_dir(&missing),
+            || Some("conv-stale".into()),
+            "",
+        );
+        assert_eq!(found, Some(log_stale));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 

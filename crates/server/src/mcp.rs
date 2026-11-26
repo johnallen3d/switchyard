@@ -475,19 +475,20 @@ fn tools() -> Value {
         },
         {
             "name": "list_projects",
-            "description": "List the configured catalog projects that spawn_task accepts.",
+            "description": "List the configured catalog projects that spawn_task accepts, plus available harnesses and models.",
             "inputSchema": { "type": "object", "properties": {} },
             "annotations": { "readOnlyHint": true },
         },
         {
             "name": "spawn_task",
-            "description": "Start an agent task: a new worktree branch of a catalog project, \
-    with an agent working on PROMPT in its own Rex tab. Returns the task's PROJECT/NAME.",
+            "description": "Start an agent task: a new worktree branch of a catalog project \
+    (or directly in the project's folder when worktree is false), with an agent working on PROMPT \
+    in its own Rex tab. Returns the task's PROJECT/NAME.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string", "description": "Catalog project: its name (the folder name) or path (see list_projects)." },
-                    "name": { "type": "string", "description": "Task name, normalised as the picker does (lowercase, spaces become dashes); the branch is feature/NAME." },
+                    "name": { "type": "string", "description": "Optional task name, normalised as the picker does (lowercase, spaces become dashes); omit or leave empty to auto-name from prompt. For worktree projects, the branch is feature/NAME." },
                     "harness": { "type": "string", "enum": HARNESSES, "description": "Omit for the project's profile default (the config's [harnesses], else claude)." },
                     "model": { "type": "string", "description": model_help() },
                     "prompt": { "type": "string", "description": "The agent's first message." },
@@ -499,7 +500,7 @@ fn tools() -> Value {
                     "parent_label": { "type": "string", "description": "Optional human-readable label for a callback parent (e.g. \"marvin\" or \"Marvin #42\"), exposed in list_tasks/read_task summaries. Overrides X-Parent-Label." },
                     "notify_parent": { "type": "boolean", "default": true, "description": "With parent_block or parent_url known, notify the parent each time the task's agent stops working (idle, done, or waiting on a prompt), with its last message, so you needn't poll it or set a timer." },
                 },
-                "required": ["project", "name", "prompt"],
+                "required": ["project", "prompt"],
             },
         },
         {
@@ -544,8 +545,9 @@ fn tools() -> Value {
         },
         {
             "name": "stop_task",
-            "description": "Archive a task: close its tab and remove its worktree. Refused while the worktree \
-    has uncommitted changes.",
+            "description": "Archive a task: close its tab and (for worktree projects) remove its worktree \
+    (refused while a worktree has uncommitted changes). For worktree = false in-place projects, \
+    closes the tab and marks the task archived without checking Git status or removing the folder.",
             "inputSchema": { "type": "object", "properties": { "task": task }, "required": ["task"] },
             "annotations": { "destructiveHint": true },
         },
@@ -680,6 +682,7 @@ fn summary(task: &Value, open: &[Value]) -> Value {
         "model",
         "branch",
         "worktree",
+        "in_place",
         "status",
         "status_msg",
         "status_at",
@@ -700,11 +703,16 @@ fn summary(task: &Value, open: &[Value]) -> Value {
 
 /// Response payload for `list_projects`.
 fn projects_list(projects: &[Project], harness: impl Fn(&str) -> String) -> Value {
+    let harnesses: serde_json::Map<String, Value> = HARNESSES
+        .iter()
+        .map(|&h| (h.to_string(), json!(&models(h)[1..])))
+        .collect();
     json!({
         "projects": projects
             .iter()
             .map(|p| project_summary(p, &harness(&p.profile)))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "harnesses": harnesses,
     })
 }
 
@@ -715,6 +723,7 @@ fn project_summary(project: &Project, default_harness: &str) -> Value {
         "path": project.path,
         "profile": project.profile,
         "default_harness": default_harness,
+        "worktree": project.worktree,
     });
     if !project.hosts.is_empty() {
         out["hosts"] = json!(project.hosts);
@@ -943,10 +952,15 @@ fn spawn_harness(harness: Option<&str>, model: Option<&str>, default: &str) -> S
     }
 }
 
+fn spawn_name(args: &Value) -> String {
+    opt_arg(args, "name").map(normalise).unwrap_or_default()
+}
+
 fn spawn(args: &Value, caller: &Caller, endpoint: &Endpoint) -> Result<Value, String> {
     let project = str_arg(args, "project")?;
     // As the picker takes typed names: `MCP smoke test` is `mcp-smoke-test`.
-    let name = normalise(str_arg(args, "name")?);
+    // When omitted or empty, launch_text auto-names the task from `prompt`.
+    let name = spawn_name(args);
     let name = name.as_str();
     let prompt = str_arg(args, "prompt")?;
     let host = opt_arg(args, "host").unwrap_or("auto");
@@ -1613,6 +1627,10 @@ mod tests {
         );
         assert!(spawn["inputSchema"]["properties"]["parent_url"].is_object());
         assert!(spawn["inputSchema"]["properties"]["parent_label"].is_object());
+        assert_eq!(
+            spawn["inputSchema"]["required"],
+            json!(["project", "prompt"])
+        );
         assert!(INSTRUCTIONS.contains("list_projects"));
         assert!(INSTRUCTIONS.contains("parent_url"));
     }
@@ -1626,6 +1644,7 @@ mod tests {
             clone_url: "git@github.com:johnallen3d/switchyard.git".into(),
             hosts: vec!["omarchy".into(), "config".into()],
             tracker: "fizzy:6284043/board-1".into(),
+            worktree: true,
         };
         let minimal = Project {
             name: "rex".into(),
@@ -1634,9 +1653,24 @@ mod tests {
             clone_url: "git@github.com:example/rex.git".into(),
             hosts: Vec::new(),
             tracker: String::new(),
+            worktree: true,
         };
+        let in_place = Project {
+            name: "notes".into(),
+            path: "~/notes".into(),
+            profile: "personal".into(),
+            clone_url: String::new(),
+            hosts: vec!["omarchy".into()],
+            tracker: String::new(),
+            worktree: false,
+        };
+        let expected_harnesses = json!({
+            "claude": &models("claude")[1..],
+            "pi": &models("pi")[1..],
+            "agy": &models("agy")[1..],
+        });
         assert_eq!(
-            projects_list(&[full, minimal], |profile| match profile {
+            projects_list(&[full, minimal, in_place], |profile| match profile {
                 "personal" => "agy:gemini-4-neon".into(),
                 _ => "claude".into(),
             }),
@@ -1647,6 +1681,7 @@ mod tests {
                         "path": "~/dev/src/playground/switchyard",
                         "profile": "personal",
                         "default_harness": "agy:gemini-4-neon",
+                        "worktree": true,
                         "hosts": ["omarchy", "config"],
                         "tracker": "fizzy:6284043/board-1",
                     },
@@ -1655,14 +1690,74 @@ mod tests {
                         "path": "~/dev/src/rex",
                         "profile": "work",
                         "default_harness": "claude",
+                        "worktree": true,
                     },
-                ]
+                    {
+                        "name": "notes",
+                        "path": "~/notes",
+                        "profile": "personal",
+                        "default_harness": "agy:gemini-4-neon",
+                        "worktree": false,
+                        "hosts": ["omarchy"],
+                    },
+                ],
+                "harnesses": expected_harnesses,
             })
         );
         assert_eq!(
             projects_list(&[], |_| "claude".into()),
-            json!({ "projects": [] })
+            json!({ "projects": [], "harnesses": expected_harnesses })
         );
+    }
+
+    #[test]
+    fn spawn_name_is_optional_and_list_tasks_includes_in_place_tasks() {
+        assert_eq!(
+            spawn_name(&json!({ "project": "notes", "prompt": "hi" })),
+            ""
+        );
+        assert_eq!(
+            spawn_name(&json!({ "project": "notes", "name": "   ", "prompt": "hi" })),
+            ""
+        );
+        assert_eq!(
+            spawn_name(&json!({ "project": "notes", "name": "Daily Notes!", "prompt": "hi" })),
+            "daily-notes"
+        );
+
+        let e = endpoint();
+        e.shared.lock().set_tasks(
+            Ok(vec![json!({
+                "project": "notes",
+                "name": "chat-1",
+                "host": "omarchy",
+                "session_id": "s1",
+                "window_id": "w1",
+                "repo": "/home/johna/notes",
+                "worktree": "/home/johna/notes",
+                "branch": "",
+                "in_place": true,
+                "harness": "agy",
+                "status": "idle",
+                "ended_at": null,
+            })]),
+            true,
+            Instant::now(),
+        );
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": { "name": "list_tasks", "arguments": {} }
+        });
+        let reply = route(&post(&body.to_string()), &e).1.unwrap();
+        let listed = reply["result"]["structuredContent"]["tasks"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["task"], "notes/chat-1");
+        assert_eq!(listed[0]["in_place"], true);
+        assert_eq!(listed[0]["status"], "idle");
     }
 
     #[test]

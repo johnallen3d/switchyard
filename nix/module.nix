@@ -240,7 +240,13 @@ in {
                 };
                 clone_url = mkOption {
                   type = types.str;
-                  description = "Clone URL used when the checkout is missing.";
+                  default = "";
+                  description = "Clone URL used when the checkout is missing (optional for worktree = false projects).";
+                };
+                worktree = mkOption {
+                  type = types.bool;
+                  default = true;
+                  description = "Whether tasks create a Git worktree (false runs agents directly in path).";
                 };
                 hosts = mkOption {
                   type = types.listOf types.str;

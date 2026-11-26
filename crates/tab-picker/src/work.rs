@@ -1351,6 +1351,7 @@ mod tests {
             name: name.into(),
             hosts: Vec::new(),
             tracker: String::new(),
+            worktree: true,
         }
     }
 

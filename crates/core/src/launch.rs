@@ -47,6 +47,7 @@ fn folder_project(host: &str, path: &str, projects: &[Project]) -> Result<Projec
         clone_url: String::new(),
         hosts: vec![host.to_string()],
         tracker: configured.map(|p| p.tracker.clone()).unwrap_or_default(),
+        worktree: true,
     })
 }
 
@@ -381,34 +382,26 @@ fn launch_with(
     // Work items the prompt names (`#42`, `fizzy:123`, issue and card
     // URLs), under the project's tracker, or the checkout's `.fizzy.yaml`
     // board when the catalog sets none.
-    let board =
-        if project.tracker.trim().is_empty() && (!typed.trim().is_empty() || work_item.is_some()) {
-            checkout_board(host, &cwd)
-        } else {
-            String::new()
-        };
+    let board = if project.worktree
+        && project.tracker.trim().is_empty()
+        && (!typed.trim().is_empty() || work_item.is_some())
+    {
+        checkout_board(host, &cwd)
+    } else {
+        String::new()
+    };
     let tracker = Tracker::new(
         &tracker_or_fizzy(&project.tracker, &board),
         &project.clone_url,
     );
     let (prompt, name) = prompt_and_name(name, &project, work_item, &tracker, &typed)?;
     let name = name.as_str();
-    let (branch, slug) = branch_and_slug(name);
-    let mut run = vec![
-        "switchyard",
-        "task",
-        "run",
-        &project.profile,
-        &project.path,
-        name,
-        spec,
-        &project.clone_url,
-        &agent_session,
-        mode,
-    ];
-    if !prompt.is_empty() {
-        run.push(&prompt);
-    }
+    let (branch, slug) = if project.worktree {
+        branch_and_slug(name)
+    } else {
+        (String::new(), branch_and_slug(name).1)
+    };
+    let run = task_run_args(&project, name, spec, &agent_session, mode, &prompt);
     let (session, window_id) = open_tab(host, existing, &project.name, &slug, &cwd, &run)?;
     // The tab holds the prompt now.
     if let Some(r) = prompt_ref {
@@ -442,6 +435,33 @@ fn launch_with(
     Ok((host.to_string(), session, window_id))
 }
 
+fn task_run_args<'a>(
+    project: &'a Project,
+    name: &'a str,
+    spec: &'a str,
+    agent_session: &'a str,
+    mode: &'a str,
+    prompt: &'a str,
+) -> Vec<&'a str> {
+    let mut run = vec!["switchyard", "task", "run"];
+    if !project.worktree {
+        run.push("--in-place");
+    }
+    run.extend([
+        project.profile.as_str(),
+        project.path.as_str(),
+        name,
+        spec,
+        project.clone_url.as_str(),
+        agent_session,
+        mode,
+    ]);
+    if !prompt.is_empty() {
+        run.push(prompt);
+    }
+    run
+}
+
 #[allow(clippy::too_many_arguments)]
 fn task_record(
     project: &Project,
@@ -458,6 +478,11 @@ fn task_record(
     links: &[serde_json::Value],
     placement: Placement,
 ) -> serde_json::Value {
+    let worktree = if project.worktree {
+        format!("{cwd}/.worktrees/{slug}")
+    } else {
+        cwd.to_string()
+    };
     let mut task = serde_json::json!({
         "host": host,
         "session_id": session,
@@ -467,9 +492,10 @@ fn task_record(
         "repo": cwd,
         "name": name,
         "branch": branch,
-        // Where `task run` puts a new worktree; `task list` corrects it when the
-        // branch already had one elsewhere.
-        "worktree": format!("{cwd}/.worktrees/{slug}"),
+        // Where `task run` puts a new worktree (or `cwd` for `worktree = false`
+        // in-place projects); `task list` corrects worktree tasks if the branch
+        // already had one elsewhere.
+        "worktree": worktree,
         "harness": harness,
         "model": model,
         "agent_session": agent_session,
@@ -479,6 +505,9 @@ fn task_record(
         "ended_at": null,
         "ended_reason": null,
     });
+    if !project.worktree {
+        task["in_place"] = true.into();
+    }
     match placement.parent {
         Some(Parent::Rex {
             host,
@@ -781,6 +810,7 @@ mod tests {
             name: "configured".into(),
             hosts: vec![],
             tracker: String::new(),
+            worktree: true,
         };
         let project = folder_project(
             &crate::rex::local_label(),
@@ -900,6 +930,7 @@ mod tests {
             name: "p".into(),
             hosts: vec![],
             tracker: String::new(),
+            worktree: true,
         };
         let mk = |placement| {
             task_record(
@@ -958,5 +989,55 @@ mod tests {
         assert_eq!(cb_quiet["notify_parent"], false);
         assert!(cb_quiet.get("parent_label").is_none());
         assert!(cb_quiet.get("parent_window").is_none());
+    }
+
+    #[test]
+    fn in_place_project_records_cwd_without_branch_and_passes_flag() {
+        let notes = Project {
+            profile: "personal".into(),
+            path: "~/notes".into(),
+            clone_url: String::new(),
+            name: "notes".into(),
+            hosts: vec!["omarchy".into()],
+            tracker: String::new(),
+            worktree: false,
+        };
+        let args = task_run_args(&notes, "chat-1", "agy", "", "new", "hello");
+        assert_eq!(
+            args,
+            [
+                "switchyard",
+                "task",
+                "run",
+                "--in-place",
+                "personal",
+                "~/notes",
+                "chat-1",
+                "agy",
+                "",
+                "",
+                "new",
+                "hello",
+            ]
+        );
+        let rec = task_record(
+            &notes,
+            "omarchy",
+            "s1",
+            "w1",
+            "/home/johna/notes",
+            "chat-1",
+            "",
+            "chat-1",
+            "agy",
+            None,
+            "",
+            &[],
+            Placement::default(),
+        );
+        assert_eq!(rec["in_place"], true);
+        assert_eq!(rec["repo"], "/home/johna/notes");
+        assert_eq!(rec["worktree"], "/home/johna/notes");
+        assert_eq!(rec["branch"], "");
     }
 }

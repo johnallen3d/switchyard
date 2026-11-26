@@ -2323,6 +2323,7 @@ mod tests {
                 name: "repo".into(),
                 hosts: vec![],
                 tracker: String::new(),
+                worktree: true,
             }],
             "config-host".into(),
             String::new(),

@@ -10,19 +10,19 @@ use switchyard_core::atuin;
 use switchyard_core::folders;
 use switchyard_core::launch::launch;
 use switchyard_core::rex::log;
-use switchyard_core::sessions::newest_session_here;
+use switchyard_core::sessions::{newest_session_here, newest_session_here_for_pid};
 use switchyard_core::tasks::{live_tasks, reconcile_tasks};
 
 pub const USAGE: &str = "usage: switchyard task open HOST DIR
        switchyard task launch HOST PATH NAME HARNESS [PROMPT_REF [WORK_ITEM]]
-       switchyard task run PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume [PROMPT]]
+       switchyard task run [--in-place] PROFILE PATH NAME HARNESS CLONE_URL [AGENT_SESSION new|resume [PROMPT]]
        switchyard task list [--live]
        switchyard task act archive|force-archive|resume|link|pin HOST SESSION_ID WINDOW_ID
        switchyard task act snooze HOST SESSION_ID WINDOW_ID UNTIL
        switchyard task act message HOST SESSION_ID WINDOW_ID PROMPT_REF
        switchyard task act switch HOST SESSION_ID WINDOW_ID HARNESS
        switchyard task act move HOST SESSION_ID WINDOW_ID TARGET_HOST
-       switchyard task session-of PROFILE HARNESS WORKTREE
+       switchyard task session-of PROFILE HARNESS WORKTREE [PID]
        switchyard task convert PROFILE SOURCE TARGET WORKTREE SESSION_ID
 
 open finds or creates the session for DIR on HOST (auto: the catalog
@@ -90,28 +90,37 @@ pub fn main(args: &[&str]) -> ExitCode {
             None,
         )
         .map(|(host, session, window)| format!("{host}\t{session}\t{window}"))),
-        ["run", profile, path, name, harness, clone_url] => {
-            switchyard_spawn::run(profile, path, name, harness, clone_url, None, "")
+        ["run", rest @ ..] => {
+            let (in_place, rest) = match rest {
+                ["--in-place", tail @ ..] => (true, tail),
+                other => (false, other),
+            };
+            match rest {
+                [profile, path, name, harness, clone_url] => switchyard_spawn::run(
+                    profile, path, name, harness, clone_url, None, "", in_place,
+                ),
+                [
+                    profile,
+                    path,
+                    name,
+                    harness,
+                    clone_url,
+                    session,
+                    mode @ ("new" | "resume"),
+                    prompt @ ..,
+                ] if prompt.len() <= 1 => switchyard_spawn::run(
+                    profile,
+                    path,
+                    name,
+                    harness,
+                    clone_url,
+                    Some((session, mode)),
+                    prompt.first().copied().unwrap_or(""),
+                    in_place,
+                ),
+                _ => usage_error(),
+            }
         }
-        [
-            "run",
-            profile,
-            path,
-            name,
-            harness,
-            clone_url,
-            session,
-            mode @ ("new" | "resume"),
-            prompt @ ..,
-        ] if prompt.len() <= 1 => switchyard_spawn::run(
-            profile,
-            path,
-            name,
-            harness,
-            clone_url,
-            Some((session, mode)),
-            prompt.first().copied().unwrap_or(""),
-        ),
         ["list"] => out(reconcile_tasks().map(|t| format!("{}\n", serde_json::Value::from(t)))),
         ["list", "--live"] => {
             out(live_tasks().map(|t| format!("{}\n", serde_json::Value::from(t))))
@@ -141,6 +150,15 @@ pub fn main(args: &[&str]) -> ExitCode {
         }
         ["session-of", profile, harness, worktree] => {
             if let Some(id) = newest_session_here(profile, harness, worktree) {
+                println!("{id}");
+            }
+            ExitCode::SUCCESS
+        }
+        ["session-of", profile, harness, worktree, pid] => {
+            let Ok(pid) = pid.parse::<u64>() else {
+                return usage_error();
+            };
+            if let Some(id) = newest_session_here_for_pid(profile, harness, worktree, pid) {
                 println!("{id}");
             }
             ExitCode::SUCCESS

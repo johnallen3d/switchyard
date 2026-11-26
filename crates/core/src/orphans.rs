@@ -111,7 +111,11 @@ fn scan_host(host: &str, repos: &[String]) -> Option<Vec<Found>> {
 ///
 /// Fails when the catalog can't be read.
 pub fn scan() -> Result<(Vec<Found>, Vec<String>), String> {
-    let repos: Vec<String> = catalog()?.into_iter().map(|p| p.path).collect();
+    let repos: Vec<String> = catalog()?
+        .into_iter()
+        .filter(|p| p.worktree)
+        .map(|p| p.path)
+        .collect();
     let results: Vec<(String, Option<Vec<Found>>)> = std::thread::scope(|s| {
         let handles: Vec<_> = hosts()
             .into_iter()
