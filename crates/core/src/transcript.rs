@@ -47,9 +47,9 @@ use crate::tasks::{in_window, load_tasks, rfc3339_secs};
 const TAIL: u64 = 2 * 1024 * 1024;
 /// How many entries to return, and the longest text of one (in characters).
 const ENTRIES: usize = 150;
-const TEXT: usize = 6000;
-/// The most text a transcript carries, so its paste stays small.
-const BYTES: usize = 96 * 1024;
+const TEXT: usize = 64 * 1024;
+/// The most text a transcript carries all told.
+const BYTES: usize = 256 * 1024;
 
 /// A tab's agent pane, run as `rex [-S HOST] do -e SCRIPT --json --args
 /// '{"session":ID,"window":ID}'`: the tiled pane with the most urgent
@@ -999,6 +999,36 @@ mod tests {
         assert_eq!(model(AGY_LOG, "agy").as_deref(), Some("claude-sonnet-4-6"));
         assert_eq!(title(AGY_LOG, "agy"), None);
         assert_eq!(wake(AGY_LOG, "agy", 0), None);
+    }
+
+    #[test]
+    fn long_agy_responses_are_not_truncated_at_old_limit() {
+        let reply = "a".repeat(10_000);
+        let log = json!({
+            "step_index": 0,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": reply,
+        })
+        .to_string();
+        let got = entries(&log, "agy");
+        assert_eq!(got, vec![("assistant", reply)]);
+
+        let huge = "b".repeat(TEXT + 50);
+        let huge_log = json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": huge,
+        })
+        .to_string();
+        let got_huge = entries(&huge_log, "agy");
+        assert_eq!(got_huge.len(), 1);
+        assert_eq!(got_huge[0].0, "assistant");
+        assert!(got_huge[0].1.ends_with('…'));
+        assert_eq!(got_huge[0].1.chars().count(), TEXT + 1);
     }
 
     #[test]
