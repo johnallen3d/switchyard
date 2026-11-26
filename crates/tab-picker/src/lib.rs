@@ -1939,15 +1939,6 @@ impl App {
             .map(Item::Task)
     }
 
-    /// Whether a nested row is in its spawner's project, which the row
-    /// over it already names.
-    fn same_project_as_parent(&self, item: Item) -> bool {
-        self.tree.contains_key(&item)
-            && self
-                .parent_of(item)
-                .is_some_and(|up| self.project_of(up).0 == self.project_of(item).0)
-    }
-
     /// Move each Inbox row whose spawner is listed too under it, as a tree
     /// (see `Guide`), most urgent child first. A pinned or snoozed child
     /// stays in its group unless its spawner is in that group too, so a pin
@@ -4838,13 +4829,11 @@ impl App {
         }
     }
 
-    /// Whether a sidebar row has a second line: a project the row over it
-    /// doesn't already name, a status message, or uncommitted files.
+    /// Whether a sidebar row has a second line: a project, a status
+    /// message, or uncommitted files.
     fn side_detail(&self, item: Item) -> bool {
         let t = self.flat(item);
-        !t.msg.is_empty()
-            || t.dirty > 0
-            || !(self.project_of(item).0.is_empty() || self.same_project_as_parent(item))
+        !t.msg.is_empty() || t.dirty > 0 || !self.project_of(item).0.is_empty()
     }
 
     /// Inbox's list as the sidebar: each tab or task on two lines (see
@@ -4969,14 +4958,14 @@ impl App {
         let mut left = vec![
             edge,
             Span::styled(stem, guide_style),
-            Span::styled("  ", Style::new().bg(bg)),
+            Span::styled(self.drop_guide(item), guide_style),
         ];
         let push = |left: &mut Vec<Span<'static>>, spans: Vec<Span<'static>>, room: &mut usize| {
             *room = room.saturating_sub(spans.iter().map(|s| str_width(&s.content)).sum());
             left.extend(spans);
         };
         let (project, own) = self.project_of(item);
-        if !project.is_empty() && !self.same_project_as_parent(item) {
+        if !project.is_empty() {
             let style = Style::new().fg(p.iris).bg(bg);
             let hits = if own { hits.second.as_slice() } else { &[] };
             push(
@@ -5061,14 +5050,9 @@ impl App {
                     Style::new().bg(bg),
                 ));
             };
-        let project = if self.same_project_as_parent(item) {
-            ""
-        } else {
-            t.project
-        };
         column(
             &mut left,
-            project,
+            t.project,
             &hits.second,
             proj_w,
             Style::new().fg(p.subtle).bg(bg),
@@ -5292,6 +5276,16 @@ impl App {
 
     /// The badge after a spawner's name (see `Fold`), gold while a row
     /// folded under it waits on a prompt; empty for any other row.
+    /// The guide under a row's glyph on its second line: an unfolded
+    /// spawner's line drops from its glyph to its children's branches.
+    fn drop_guide(&self, item: Item) -> &'static str {
+        if self.folds.get(&item).is_some_and(|f| f.open) {
+            "│ "
+        } else {
+            "  "
+        }
+    }
+
     fn fold_badge(&self, item: Item, bg: Color) -> Span<'static> {
         let p = &self.p;
         match self.folds.get(&item) {
@@ -7169,13 +7163,6 @@ mod tests {
         assert_eq!(branch(2).as_deref(), Some("│ └ "));
         assert_eq!(branch(3).as_deref(), Some("└ "));
         assert_eq!(branch(4), None);
-        // The children are in the lead's project, which its row names.
-        assert!(
-            app.same_project_as_parent(Item::Tab(1)) && app.same_project_as_parent(Item::Tab(2))
-        );
-        assert!(
-            !app.same_project_as_parent(Item::Tab(0)) && !app.same_project_as_parent(Item::Tab(4))
-        );
     }
 
     #[test]
