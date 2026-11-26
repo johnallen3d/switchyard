@@ -13,8 +13,11 @@
 //! with live agent status), `list_projects` (`hosts::catalog`), `spawn_task`
 //! (`launch_text`), `read_task` (`transcript`), `message_task`
 //! (`actions::message`), `message_parent` (`notices::send`, to the agent that
-//! spawned the caller's task) and `stop_task` (a plain archive, never
-//! force-archive). They name a task `PROJECT/NAME`, as the pickers label it.
+//! spawned the caller's task), `stop_task` (a plain archive, never
+//! force-archive), `resume_task` (`actions::act("resume", ...)` for an
+//! archived task), `search_threads` (`atuin::search` mapped to Switchyard
+//! tasks), and `read_thread` (`atuin::show_thread` normalized transcript).
+//! They name a task `PROJECT/NAME`, as the pickers label it.
 //!
 //! `spawn_task` records who spawned the task when it knows how to reach them:
 //! - A Rex caller, from its `parent_session` / `parent_block` arguments, else
@@ -41,6 +44,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use switchyard_core::atuin::{self, Store};
 use switchyard_core::hosts::{Project, catalog};
 use switchyard_core::launch::{Parent, Placement, launch_text};
 use switchyard_core::naming::{
@@ -68,13 +72,22 @@ const TAILSCALE_RETRY: Duration = Duration::from_secs(30);
 /// Transcript entries `read_task` returns by default, and at most.
 const READ_DEFAULT: usize = 20;
 const READ_MAX: usize = 150;
+/// Search hits `search_threads` returns per store by default, and at most.
+const SEARCH_DEFAULT: usize = atuin::DEFAULT_SEARCH_LIMIT;
+const SEARCH_MAX: usize = 100;
+/// Transcript entries `read_thread` returns by default, and at most.
+const THREAD_DEFAULT: usize = atuin::DEFAULT_THREAD_ENTRIES;
+const THREAD_MAX: usize = atuin::MAX_THREAD_ENTRIES;
 
 const INSTRUCTIONS: &str = "Switchyard runs agent tasks: each is an agent (claude, pi or agy, the Antigravity CLI) in a Rex tab, \
 working in a Git worktree of a catalog project on one of John's hosts. Tasks are named PROJECT/NAME. \
 list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
 list_projects shows the catalog projects you can spawn into; \
 spawn_task starts a task with a first prompt; read_task shows what its agent has been saying; \
-message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes). \
+message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes); \
+resume_task reopens an archived task (by PROJECT/NAME or by session_id + store). \
+search_threads searches past agent transcripts in Atuin Threads (keeping personal and work stores separate) and maps hits back to Switchyard tasks; \
+read_thread reads a specific Atuin thread's normalized transcript (requiring an explicit store). \
 A task spawned with your parent_block or parent_url tells you when its agent stops working (typed into your Rex tab, or POSTed as JSON to parent_url), so wait for that rather than polling; \
 a spawned agent can write to its spawner with message_parent.";
 
@@ -551,7 +564,65 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": { "task": task }, "required": ["task"] },
             "annotations": { "destructiveHint": true },
         },
+        search_threads_tool(),
+        read_thread_tool(),
+        resume_task_tool(),
     ])
+}
+
+fn search_threads_tool() -> Value {
+    json!({
+        "name": "search_threads",
+        "description": "Search past agent transcripts in Atuin Threads (personal and/or work stores, \
+    queried read-only in separate processes) and map hits back to Switchyard tasks. \
+    Highlight ranges (title_matches, snippet_matches) are UTF-16 code-unit [start, end] pairs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string", "description": "Search query (words and quoted \"exact phrases\")." },
+                "store": { "type": "string", "enum": ["all", "personal", "work"], "default": "all", "description": "Which Atuin store(s) to search: personal (atuin), work (atuin-work), or all (both)." },
+                "harness": { "type": "string", "enum": ["claude", "pi"], "description": "Optional harness filter (claude or pi)." },
+                "limit": { "type": "integer", "minimum": 1, "maximum": SEARCH_MAX, "default": SEARCH_DEFAULT, "description": "Maximum hits returned per store." },
+            },
+            "required": ["query"],
+        },
+        "annotations": { "readOnlyHint": true },
+    })
+}
+
+fn read_thread_tool() -> Value {
+    json!({
+        "name": "read_thread",
+        "description": "Read a specific Atuin thread's metadata and normalized transcript entries \
+    (user, assistant, tool, note). Requires an explicit store (personal or work) and never guesses across stores.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "store": { "type": "string", "enum": ["personal", "work"], "description": "Explicit Atuin store (personal or work)." },
+                "id": { "type": "string", "description": "Thread atuin_id or agent session_id." },
+                "entries": { "type": "integer", "minimum": 1, "maximum": THREAD_MAX, "default": THREAD_DEFAULT, "description": "Maximum transcript entries returned." },
+                "around": { "type": "integer", "minimum": 0, "description": "Optional message_index from search_threads to center the returned window around (when omitted, returns the last entries)." },
+            },
+            "required": ["store", "id"],
+        },
+        "annotations": { "readOnlyHint": true },
+    })
+}
+
+fn resume_task_tool() -> Value {
+    json!({
+        "name": "resume_task",
+        "description": "Resume an archived Switchyard task, reopening its worktree and agent session \
+    in a Rex tab on its host. Identify the task by PROJECT/NAME (task) or by (session_id + store).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": { "type": "string", "description": "Archived Switchyard task as PROJECT/NAME (or unique NAME)." },
+                "session_id": { "type": "string", "description": "Agent session_id of an archived Switchyard task (must be paired with store)." },
+                "store": { "type": "string", "enum": ["personal", "work"], "description": "Explicit Atuin store (personal or work) when resuming by session_id." },
+            },
+        },
+    })
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -609,7 +680,423 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
             let _ = endpoint.asks.refresh.send("mcp");
             result.map(|msg| json!({ "message": msg }))
         }
+        "search_threads" => search_threads(args, endpoint),
+        "read_thread" => read_thread(args, endpoint),
+        "resume_task" => resume_task(args, endpoint),
         _ => Err(format!("unknown tool {name}")),
+    }
+}
+
+fn parse_usize_arg(
+    args: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> Result<usize, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| format!("{key} must be a non-negative integer"))?;
+            Ok(usize::try_from(n).unwrap_or(usize::MAX).clamp(min, max))
+        }
+    }
+}
+
+fn parse_opt_usize_arg(args: &Value, key: &str) -> Result<Option<usize>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let n = v
+                .as_u64()
+                .ok_or_else(|| format!("{key} must be a non-negative integer"))?;
+            Ok(Some(usize::try_from(n).unwrap_or(usize::MAX)))
+        }
+    }
+}
+
+fn parse_search_stores(args: &Value) -> Result<Vec<Store>, String> {
+    match opt_arg(args, "store").unwrap_or("all") {
+        "all" => Ok(Store::ALL.to_vec()),
+        "personal" => Ok(vec![Store::Personal]),
+        "work" => Ok(vec![Store::Work]),
+        other => Err(format!(
+            "invalid store {other}: expected all, personal, or work"
+        )),
+    }
+}
+
+fn parse_explicit_store(value: &str) -> Result<Store, String> {
+    Store::from_label(value)
+        .ok_or_else(|| format!("invalid store {value}: expected personal or work"))
+}
+
+/// All registry tasks (open and ended), enriched with live status from the
+/// server's snapshot when available.
+fn all_tasks(endpoint: &Endpoint) -> Result<Vec<Value>, String> {
+    let snap = endpoint.shared.lock().snapshot(Instant::now());
+    let snap_tasks = snap["tasks"].as_array().cloned();
+    match load_tasks() {
+        Ok(registry) => Ok(merge_live_status(
+            registry,
+            snap_tasks.as_deref().unwrap_or(&[]),
+        )),
+        Err(e) => snap_tasks.ok_or(e),
+    }
+}
+
+/// Copy live status fields (`status`, `status_msg`, `status_at`, `wake_at`)
+/// from snapshot tasks onto matching open registry tasks.
+fn merge_live_status(mut registry: Vec<Value>, snap_tasks: &[Value]) -> Vec<Value> {
+    if snap_tasks.is_empty() {
+        return registry;
+    }
+    for task in &mut registry {
+        if !task["ended_at"].is_null() {
+            continue;
+        }
+        let Some(window) = task["window_id"].as_str().filter(|w| !w.is_empty()) else {
+            continue;
+        };
+        if let Some(live) = snap_tasks
+            .iter()
+            .find(|s| s["ended_at"].is_null() && in_window(s, window))
+        {
+            for key in ["status", "status_msg", "status_at", "wake_at"] {
+                if let Some(v) = live.get(key).filter(|v| !v.is_null()) {
+                    task[key] = v.clone();
+                }
+            }
+        }
+    }
+    registry
+}
+
+fn task_timestamp(task: &Value) -> u64 {
+    task["ended_at"]
+        .as_u64()
+        .or_else(|| task["status_at"].as_u64().filter(|&at| at > 0))
+        .or_else(|| task["created_at"].as_u64())
+        .unwrap_or(0)
+}
+
+/// Match an Atuin thread (`store`, `session_id`) to its best Switchyard task
+/// registry record, enforcing store/profile separation (`personal` vs `work`).
+///
+/// Open tasks beat ended tasks; newer timestamps break ties.
+fn match_registry_task<'a>(
+    store: Store,
+    session_id: &str,
+    tasks: &'a [Value],
+) -> Option<&'a Value> {
+    if session_id.is_empty() {
+        return None;
+    }
+    tasks
+        .iter()
+        .filter(|t| {
+            let agent_session = t["agent_session"].as_str().unwrap_or("");
+            let profile = t["profile"].as_str().unwrap_or("");
+            !agent_session.is_empty()
+                && agent_session == session_id
+                && store.matches_profile(profile)
+        })
+        .max_by_key(|t| (t["ended_at"].is_null(), task_timestamp(t)))
+}
+
+/// Compact Switchyard task metadata attached to `search_threads` hits and
+/// `read_thread` responses.
+fn thread_task_summary(task: &Value) -> Value {
+    let open = task["ended_at"].is_null();
+    let (state, status, ended_at, resumable) = if open {
+        (
+            "open",
+            task["status"].as_str().map_or(Value::Null, Value::from),
+            Value::Null,
+            false,
+        )
+    } else {
+        let orphaned = task["ended_reason"].as_str() == Some("orphaned");
+        (
+            "archived",
+            Value::Null,
+            task["ended_at"].as_u64().map_or(Value::Null, Value::from),
+            !orphaned,
+        )
+    };
+    json!({
+        "task": label(task),
+        "project": task["project"].as_str().unwrap_or(""),
+        "name": task["name"].as_str().unwrap_or(""),
+        "host": task["host"].as_str().unwrap_or(""),
+        "state": state,
+        "status": status,
+        "branch": task["branch"].as_str().unwrap_or(""),
+        "ended_at": ended_at,
+        "resumable": resumable,
+    })
+}
+
+fn search_threads(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+    search_threads_with(
+        args,
+        || all_tasks(endpoint).unwrap_or_default(),
+        atuin::search,
+    )
+}
+
+fn search_threads_with(
+    args: &Value,
+    tasks: impl FnOnce() -> Vec<Value>,
+    search: impl FnOnce(&[Store], &str, Option<&str>, usize) -> atuin::SearchResult,
+) -> Result<Value, String> {
+    let query = str_arg(args, "query")?;
+    let stores = parse_search_stores(args)?;
+    let harness = opt_arg(args, "harness");
+    if let Some(h) = harness
+        && !matches!(h, "claude" | "pi")
+    {
+        return Err(format!("invalid harness {h}: expected claude or pi"));
+    }
+    let limit = parse_usize_arg(args, "limit", SEARCH_DEFAULT, 1, SEARCH_MAX)?;
+    let result = search(&stores, query, harness, limit);
+    let registry = tasks();
+    let hits: Vec<Value> = result
+        .hits
+        .into_iter()
+        .map(|hit| {
+            let title_matches = atuin::byte_ranges_to_utf16(&hit.title, &hit.title_matches);
+            let snippet_matches = atuin::byte_ranges_to_utf16(&hit.snippet, &hit.snippet_matches);
+            let mut item = json!({
+                "store": hit.store.label(),
+                "harness": hit.harness,
+                "session_id": hit.session_id,
+                "atuin_id": hit.atuin_id,
+                "cwd": hit.cwd,
+                "git_branch": hit.git_branch,
+                "model": hit.model,
+                "started_at": hit.started_at,
+                "updated_at": hit.updated_at,
+                "message_count": hit.message_count,
+                "title": hit.title,
+                "title_matches": title_matches,
+                "snippet": hit.snippet,
+                "snippet_matches": snippet_matches,
+                "first_prompt": hit.first_prompt,
+                "last_reply": hit.last_reply,
+                "message_index": hit.message_index,
+                "score": hit.score,
+            });
+            if let Some(task) = match_registry_task(hit.store, &hit.session_id, &registry) {
+                item["task"] = thread_task_summary(task);
+            }
+            item
+        })
+        .collect();
+    let errors: Vec<Value> = result
+        .errors
+        .into_iter()
+        .map(|e| {
+            json!({
+                "store": e.store.label(),
+                "message": e.message,
+                "missing": e.missing,
+            })
+        })
+        .collect();
+    let store_labels: Vec<&'static str> = stores.iter().map(|s| s.label()).collect();
+    Ok(json!({
+        "query": query,
+        "stores": store_labels,
+        "hits": hits,
+        "errors": errors,
+    }))
+}
+
+fn read_thread(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+    read_thread_with(
+        args,
+        || all_tasks(endpoint).unwrap_or_default(),
+        atuin::show_thread,
+    )
+}
+
+fn read_thread_with(
+    args: &Value,
+    tasks: impl FnOnce() -> Vec<Value>,
+    show: impl FnOnce(Store, &str) -> Result<atuin::ThreadDetail, String>,
+) -> Result<Value, String> {
+    let store = parse_explicit_store(str_arg(args, "store")?)?;
+    let id = str_arg(args, "id")?;
+    if id.starts_with('-') {
+        return Err(format!("{id:?} isn't a valid thread ID"));
+    }
+    let wanted = parse_usize_arg(args, "entries", THREAD_DEFAULT, 1, THREAD_MAX)?;
+    let around = parse_opt_usize_arg(args, "around")?;
+    let detail = show(store, id)?;
+    let total_entries = detail.entries.len();
+    let (entries, truncated) =
+        atuin::slice_thread_entries(&detail.entries, wanted, around, atuin::MAX_THREAD_BYTES);
+    let transcript: Vec<Value> = entries
+        .into_iter()
+        .map(|e| {
+            json!({
+                "kind": e.kind,
+                "text": e.text,
+                "message_index": e.message_index,
+                "timestamp": e.timestamp,
+            })
+        })
+        .collect();
+    let registry = tasks();
+    let mut out = json!({
+        "store": detail.store.label(),
+        "harness": detail.harness,
+        "session_id": detail.session_id,
+        "atuin_id": detail.atuin_id,
+        "title": detail.title,
+        "cwd": detail.cwd,
+        "git_branch": detail.git_branch,
+        "model": detail.model,
+        "started_at": detail.started_at,
+        "updated_at": detail.updated_at,
+        "message_count": detail.message_count,
+        "total_entries": total_entries,
+        "truncated": truncated,
+        "transcript": transcript,
+    });
+    if let Some(task) = match_registry_task(detail.store, &detail.session_id, &registry) {
+        out["task"] = thread_task_summary(task);
+    }
+    Ok(out)
+}
+
+fn resume_task(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+    resume_task_with(
+        args,
+        || all_tasks(endpoint),
+        |host, session, window| actions::act("resume", host, session, window),
+        || {
+            let _ = endpoint.asks.refresh.send("mcp");
+        },
+    )
+}
+
+fn resume_task_with(
+    args: &Value,
+    tasks: impl FnOnce() -> Result<Vec<Value>, String>,
+    resume: impl FnOnce(&str, &str, &str) -> Result<String, String>,
+    refresh: impl FnOnce(),
+) -> Result<Value, String> {
+    let wanted_task = opt_arg(args, "task");
+    let session_id = opt_arg(args, "session_id");
+    let store_arg = opt_arg(args, "store");
+
+    let lookup = match (wanted_task, session_id, store_arg) {
+        (Some(_), Some(_), _) => return Err("cannot set both task and session_id".into()),
+        (Some(name), None, _) => ResumeLookup::Task(name),
+        (None, Some(sid), Some(st)) => ResumeLookup::Session(sid, parse_explicit_store(st)?),
+        (None, Some(_), None) => {
+            return Err("store is required when resuming by session_id".into());
+        }
+        (None, None, Some(_)) => {
+            return Err("session_id is required when store is given (or pass task)".into());
+        }
+        (None, None, None) => {
+            return Err("task or (session_id and store) is required".into());
+        }
+    };
+
+    let registry = tasks()?;
+    let task = find_archived_task(lookup, &registry)?;
+    if task["ended_reason"].as_str() == Some("orphaned") {
+        return Err(format!(
+            "{} is an orphan worktree with no agent session to resume",
+            label(&task)
+        ));
+    }
+    let (host, session, window) = tab(&task);
+    let result = resume(host, session, window);
+    refresh();
+    result.map(|msg| {
+        json!({
+            "task": label(&task),
+            "host": host,
+            "message": msg,
+        })
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ResumeLookup<'a> {
+    Task(&'a str),
+    Session(&'a str, Store),
+}
+
+fn find_archived_task(lookup: ResumeLookup<'_>, tasks: &[Value]) -> Result<Value, String> {
+    match lookup {
+        ResumeLookup::Task(wanted) => {
+            let matches_name = |t: &&Value| match wanted.split_once('/') {
+                Some(_) => label(t) == wanted,
+                None => t["name"].as_str() == Some(wanted),
+            };
+            if let Some(open) = tasks
+                .iter()
+                .filter(|t| t["ended_at"].is_null())
+                .find(matches_name)
+            {
+                return Err(format!("task {} is already open", label(open)));
+            }
+            let archived: Vec<&Value> = tasks
+                .iter()
+                .filter(|t| !t["ended_at"].is_null())
+                .filter(matches_name)
+                .collect();
+            if archived.is_empty() {
+                return Err(format!("no archived task {wanted}"));
+            }
+            // Disallow ambiguous bare NAME across different projects.
+            if !wanted.contains('/') {
+                let mut distinct: Vec<String> = archived.iter().map(|t| label(t)).collect();
+                distinct.sort();
+                distinct.dedup();
+                if distinct.len() > 1 {
+                    return Err(format!(
+                        "{wanted} names {} archived tasks ({}); give PROJECT/NAME",
+                        distinct.len(),
+                        distinct.join(", ")
+                    ));
+                }
+            }
+            archived
+                .into_iter()
+                .max_by_key(|t| task_timestamp(t))
+                .cloned()
+                .ok_or_else(|| format!("no archived task {wanted}"))
+        }
+        ResumeLookup::Session(sid, store) => {
+            let matching: Vec<&Value> = tasks
+                .iter()
+                .filter(|t| {
+                    let agent_session = t["agent_session"].as_str().unwrap_or("");
+                    let profile = t["profile"].as_str().unwrap_or("");
+                    !agent_session.is_empty()
+                        && agent_session == sid
+                        && store.matches_profile(profile)
+                })
+                .collect();
+            if let Some(open) = matching.iter().find(|t| t["ended_at"].is_null()) {
+                return Err(format!("task {} is already open", label(open)));
+            }
+            matching
+                .into_iter()
+                .filter(|t| !t["ended_at"].is_null())
+                .max_by_key(|t| task_timestamp(t))
+                .cloned()
+                .ok_or_else(|| format!("no archived task for {} session {sid}", store.label()))
+        }
     }
 }
 
@@ -1580,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_seven_tools() {
+    fn lists_ten_tools() {
         let e = endpoint();
         let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
         let reply = route(&post(&body.to_string()), &e).1.unwrap();
@@ -1595,7 +2082,10 @@ mod tests {
                 "read_task",
                 "message_task",
                 "message_parent",
-                "stop_task"
+                "stop_task",
+                "search_threads",
+                "read_thread",
+                "resume_task",
             ]
         );
         let list_tasks = tools.iter().find(|t| t["name"] == "list_tasks").unwrap();
@@ -1631,8 +2121,27 @@ mod tests {
             spawn["inputSchema"]["required"],
             json!(["project", "prompt"])
         );
+        let search = tools
+            .iter()
+            .find(|t| t["name"] == "search_threads")
+            .unwrap();
+        assert_eq!(search["annotations"]["readOnlyHint"], true);
+        assert_eq!(search["inputSchema"]["required"], json!(["query"]));
+        let read_thread = tools.iter().find(|t| t["name"] == "read_thread").unwrap();
+        assert_eq!(read_thread["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            read_thread["inputSchema"]["required"],
+            json!(["store", "id"])
+        );
+        let resume = tools.iter().find(|t| t["name"] == "resume_task").unwrap();
+        assert!(resume["inputSchema"]["properties"]["task"].is_object());
+        assert!(resume["inputSchema"]["properties"]["session_id"].is_object());
+        assert!(resume["inputSchema"]["properties"]["store"].is_object());
         assert!(INSTRUCTIONS.contains("list_projects"));
         assert!(INSTRUCTIONS.contains("parent_url"));
+        assert!(INSTRUCTIONS.contains("search_threads"));
+        assert!(INSTRUCTIONS.contains("read_thread"));
+        assert!(INSTRUCTIONS.contains("resume_task"));
     }
 
     #[test]
@@ -1787,5 +2296,436 @@ mod tests {
         let reply = route(&post(&body.to_string()), &e).1.unwrap();
         assert_eq!(reply["result"]["isError"], true);
         assert_eq!(reply["result"]["content"][0]["text"], "text is required");
+    }
+
+    #[test]
+    fn merge_live_status_enriches_open_registry_tasks_without_touching_ended() {
+        let registry = vec![
+            json!({
+                "project": "switchyard",
+                "name": "open-one",
+                "window_id": "w1",
+                "status": "idle",
+                "ended_at": null,
+            }),
+            json!({
+                "project": "switchyard",
+                "name": "ended-one",
+                "window_id": "w2",
+                "ended_at": 1_700_000_000,
+            }),
+        ];
+        let snap = vec![
+            json!({
+                "window_id": "w1",
+                "status": "working",
+                "status_msg": "thinking",
+                "status_at": 1_700_000_100,
+                "ended_at": null,
+            }),
+            json!({
+                "window_id": "w2",
+                "status": "working",
+                "ended_at": null,
+            }),
+        ];
+        let merged = merge_live_status(registry, &snap);
+        assert_eq!(merged[0]["status"], "working");
+        assert_eq!(merged[0]["status_msg"], "thinking");
+        assert_eq!(merged[0]["status_at"], 1_700_000_100);
+        assert!(merged[1]["status"].is_null());
+    }
+
+    fn sample_hit(store: Store, session_id: &str, title: &str, snippet: &str) -> atuin::SearchHit {
+        let mcp_byte = title.find("MCP").unwrap();
+        let sn_byte = snippet.find("mcp").unwrap();
+        atuin::SearchHit {
+            store,
+            harness: "claude".into(),
+            session_id: session_id.into(),
+            atuin_id: format!("atuin-{session_id}"),
+            cwd: "/repo".into(),
+            git_branch: "feature/x".into(),
+            model: "claude-opus-5-5".into(),
+            started_at: 1_700_000_000,
+            updated_at: 1_700_000_100,
+            message_count: 12,
+            title: title.into(),
+            title_matches: vec![(mcp_byte, mcp_byte + 3)],
+            snippet: snippet.into(),
+            snippet_matches: vec![(sn_byte, sn_byte + 3)],
+            first_prompt: "prompt".into(),
+            last_reply: "reply".into(),
+            message_index: Some(7),
+            score: 4.5,
+        }
+    }
+
+    fn sample_search_registry() -> Vec<Value> {
+        vec![
+            json!({
+                "project": "switchyard", "name": "old-run", "host": "omarchy",
+                "profile": "personal", "branch": "feature/old", "agent_session": "s-open",
+                "ended_at": 1_700_000_010, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "switchyard", "name": "live-run", "host": "omarchy",
+                "profile": "personal", "branch": "feature/live", "status": "working",
+                "status_at": 1_700_000_020, "agent_session": "s-open", "ended_at": null,
+            }),
+            json!({
+                "project": "amfaro", "name": "work-fix", "host": "mac",
+                "profile": "work", "branch": "feature/work-fix", "agent_session": "s-shared",
+                "ended_at": 1_700_000_050, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "switchyard", "name": "orphan-one", "host": "omarchy",
+                "profile": "", "branch": "feature/orphan", "agent_session": "s-orphan",
+                "ended_at": 1_700_000_060, "ended_reason": "orphaned",
+            }),
+        ]
+    }
+
+    #[test]
+    fn search_threads_maps_tasks_enforces_profile_isolation_and_utf16_matches() {
+        let mk = |store, sid| sample_hit(store, sid, "🚀 MCP search", "…crates/mcp.rs");
+        let out = search_threads_with(
+            &json!({ "query": "mcp", "store": "all", "harness": "claude", "limit": 20 }),
+            sample_search_registry,
+            |stores, query, harness, limit| {
+                assert_eq!(stores, &[Store::Personal, Store::Work]);
+                assert_eq!((query, harness, limit), ("mcp", Some("claude"), 20));
+                atuin::SearchResult {
+                    hits: vec![
+                        mk(Store::Personal, "s-open"),
+                        mk(Store::Personal, "s-shared"),
+                        mk(Store::Work, "s-shared"),
+                        mk(Store::Personal, "s-orphan"),
+                    ],
+                    errors: vec![atuin::StoreError {
+                        store: Store::Work,
+                        message: "atuin-work isn't installed".into(),
+                        missing: true,
+                    }],
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out["query"], "mcp");
+        assert_eq!(out["stores"], json!(["personal", "work"]));
+        let hits = out["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 4);
+        assert_eq!(hits[0]["title_matches"], json!([[3, 6]]));
+        assert_eq!(hits[0]["snippet_matches"], json!([[8, 11]]));
+        assert_eq!(
+            hits[0]["task"],
+            json!({
+                "task": "switchyard/live-run", "project": "switchyard", "name": "live-run",
+                "host": "omarchy", "state": "open", "status": "working",
+                "branch": "feature/live", "ended_at": null, "resumable": false,
+            })
+        );
+        // Profile isolation: personal hit must not map to work task.
+        assert!(hits[1].get("task").is_none());
+        assert_eq!(
+            hits[2]["task"],
+            json!({
+                "task": "amfaro/work-fix", "project": "amfaro", "name": "work-fix",
+                "host": "mac", "state": "archived", "status": null,
+                "branch": "feature/work-fix", "ended_at": 1_700_000_050, "resumable": true,
+            })
+        );
+        assert_eq!(hits[3]["task"]["state"], "archived");
+        assert_eq!(hits[3]["task"]["resumable"], false);
+        assert_eq!(
+            out["errors"],
+            json!([{ "store": "work", "message": "atuin-work isn't installed", "missing": true }])
+        );
+    }
+
+    #[test]
+    fn search_threads_validates_query_store_harness_and_limit() {
+        let noop = |_: &[Store], _: &str, _: Option<&str>, _: usize| atuin::SearchResult::default();
+        assert!(
+            search_threads_with(&json!({}), Vec::new, noop)
+                .unwrap_err()
+                .contains("query is required")
+        );
+        assert!(
+            search_threads_with(&json!({ "query": "hi", "store": "notes" }), Vec::new, noop)
+                .unwrap_err()
+                .contains("invalid store")
+        );
+        assert!(
+            search_threads_with(&json!({ "query": "hi", "harness": "agy" }), Vec::new, noop)
+                .unwrap_err()
+                .contains("invalid harness")
+        );
+        assert!(
+            search_threads_with(&json!({ "query": "hi", "limit": -1 }), Vec::new, noop)
+                .unwrap_err()
+                .contains("limit")
+        );
+        // Clamp limit to 1..=100 and single store routing
+        let out = search_threads_with(
+            &json!({ "query": "hi", "store": "work", "limit": 999 }),
+            Vec::new,
+            |stores, _, _, limit| {
+                assert_eq!(stores, &[Store::Work]);
+                assert_eq!(limit, 100);
+                atuin::SearchResult::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out["stores"], json!(["work"]));
+    }
+
+    #[test]
+    fn read_thread_windows_entries_around_index_and_attaches_task() {
+        let detail = atuin::ThreadDetail {
+            store: Store::Personal,
+            harness: "claude".into(),
+            session_id: "sess-abc".into(),
+            atuin_id: "atuin-xyz".into(),
+            title: "Build MCP".into(),
+            cwd: "/repo".into(),
+            git_branch: "feature/mcp".into(),
+            model: "claude-opus-5-5".into(),
+            started_at: 1_700_000_000,
+            updated_at: 1_700_000_500,
+            message_count: 10,
+            entries: [0, 2, 4, 6, 8]
+                .into_iter()
+                .map(|i| atuin::ThreadEntry {
+                    kind: if i % 4 == 0 { "user" } else { "assistant" },
+                    text: format!("entry-{i}"),
+                    message_index: i,
+                    timestamp: Some(format!("2026-11-26T00:00:0{i}Z")),
+                })
+                .collect(),
+        };
+        let registry = vec![json!({
+            "project": "switchyard",
+            "name": "mcp",
+            "host": "omarchy",
+            "profile": "personal",
+            "branch": "feature/mcp",
+            "agent_session": "sess-abc",
+            "ended_at": 1_700_000_600,
+            "ended_reason": "archived",
+        })];
+
+        let out = read_thread_with(
+            &json!({ "store": "personal", "id": "atuin-xyz", "entries": 3, "around": 4 }),
+            || registry.clone(),
+            |store, id| {
+                assert_eq!(store, Store::Personal);
+                assert_eq!(id, "atuin-xyz");
+                Ok(detail.clone())
+            },
+        )
+        .unwrap();
+        assert_eq!(out["store"], "personal");
+        assert_eq!(out["total_entries"], 5);
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["task"]["task"], "switchyard/mcp");
+        assert_eq!(out["task"]["state"], "archived");
+        assert_eq!(out["task"]["resumable"], true);
+        let transcript = out["transcript"].as_array().unwrap();
+        let indices: Vec<u64> = transcript
+            .iter()
+            .map(|e| e["message_index"].as_u64().unwrap())
+            .collect();
+        assert_eq!(indices, vec![2, 4, 6]);
+
+        // Work store must not attach personal task
+        let mut work_detail = detail;
+        work_detail.store = Store::Work;
+        let out_work = read_thread_with(
+            &json!({ "store": "work", "id": "atuin-xyz" }),
+            || registry,
+            |store, _| {
+                assert_eq!(store, Store::Work);
+                Ok(work_detail)
+            },
+        )
+        .unwrap();
+        assert!(out_work.get("task").is_none());
+        assert_eq!(out_work["truncated"], false);
+        assert_eq!(out_work["transcript"].as_array().unwrap().len(), 5);
+    }
+
+    #[test]
+    fn read_thread_requires_explicit_store_and_validates_args() {
+        let never = |_: Store, _: &str| -> Result<atuin::ThreadDetail, String> {
+            panic!("should fail validation before calling atuin")
+        };
+        assert!(
+            read_thread_with(&json!({ "id": "abc" }), Vec::new, never)
+                .unwrap_err()
+                .contains("store is required")
+        );
+        assert!(
+            read_thread_with(&json!({ "store": "all", "id": "abc" }), Vec::new, never)
+                .unwrap_err()
+                .contains("invalid store")
+        );
+        assert!(
+            read_thread_with(&json!({ "store": "personal" }), Vec::new, never)
+                .unwrap_err()
+                .contains("id is required")
+        );
+        assert!(
+            read_thread_with(
+                &json!({ "store": "personal", "id": "--flag" }),
+                Vec::new,
+                never
+            )
+            .unwrap_err()
+            .contains("valid thread ID")
+        );
+        assert!(
+            read_thread_with(
+                &json!({ "store": "personal", "id": "abc", "around": -1 }),
+                Vec::new,
+                never
+            )
+            .unwrap_err()
+            .contains("around")
+        );
+    }
+
+    fn sample_resume_registry() -> Vec<Value> {
+        vec![
+            json!({
+                "project": "switchyard", "name": "open-task", "host": "omarchy",
+                "session_id": "rex-s1", "window_id": "w-open", "profile": "personal",
+                "agent_session": "agent-open", "ended_at": null,
+            }),
+            json!({
+                "project": "switchyard", "name": "done-task", "host": "omarchy",
+                "session_id": "rex-s2", "window_id": "w-old", "profile": "personal",
+                "agent_session": "agent-done", "ended_at": 1_700_000_010, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "switchyard", "name": "done-task", "host": "miller",
+                "session_id": "rex-s3", "window_id": "w-new", "profile": "personal",
+                "agent_session": "agent-done", "ended_at": 1_700_000_090, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "amfaro", "name": "work-task", "host": "mac",
+                "session_id": "rex-sw", "window_id": "w-work", "profile": "work",
+                "agent_session": "agent-work", "ended_at": 1_700_000_050, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "switchyard", "name": "orphan", "host": "omarchy",
+                "session_id": "", "window_id": "w-orphan", "profile": "personal",
+                "agent_session": "agent-orphan", "ended_at": 1_700_000_070, "ended_reason": "orphaned",
+            }),
+            json!({
+                "project": "other", "name": "dup", "host": "omarchy",
+                "session_id": "s-d1", "window_id": "w-d1", "profile": "personal",
+                "ended_at": 1_700_000_010, "ended_reason": "archived",
+            }),
+            json!({
+                "project": "switchyard", "name": "dup", "host": "omarchy",
+                "session_id": "s-d2", "window_id": "w-d2", "profile": "personal",
+                "ended_at": 1_700_000_020, "ended_reason": "archived",
+            }),
+        ]
+    }
+
+    #[test]
+    fn resume_task_by_label_and_by_session_store_triggers_refresh() {
+        let mut refreshed = false;
+        let out = resume_task_with(
+            &json!({ "task": "switchyard/done-task" }),
+            || Ok(sample_resume_registry()),
+            |host, session, window| {
+                assert_eq!((host, session, window), ("miller", "rex-s3", "w-new"));
+                Ok("miller\trex-s3\tw-resumed".into())
+            },
+            || refreshed = true,
+        )
+        .unwrap();
+        assert!(refreshed);
+        assert_eq!(
+            out,
+            json!({
+                "task": "switchyard/done-task",
+                "host": "miller",
+                "message": "miller\trex-s3\tw-resumed",
+            })
+        );
+
+        let mut refreshed = false;
+        let out = resume_task_with(
+            &json!({ "session_id": "agent-work", "store": "work" }),
+            || Ok(sample_resume_registry()),
+            |host, session, window| {
+                assert_eq!((host, session, window), ("mac", "rex-sw", "w-work"));
+                Ok("mac\trex-sw\tw-work-2".into())
+            },
+            || refreshed = true,
+        )
+        .unwrap();
+        assert!(refreshed);
+        assert_eq!(out["task"], "amfaro/work-task");
+        assert_eq!(out["host"], "mac");
+    }
+
+    #[test]
+    fn resume_task_rejects_invalid_open_orphaned_and_ambiguous_inputs() {
+        let never_resume = |_: &str, _: &str, _: &str| -> Result<String, String> {
+            panic!("resume should not be called on error")
+        };
+        for (args, expected) in [
+            (
+                json!({ "session_id": "agent-work", "store": "personal" }),
+                "no archived task",
+            ),
+            (json!({}), "task or (session_id and store) is required"),
+            (
+                json!({ "session_id": "agent-done" }),
+                "store is required when resuming by session_id",
+            ),
+            (
+                json!({ "store": "personal" }),
+                "session_id is required when store is given",
+            ),
+            (
+                json!({ "task": "switchyard/done-task", "session_id": "agent-done", "store": "personal" }),
+                "cannot set both task and session_id",
+            ),
+            (
+                json!({ "session_id": "agent-done", "store": "all" }),
+                "invalid store",
+            ),
+            (json!({ "task": "switchyard/open-task" }), "already open"),
+            (
+                json!({ "session_id": "agent-open", "store": "personal" }),
+                "already open",
+            ),
+            (json!({ "task": "switchyard/missing" }), "no archived task"),
+            (json!({ "task": "switchyard/orphan" }), "orphan worktree"),
+            (
+                json!({ "session_id": "agent-orphan", "store": "personal" }),
+                "orphan worktree",
+            ),
+            (json!({ "task": "dup" }), "give PROJECT/NAME"),
+        ] {
+            let err = resume_task_with(
+                &args,
+                || Ok(sample_resume_registry()),
+                never_resume,
+                || panic!("refresh should not be called on lookup failure"),
+            )
+            .unwrap_err();
+            assert!(
+                err.contains(expected),
+                "for args {args}: expected error containing {expected:?}, got {err:?}"
+            );
+        }
     }
 }
