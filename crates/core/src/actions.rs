@@ -63,7 +63,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::hosts::catalog;
-use crate::images::carry;
+use crate::images::carry_from;
 use crate::launch::launch;
 use crate::naming::{HARNESSES, branch_and_slug, harness_spec, models, split_harness};
 use crate::prompts::{discard_prompt, fetch_prompt, parse_prompt_ref};
@@ -864,6 +864,16 @@ pub fn message_from(
     window: &str,
     text: &str,
 ) -> Result<String, String> {
+    message_from_hosts(&[from], host, session, window, text)
+}
+
+fn message_from_hosts(
+    sources: &[&str],
+    host: &str,
+    session: &str,
+    window: &str,
+    text: &str,
+) -> Result<String, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("nothing to send".into());
@@ -887,7 +897,7 @@ pub fn message_from(
             "{label} is waiting on a prompt; answer it in its tab"
         ));
     }
-    let text = carry(from, host, text)?;
+    let text = carry_from(sources, host, text)?;
     for step in typing(&text) {
         match step {
             Typing::Text(chunk) => rex(host, &["send", "-s", session, "-b", block, "--", &chunk])?,
@@ -958,18 +968,38 @@ pub fn message_ref(
     prompt_ref: &str,
 ) -> Result<String, String> {
     if crate::server::remote_url().is_some() {
+        let local = local_label();
         let (from, _) = parse_prompt_ref(prompt_ref)?;
-        if from == local_label() {
+        if from == local {
             let text = fetch_prompt(prompt_ref)?;
             let sent = crate::server::remote_message(host, session, window, &text, Some(from))?;
             discard_prompt(prompt_ref);
             return Ok(sent);
         }
-        return crate::server::remote_message_ref(host, session, window, prompt_ref);
+        return crate::server::remote_message_ref(host, session, window, prompt_ref, Some(&local));
     }
+    message_ref_from(None, host, session, window, prompt_ref)
+}
+
+/// `message_ref` with an optional caller host (`caller`) used as a fallback
+/// source for pasted local image paths when the prompt file lives on another
+/// host.
+///
+/// # Errors
+///
+/// Fails as `message_ref` does.
+pub fn message_ref_from(
+    caller: Option<&str>,
+    host: &str,
+    session: &str,
+    window: &str,
+    prompt_ref: &str,
+) -> Result<String, String> {
     let text = fetch_prompt(prompt_ref)?;
     let (from, _) = parse_prompt_ref(prompt_ref)?;
-    let sent = message_from(from, host, session, window, &text)?;
+    let local = local_label();
+    let fallback = caller.unwrap_or(&local);
+    let sent = message_from_hosts(&[from, fallback], host, session, window, &text)?;
     discard_prompt(prompt_ref);
     Ok(sent)
 }

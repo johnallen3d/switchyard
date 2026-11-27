@@ -3,7 +3,7 @@
 
 use crate::autoname::{item_title, name_work};
 use crate::hosts::{AUTO, Project, catalog, choose_host};
-use crate::images::carry;
+use crate::images::carry_from;
 use crate::links::{FIZZY_BOARD_SH, Tracker, parse_ref, refs_in_text, tracker_or_fizzy};
 use crate::naming::{
     HARNESSES, branch_and_slug, default_harness, models, name_problem, split_harness,
@@ -167,7 +167,7 @@ pub fn launch(
             } else {
                 prompt_ref
             },
-            from_host: local_ref.map(|_| local.as_str()),
+            from_host: Some(local.as_str()),
             work_item,
         };
         return match crate::server::remote_launch(&req) {
@@ -185,6 +185,29 @@ pub fn launch(
             },
         };
     }
+    launch_from(
+        host, path, name, harness, prompt_ref, None, work_item, resume,
+    )
+}
+
+/// `launch` with an optional caller host (`from_host`) used as a fallback
+/// source for pasted local image paths when the prompt file itself lives on
+/// another host (e.g. a remote float invoked from the Mac).
+///
+/// # Errors
+///
+/// Fails as `launch` does.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_from(
+    host: &str,
+    path: &str,
+    name: &str,
+    harness: &str,
+    prompt_ref: Option<&str>,
+    from_host: Option<&str>,
+    work_item: Option<&str>,
+    resume: Option<(&str, &str)>,
+) -> Result<(String, String, String), String> {
     // Fetch the prompt first: without it the agent would start on nothing.
     let typed = prompt_ref.map(fetch_prompt).transpose()?;
     launch_with(
@@ -192,7 +215,7 @@ pub fn launch(
         path,
         name,
         harness,
-        Prompt::Ref(typed.as_deref().unwrap_or_default(), prompt_ref),
+        Prompt::Ref(typed.as_deref().unwrap_or_default(), prompt_ref, from_host),
         work_item,
         resume,
         Placement::default(),
@@ -317,9 +340,10 @@ pub fn launch_text_from(
 /// Where a launch's prompt comes from.
 #[derive(Clone, Copy)]
 enum Prompt<'a> {
-    /// A prompt file's text (see `prompts`) and its reference, or none; the
-    /// file is removed once the tab holds it.
-    Ref(&'a str, Option<&'a str>),
+    /// A prompt file's text (see `prompts`), its reference, and an optional
+    /// caller host for pasted files on the client machine; the prompt file is
+    /// removed once the tab holds it.
+    Ref(&'a str, Option<&'a str>, Option<&'a str>),
     Text(&'a str, Option<&'a str>),
 }
 
@@ -347,26 +371,31 @@ fn launch_with(
     // `task run` takes the whole spec; the registry keeps its parts.
     let spec = harness;
     let (harness, model) = split_harness(spec);
-    let (typed, prompt_ref, text_from) = match prompt {
-        Prompt::Ref(text, r) => (text.to_string(), r, None),
-        Prompt::Text(text, from) => (text.to_string(), None, from),
+    let (typed, prompt_ref, sources) = match prompt {
+        Prompt::Ref(text, r, caller) => {
+            let mut hosts = Vec::new();
+            if let Some((label, _)) = r.and_then(|r| parse_prompt_ref(r).ok()) {
+                hosts.push(label.to_string());
+            }
+            hosts.push(caller.map_or_else(local_label, String::from));
+            (text.to_string(), r, hosts)
+        }
+        Prompt::Text(text, from) => (
+            text.to_string(),
+            None,
+            vec![from.map_or_else(local_label, String::from)],
+        ),
     };
     if name.is_empty() && typed.trim().is_empty() && work_item.is_none() {
         return Err("name the work, or give it a prompt or work item to name it from".into());
     }
     let host = launch_host(host, &project, name)?;
     let host = host.as_str();
-    // Images pasted into the prompt are files on the prompt's host; give
-    // the agent copies on its own.
-    let from = text_from.map_or_else(
-        || {
-            prompt_ref
-                .and_then(|r| parse_prompt_ref(r).ok())
-                .map_or_else(local_label, |(label, _)| label.to_string())
-        },
-        String::from,
-    );
-    let typed = carry(&from, host, &typed)?;
+    // Images pasted into the prompt are files on the prompt's host (or the
+    // caller's host when the float ran remotely); give the agent copies on its
+    // own.
+    let source_refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let typed = carry_from(&source_refs, host, &typed)?;
 
     let cwd = launch_cwd(host, &project)?;
     let existing = project_session(host, &project)?;

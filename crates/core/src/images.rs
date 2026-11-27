@@ -1,15 +1,18 @@
 //! Images (and other files) pasted into a prompt box. Rex uploads a pasted
 //! or dropped image to the machine running the terminal, here the float's
-//! host, and pastes its shell-escaped path. That path means nothing on
-//! another host, and Rex removes uploads after a while, so before a prompt
-//! reaches an agent `carry` copies each upload to the agent's host and puts
-//! the copy's path in its place.
+//! host, and pastes its shell-escaped path. Clipboard managers and file
+//! drops (such as macOS screenshots copied as file URLs) can also paste a
+//! local image path directly without going through Rex's uploads directory.
+//! Those paths mean nothing on another host, and Rex removes uploads after a
+//! while, so before a prompt reaches an agent `carry` / `carry_from` copies
+//! each pasted image to the agent's host and puts the copy's path in its
+//! place.
 
 use std::io::Write;
 use std::ops::Range;
 use std::process::{Command, Stdio};
 
-use crate::rex::{host_bash, local_label, now, sh_quote, ssh};
+use crate::rex::{diagnose, host_bash, local_label, now, sh_quote, ssh};
 
 /// The directory Rex keeps uploads in, wherever its state lives (on macOS,
 /// `~/Library/Application Support/rex/uploads`).
@@ -18,17 +21,52 @@ const UPLOADS: &str = "/rex/uploads/";
 /// Where copies go on the agent's host, relative to its state directory;
 /// a copy is removed after `KEEP_DAYS`.
 pub const IMAGE_DIR: &str = "rex/spawn-images";
+const SPAWN_IMAGES: &str = "/rex/spawn-images/";
 const KEEP_DAYS: u32 = 7;
 
-/// A pasted upload path: where it sits in the text, and the path itself.
-#[derive(Debug, PartialEq)]
+/// File extensions treated as pasted local images when not in `UPLOADS`.
+const IMAGE_EXTS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "avif",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// A Rex-managed upload under `/rex/uploads/`: always copied (even when
+    /// `from == to`, because Rex expires uploads) and fails loudly if gone.
+    RexUpload,
+    /// Any other absolute image file path (e.g. a screenshot path pasted from
+    /// macOS): best-effort copied when found on a source host different from
+    /// the target host, left untouched otherwise.
+    LocalImage,
+}
+
+/// A pasted image or upload path: where it sits in the text, the unescaped
+/// path itself, and how strictly it should be handled.
+#[derive(Debug, PartialEq, Eq)]
 struct Upload {
     span: Range<usize>,
     path: String,
+    kind: Kind,
 }
 
-/// The upload paths pasted into `text`: whole words, shell-escaped or
-/// quoted as Rex pastes them, naming a file in Rex's uploads directory.
+/// Result of attempting to read a pasted file from a source host.
+enum ReadOutcome {
+    Found(Vec<u8>),
+    Missing,
+    Unreachable,
+}
+
+fn is_image_path(path: &str) -> bool {
+    let file = name(path);
+    let Some((stem, ext)) = file.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty() && IMAGE_EXTS.iter().any(|e| ext.eq_ignore_ascii_case(e))
+}
+
+/// The upload and image paths pasted into `text`: whole words, shell-escaped
+/// or quoted as terminals paste them, naming either a file in Rex's uploads
+/// directory or an absolute image file path.
 fn uploads(text: &str) -> Vec<Upload> {
     let mut found = Vec::new();
     let mut i = 0;
@@ -40,11 +78,21 @@ fn uploads(text: &str) -> Vec<Upload> {
             continue;
         }
         let (word, len) = shell_word(rest);
-        if word.starts_with('/') && word.contains(UPLOADS) && !word.ends_with('/') {
-            found.push(Upload {
-                span: i..i + len,
-                path: word,
-            });
+        if word.starts_with('/') && !word.ends_with('/') {
+            let kind = if word.contains(UPLOADS) {
+                Some(Kind::RexUpload)
+            } else if !word.contains(SPAWN_IMAGES) && is_image_path(&word) {
+                Some(Kind::LocalImage)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                found.push(Upload {
+                    span: i..i + len,
+                    path: word,
+                    kind,
+                });
+            }
         }
         i += len.max(1);
     }
@@ -98,30 +146,119 @@ fn shell_word(s: &str) -> (String, usize) {
     (word, s.len())
 }
 
-/// `text` with each upload pasted into it (a file on `from`) copied to
-/// `to` and replaced by the copy's path. Text without uploads comes back
-/// as it is. Fails, rather than hand the agent a path it can't open, when
-/// an upload is gone (Rex keeps them only for a while) or can't be copied.
+/// `text` with each upload or local image pasted into it (a file on `from`)
+/// copied to `to` and replaced by the copy's path. Text without pasted files
+/// comes back as it is. Fails, rather than hand the agent a path it can't
+/// open, when a Rex upload is gone (Rex keeps them only for a while) or can't
+/// be copied.
 ///
 /// # Errors
 ///
-/// Fails when an upload can't be read on `from` or written on `to`.
+/// Fails when a Rex upload can't be read on `from`, or when a pasted file
+/// can't be written on `to`.
 pub fn carry(from: &str, to: &str, text: &str) -> Result<String, String> {
+    carry_from(&[from], to, text)
+}
+
+/// Like `carry`, checking candidate source hosts in `sources` in order (e.g.
+/// the float's host first, then the client host that invoked the launch).
+///
+/// Rex uploads (`/rex/uploads/`) are always copied even when `source == to`
+/// (because Rex expires them) and fail if missing on every source host.
+/// Other absolute image paths are copied best-effort when present as a regular
+/// file on a source host different from `to`, and left untouched otherwise so
+/// paths that live on `to` or are mentioned in prose are not broken.
+///
+/// # Errors
+///
+/// Fails when a Rex upload can't be read on any source host, or when a copy
+/// can't be written on `to`.
+pub fn carry_from(sources: &[&str], to: &str, text: &str) -> Result<String, String> {
+    carry_with(sources, to, text, read_file, write)
+}
+
+fn carry_with<R, W>(
+    sources: &[&str],
+    to: &str,
+    text: &str,
+    mut read_fn: R,
+    mut write_fn: W,
+) -> Result<String, String>
+where
+    R: FnMut(&str, &str) -> ReadOutcome,
+    W: FnMut(&str, &str, &[u8]) -> Result<String, String>,
+{
     let found = uploads(text);
     if found.is_empty() {
         return Ok(text.to_string());
     }
+    let mut hosts: Vec<&str> = Vec::new();
+    for &host in sources {
+        if !host.is_empty() && !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
     let mut out = String::with_capacity(text.len());
     let mut last = 0;
     for (n, upload) in found.iter().enumerate() {
-        let bytes = read(from, &upload.path)?;
-        let copy = write(to, &copy_name(&upload.path, n), &bytes)?;
-        out.push_str(&text[last..upload.span.start]);
-        out.push_str(&copy);
-        last = upload.span.end;
+        let bytes = match upload.kind {
+            Kind::RexUpload => Some(read_required(&hosts, &upload.path, &mut read_fn)?),
+            Kind::LocalImage => read_optional(&hosts, to, &upload.path, &mut read_fn),
+        };
+        if let Some(bytes) = bytes {
+            let copy = write_fn(to, &copy_name(&upload.path, n), &bytes)?;
+            out.push_str(&text[last..upload.span.start]);
+            out.push_str(&copy);
+            last = upload.span.end;
+        }
     }
     out.push_str(&text[last..]);
     Ok(out)
+}
+
+fn read_required<R>(hosts: &[&str], path: &str, read_fn: &mut R) -> Result<Vec<u8>, String>
+where
+    R: FnMut(&str, &str) -> ReadOutcome,
+{
+    let mut first_err = None;
+    for &host in hosts {
+        match read_fn(host, path) {
+            ReadOutcome::Found(bytes) => return Ok(bytes),
+            ReadOutcome::Missing => {
+                first_err.get_or_insert_with(|| {
+                    format!("pasted file {} is gone; paste it again", name(path))
+                });
+            }
+            ReadOutcome::Unreachable => {
+                first_err.get_or_insert_with(|| {
+                    format!("can't reach {host} for pasted file {}", name(path))
+                });
+            }
+        }
+    }
+    Err(first_err.unwrap_or_else(|| format!("pasted file {} is gone; paste it again", name(path))))
+}
+
+fn read_optional<R>(hosts: &[&str], to: &str, path: &str, read_fn: &mut R) -> Option<Vec<u8>>
+where
+    R: FnMut(&str, &str) -> ReadOutcome,
+{
+    for &host in hosts {
+        if host == to {
+            continue;
+        }
+        match read_fn(host, path) {
+            ReadOutcome::Found(bytes) => return Some(bytes),
+            ReadOutcome::Missing => {}
+            ReadOutcome::Unreachable => {
+                diagnose(&format!(
+                    "can't reach {host} for pasted image {}",
+                    name(path)
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// A copy's file name: unique to this call and position, keeping the
@@ -148,18 +285,22 @@ fn name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The bytes of the file at `path` on `host`.
-fn read(host: &str, path: &str) -> Result<Vec<u8>, String> {
-    let gone = || format!("pasted file {} is gone; paste it again", name(path));
+/// The bytes of the regular file at `path` on `host`.
+fn read_file(host: &str, path: &str) -> ReadOutcome {
     if host == local_label() {
-        return std::fs::read(path).map_err(|_| gone());
+        if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+            return ReadOutcome::Missing;
+        }
+        return std::fs::read(path).map_or(ReadOutcome::Missing, ReadOutcome::Found);
     }
-    let out = host_bash(host, &format!("cat -- {}\n", sh_quote(path)))
-        .ok_or_else(|| format!("can't reach {host} for pasted file {}", name(path)))?;
+    let quoted = sh_quote(path);
+    let Some(out) = host_bash(host, &format!("test -f -- {quoted} && cat -- {quoted}\n")) else {
+        return ReadOutcome::Unreachable;
+    };
     if !out.status.success() {
-        return Err(gone());
+        return ReadOutcome::Missing;
     }
-    Ok(out.stdout)
+    ReadOutcome::Found(out.stdout)
 }
 
 /// Write `bytes` to the file `file` in the image directory on `host`,
@@ -208,6 +349,7 @@ mod tests {
     use super::*;
 
     const MAC: &str = "/Users/j/Library/Application Support/rex/uploads/p1/b2/Screenshot 1.png";
+    const VORSSAINT: &str = "/Users/john.allen/Library/Caches/com.vorssaint.utils/Copied Screenshots/Screenshot 2026-11-26 at 19.50.35.png";
 
     #[test]
     fn finds_escaped_and_quoted_upload_paths() {
@@ -215,15 +357,38 @@ mod tests {
         let text = format!("look at {escaped} and '{MAC}' or \"{MAC}\"\nthanks");
         let found = uploads(&text);
         assert_eq!(found.len(), 3);
-        assert!(found.iter().all(|u| u.path == MAC));
+        assert!(
+            found
+                .iter()
+                .all(|u| u.path == MAC && u.kind == Kind::RexUpload)
+        );
         assert_eq!(&text[found[0].span.clone()], escaped);
         assert_eq!(&text[found[1].span.clone()], format!("'{MAC}'"));
     }
 
     #[test]
+    fn finds_local_image_paths_with_common_extensions() {
+        let escaped = VORSSAINT.replace(' ', "\\ ");
+        let text = format!(
+            "what is `/q` referring to here?\n\n{escaped}\n'/Users/j/Shot 2.JPEG' \"/tmp/img.WEBP\""
+        );
+        let found = uploads(&text);
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].path, VORSSAINT);
+        assert_eq!(found[0].kind, Kind::LocalImage);
+        assert_eq!(&text[found[0].span.clone()], escaped);
+        assert_eq!(found[1].path, "/Users/j/Shot 2.JPEG");
+        assert_eq!(found[1].kind, Kind::LocalImage);
+        assert_eq!(found[2].path, "/tmp/img.WEBP");
+        assert_eq!(found[2].kind, Kind::LocalImage);
+    }
+
+    #[test]
     fn leaves_other_paths_and_words_alone() {
         assert_eq!(
-            uploads("see /etc/hosts and ~/rex/uploads/x.png, rex/uploads/y.png"),
+            uploads(
+                "see /etc/hosts, /Users/j/notes.txt, /tmp/.png, ~/rex/uploads/x.png, rex/uploads/y.png, shot.png, /home/j/.local/state/rex/spawn-images/1-2-0-a.png"
+            ),
             [] as [Upload; 0]
         );
         assert_eq!(
@@ -233,6 +398,7 @@ mod tests {
         assert_eq!(uploads(""), [] as [Upload; 0]);
         let linux = uploads("é /home/j/.local/state/rex/uploads/a/b/c.png");
         assert_eq!(linux[0].path, "/home/j/.local/state/rex/uploads/a/b/c.png");
+        assert_eq!(linux[0].kind, Kind::RexUpload);
     }
 
     #[test]
@@ -248,6 +414,115 @@ mod tests {
         let me = local_label();
         let err = carry(&me, &me, "x /tmp/no-such/rex/uploads/gone.png").unwrap_err();
         assert!(err.contains("gone.png is gone"), "{err}");
+    }
+
+    #[test]
+    fn carry_copies_local_image_across_hosts_and_rewrites_escaped_span() {
+        let escaped = VORSSAINT.replace(' ', "\\ ");
+        let text = format!("what is `/q` referring to here?\n\n{escaped}");
+        let mut reads = Vec::new();
+        let out = carry_with(
+            &["m4-mbp"],
+            "omarchy",
+            &text,
+            |host, path| {
+                reads.push((host.to_string(), path.to_string()));
+                if host == "m4-mbp" && path == VORSSAINT {
+                    ReadOutcome::Found(b"png-bytes".to_vec())
+                } else {
+                    ReadOutcome::Missing
+                }
+            },
+            |host, file, bytes| {
+                assert_eq!(host, "omarchy");
+                assert_eq!(bytes, b"png-bytes");
+                assert!(file.ends_with("-0-Screenshot-2026-11-26-at-19.50.35.png"));
+                Ok(format!("/home/johna/.local/state/{IMAGE_DIR}/{file}"))
+            },
+        )
+        .unwrap();
+        assert_eq!(reads, vec![("m4-mbp".to_string(), VORSSAINT.to_string())]);
+        assert!(out.starts_with(
+            "what is `/q` referring to here?\n\n/home/johna/.local/state/rex/spawn-images/"
+        ));
+        assert!(out.ends_with("-0-Screenshot-2026-11-26-at-19.50.35.png"));
+        assert!(!out.contains("\\ "));
+    }
+
+    #[test]
+    fn carry_falls_back_to_client_host_when_float_ran_on_target_host() {
+        let escaped = VORSSAINT.replace(' ', "\\ ");
+        let text = format!("check {escaped} and /home/johna/repo/logo.png");
+        let mut reads = Vec::new();
+        let out = carry_with(
+            &["omarchy", "m4-mbp"],
+            "omarchy",
+            &text,
+            |host, path| {
+                reads.push((host.to_string(), path.to_string()));
+                if host == "m4-mbp" && path == VORSSAINT {
+                    ReadOutcome::Found(b"img".to_vec())
+                } else {
+                    ReadOutcome::Missing
+                }
+            },
+            |host, file, _bytes| Ok(format!("/copied/{host}/{file}")),
+        )
+        .unwrap();
+        // Skips "omarchy" (same as target) and checks only "m4-mbp".
+        assert_eq!(
+            reads,
+            vec![
+                ("m4-mbp".to_string(), VORSSAINT.to_string()),
+                (
+                    "m4-mbp".to_string(),
+                    "/home/johna/repo/logo.png".to_string()
+                ),
+            ]
+        );
+        // Vorssaint image was rewritten; target-host logo.png was left untouched.
+        assert!(out.contains("/copied/omarchy/"));
+        assert!(out.ends_with(" and /home/johna/repo/logo.png"));
+    }
+
+    #[test]
+    fn carry_leaves_local_images_alone_on_same_host_but_still_copies_rex_uploads() {
+        let text = format!(
+            "local {} upload {}",
+            VORSSAINT.replace(' ', "\\ "),
+            MAC.replace(' ', "\\ ")
+        );
+        let mut reads = Vec::new();
+        let out = carry_with(
+            &["m4-mbp"],
+            "m4-mbp",
+            &text,
+            |host, path| {
+                reads.push((host.to_string(), path.to_string()));
+                ReadOutcome::Found(b"x".to_vec())
+            },
+            |_host, file, _bytes| Ok(format!("/state/{file}")),
+        )
+        .unwrap();
+        assert_eq!(reads, vec![("m4-mbp".to_string(), MAC.to_string())]);
+        assert!(out.starts_with(&format!(
+            "local {} upload /state/",
+            VORSSAINT.replace(' ', "\\ ")
+        )));
+    }
+
+    #[test]
+    fn carry_ignores_unreachable_source_for_local_image() {
+        let text = "see /Users/j/shot.png please";
+        let out = carry_with(
+            &["m4-mbp"],
+            "omarchy",
+            text,
+            |_host, _path| ReadOutcome::Unreachable,
+            |_host, _file, _bytes| unreachable!("should not write when unreadable"),
+        )
+        .unwrap();
+        assert_eq!(out, text);
     }
 
     #[test]

@@ -213,11 +213,20 @@ fn rpc_launch(body: &Value, endpoint: &Endpoint) -> Result<Value, String> {
     let name = body["name"].as_str().unwrap_or("");
     let harness = body["harness"].as_str().unwrap_or("");
     let work_item = opt_str(body, "work_item");
+    let from_host = opt_str(body, "from_host");
     let (host, session, window) = if let Some(prompt_ref) = opt_str(body, "prompt_ref") {
-        launch::launch(host, path, name, harness, Some(prompt_ref), work_item, None)?
+        launch::launch_from(
+            host,
+            path,
+            name,
+            harness,
+            Some(prompt_ref),
+            from_host,
+            work_item,
+            None,
+        )?
     } else {
         let prompt = body["prompt"].as_str().unwrap_or("");
-        let from_host = opt_str(body, "from_host");
         launch::launch_text_from(
             host,
             path,
@@ -237,11 +246,12 @@ fn rpc_message(body: &Value) -> Result<Value, String> {
     let host = str_field(body, "host")?;
     let session = str_field(body, "session")?;
     let window = str_field(body, "window")?;
+    let from = opt_str(body, "from_host");
     let result = if let Some(prompt_ref) = opt_str(body, "prompt_ref") {
-        actions::message_ref(host, session, window, prompt_ref)?
+        actions::message_ref_from(from, host, session, window, prompt_ref)?
     } else {
         let text = str_field(body, "text")?;
-        if let Some(from) = opt_str(body, "from_host") {
+        if let Some(from) = from {
             actions::message_from(from, host, session, window, text)?
         } else {
             actions::message(host, session, window, text)?

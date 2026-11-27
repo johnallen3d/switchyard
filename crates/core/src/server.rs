@@ -609,7 +609,8 @@ pub fn remote_message(
 }
 
 /// Run `actions::message_ref` through the remote control plane (when the prompt
-/// file lives on another host).
+/// file lives on another host), carrying the caller host (`from`) so pasted
+/// local image paths on the client machine can still be copied to the agent.
 ///
 /// # Errors
 ///
@@ -619,6 +620,7 @@ pub fn remote_message_ref(
     session: &str,
     window: &str,
     prompt_ref: &str,
+    from: Option<&str>,
 ) -> Result<String, String> {
     let reply = remote_rpc(&json!({
         "cmd": "message",
@@ -626,6 +628,7 @@ pub fn remote_message_ref(
         "session": session,
         "window": window,
         "prompt_ref": prompt_ref,
+        "from_host": from,
     }))?;
     reply_string(&reply, "result")
 }
