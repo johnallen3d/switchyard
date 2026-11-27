@@ -43,8 +43,9 @@
 //!   agent spawned (through the MCP endpoint's `spawn_task`) hangs off its
 //!   spawner's row as a small tree when both are listed (see `nest`),
 //!   folded away by default so ctrl-j and ctrl-k pass over it: the
-//!   spawner's name carries `▸N` (gold while one of them waits on a
-//!   prompt), Right lists them under it, and Left folds them again. A
+//!   spawner's name carries a folded status breakdown (`▸ ●1 ⠋1 ✓1`, or a
+//!   compact urgency-tinted `▸N` when narrow) and `▾N` when unfolded; Right
+//!   lists them under it, and Left folds them again. A
 //!   search lists every match.
 //!   With the width, the list is a sidebar on the left (search over it,
 //!   compact rows), and the right side shows the highlighted row: its name,
@@ -417,24 +418,97 @@ struct Flat<'a> {
 
 type Key = (String, String);
 
-/// A nested row's tree guides: the columns its ancestors' lines take
-/// (`│ ` while an ancestor has siblings still to come, else blanks), and
-/// whether it is the last of its siblings.
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
-struct Guide {
-    lead: String,
+/// One level of nesting from a spawner to one of its children.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Step {
+    spawner: Item,
+    /// Position of this branch among `spawner`'s listed children (0-based).
+    index: usize,
+    /// Whether this branch is `spawner`'s last listed child.
     last: bool,
 }
 
+/// A nested row's tree guides: the chain of steps from its root spawner
+/// down to itself (`│ ` while an ancestor has siblings still to come, else
+/// blanks, ending in `├╴` or `╰╴`).
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+struct Guide {
+    steps: Vec<Step>,
+}
+
 impl Guide {
-    /// The guide on the row's own line: `├ ` or `└ ` after its ancestors'.
-    fn branch(&self) -> String {
-        format!("{}{}", self.lead, if self.last { "└ " } else { "├ " })
+    /// Width in terminal cells of this row's tree prefix (2 columns per level).
+    fn width(&self) -> usize {
+        self.steps.len() * 2
     }
 
-    /// The guide on the lines under it: its siblings' line carries on.
-    fn stem(&self) -> String {
-        format!("{}{}", self.lead, if self.last { "  " } else { "│ " })
+    /// Plain text of the row's own line: `├╴` or `╰╴` after its ancestors'.
+    #[cfg(test)]
+    fn branch(&self) -> String {
+        let mut out = String::with_capacity(self.steps.len() * 4);
+        if let Some((own, ancestors)) = self.steps.split_last() {
+            for s in ancestors {
+                out.push_str(if s.last { "  " } else { "│ " });
+            }
+            out.push_str(if own.last { "╰╴" } else { "├╴" });
+        }
+        out
+    }
+
+    /// The child index `active` descends through under `spawner`, if any.
+    fn target_for(active: Option<&Self>, spawner: Item) -> Option<usize> {
+        active?
+            .steps
+            .iter()
+            .find(|s| s.spawner == spawner)
+            .map(|s| s.index)
+    }
+
+    /// Styled spans for the row's own line: ancestor stems plus `├╴` / `╰╴`,
+    /// lighting segments that lie on the path from root to `active`.
+    fn branch_spans(&self, active: Option<&Self>, dim: Style, lit: Style) -> Vec<Span<'static>> {
+        let mut spans = Vec::with_capacity(self.steps.len() + 1);
+        let Some((own, ancestors)) = self.steps.split_last() else {
+            return spans;
+        };
+        for s in ancestors {
+            if s.last {
+                spans.push(Span::styled("  ", dim));
+            } else {
+                let on = Self::target_for(active, s.spawner).is_some_and(|t| t > s.index);
+                spans.push(Span::styled("│ ", if on { lit } else { dim }));
+            }
+        }
+        let target = Self::target_for(active, own.spawner);
+        let trunk_on = target.is_some_and(|t| t >= own.index);
+        let arm_on = target == Some(own.index);
+        let corner = if own.last { "╰" } else { "├" };
+        if trunk_on == arm_on {
+            spans.push(Span::styled(
+                format!("{corner}╴"),
+                if trunk_on { lit } else { dim },
+            ));
+        } else {
+            spans.push(Span::styled(corner, if trunk_on { lit } else { dim }));
+            spans.push(Span::styled("╴", if arm_on { lit } else { dim }));
+        }
+        spans
+    }
+
+    /// Styled spans for the row's second line: each level's continuing stem
+    /// (`│ ` while siblings follow, else blanks), lighting segments on the
+    /// path to `active`.
+    fn stem_spans(&self, active: Option<&Self>, dim: Style, lit: Style) -> Vec<Span<'static>> {
+        let mut spans = Vec::with_capacity(self.steps.len());
+        for s in &self.steps {
+            if s.last {
+                spans.push(Span::styled("  ", dim));
+            } else {
+                let on = Self::target_for(active, s.spawner).is_some_and(|t| t > s.index);
+                spans.push(Span::styled("│ ", if on { lit } else { dim }));
+            }
+        }
+        spans
     }
 }
 
@@ -442,7 +516,7 @@ impl Guide {
 /// `item` is `open`.
 fn descend(
     item: Item,
-    lead: &str,
+    prefix: &[Step],
     children: &HashMap<Item, Vec<Item>>,
     open: &HashSet<Item>,
     rows: &mut Vec<Item>,
@@ -451,15 +525,20 @@ fn descend(
     let Some(kids) = children.get(&item).filter(|_| open.contains(&item)) else {
         return;
     };
-    for (n, &kid) in kids.iter().enumerate() {
+    for (index, &kid) in kids.iter().enumerate() {
+        let mut steps = Vec::with_capacity(prefix.len() + 1);
+        steps.extend_from_slice(prefix);
+        steps.push(Step {
+            spawner: item,
+            index,
+            last: index + 1 == kids.len(),
+        });
         let guide = Guide {
-            lead: lead.to_string(),
-            last: n + 1 == kids.len(),
+            steps: steps.clone(),
         };
-        let next = guide.stem();
         rows.push(kid);
         tree.insert(kid, guide);
-        descend(kid, &next, children, open, rows, tree);
+        descend(kid, &steps, children, open, rows, tree);
     }
 }
 
@@ -484,18 +563,111 @@ struct Fold {
     rows: usize,
     /// Whether they are listed under it.
     open: bool,
-    /// Whether one of them, folded away, is waiting on a prompt.
-    blocked: bool,
+    /// Descendants by state, in urgency order.
+    error: usize,
+    blocked: usize,
+    working: usize,
+    scheduled: usize,
+    done: usize,
+    other: usize,
 }
 
 impl Fold {
-    /// The badge after its name: `▸3` folded, `▾` unfolded.
-    fn badge(self) -> String {
-        if self.open {
-            " ▾".to_string()
-        } else {
-            format!(" ▸{}", self.rows)
+    /// Build a `Fold` from a spawner's descendants' states.
+    fn from_states<'a>(open: bool, states: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut fold = Self {
+            open,
+            ..Self::default()
+        };
+        for state in states {
+            fold.rows += 1;
+            match state {
+                "error" => fold.error += 1,
+                "blocked" => fold.blocked += 1,
+                "working" => fold.working += 1,
+                "scheduled" => fold.scheduled += 1,
+                "done" => fold.done += 1,
+                _ => fold.other += 1,
+            }
         }
+        fold
+    }
+
+    /// Plain text of the badge: ` ▾N` when open, else a status breakdown
+    /// (` ▸ ✗1 ●1 ⠋2 ✓1`).
+    fn badge(self, tick: usize) -> String {
+        if self.open {
+            return format!(" ▾{}", self.rows);
+        }
+        let mut out = String::from(" ▸");
+        let spin = SPINNER[tick % SPINNER.len()];
+        for (glyph, n) in [
+            ("✗", self.error),
+            ("●", self.blocked),
+            (spin, self.working),
+            ("◷", self.scheduled),
+            ("✓", self.done),
+            ("·", self.other),
+        ] {
+            if n > 0 {
+                let _ = write!(out, " {glyph}{n}");
+            }
+        }
+        out
+    }
+
+    /// Highest-urgency colour among folded descendants, for the compact
+    /// fallback badge when the full breakdown won't fit.
+    fn urgency_color(self, p: &Palette) -> Color {
+        if self.error > 0 {
+            p.love
+        } else if self.blocked > 0 {
+            p.gold
+        } else if self.working > 0 {
+            p.foam
+        } else if self.scheduled > 0 {
+            p.iris
+        } else if self.done > 0 {
+            p.pine
+        } else {
+            p.muted
+        }
+    }
+
+    /// Styled spans for the badge: ` ▾N` when open; when folded, per-state
+    /// colored counts if they fit in `max_width`, else an urgency-tinted ` ▸N`.
+    fn spans(self, p: &Palette, bg: Color, tick: usize, max_width: usize) -> Vec<Span<'static>> {
+        if self.open {
+            return vec![Span::styled(
+                format!(" ▾{}", self.rows),
+                Style::new().fg(p.muted).bg(bg),
+            )];
+        }
+        let full = self.badge(tick);
+        if str_width(&full) <= max_width {
+            let mut spans = vec![Span::styled(" ▸", Style::new().fg(p.muted).bg(bg))];
+            let spin = SPINNER[tick % SPINNER.len()];
+            for (glyph, n, fg) in [
+                ("✗", self.error, p.love),
+                ("●", self.blocked, p.gold),
+                (spin, self.working, p.foam),
+                ("◷", self.scheduled, p.iris),
+                ("✓", self.done, p.pine),
+                ("·", self.other, p.muted),
+            ] {
+                if n > 0 {
+                    spans.push(Span::styled(
+                        format!(" {glyph}{n}"),
+                        Style::new().fg(fg).bg(bg),
+                    ));
+                }
+            }
+            return spans;
+        }
+        vec![Span::styled(
+            format!(" ▸{}", self.rows),
+            Style::new().fg(self.urgency_color(p)).bg(bg),
+        )]
     }
 }
 
@@ -1941,6 +2113,45 @@ impl App {
             .map(Item::Task)
     }
 
+    /// Ancestor spawners of `item`, from root down to its direct spawner,
+    /// stopping if a spawner cycle is encountered.
+    fn lineage_of(&self, item: Item) -> Vec<Item> {
+        let mut chain = Vec::new();
+        let mut seen = HashSet::from([item]);
+        let mut at = item;
+        while let Some(up) = self.parent_of(at) {
+            if !seen.insert(up) {
+                break;
+            }
+            chain.push(up);
+            at = up;
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Whether a nested row is in its direct spawner's project.
+    fn same_project_as_parent(&self, item: Item) -> bool {
+        let project = self.project_of(item).0;
+        !project.is_empty()
+            && self.tree.contains_key(&item)
+            && self
+                .parent_of(item)
+                .is_some_and(|up| self.project_of(up).0 == project)
+    }
+
+    /// Whether `item` belongs to an expanded subtree (an unfolded spawner or
+    /// one of its listed descendants).
+    fn in_expanded_tree(&self, item: Item) -> bool {
+        self.tree.contains_key(&item) || self.folds.get(&item).is_some_and(|f| f.open)
+    }
+
+    /// The tree guide of the currently highlighted nested row, if any, used
+    /// to illuminate the branch leading down to it.
+    fn active_guide(&self) -> Option<&Guide> {
+        self.selected_item().and_then(|sel| self.tree.get(&sel))
+    }
+
     /// Move each Inbox row whose spawner is listed too under it, as a tree
     /// (see `Guide`), most urgent child first. A pinned or snoozed child
     /// stays in its group unless its spawner is in that group too, so a pin
@@ -2000,15 +2211,11 @@ impl App {
             .collect();
         for &up in children.keys() {
             let below = descendants(up, &children);
-            let blocked = below.iter().any(|&i| self.flat(i).state == "blocked");
-            self.folds.insert(
-                up,
-                Fold {
-                    rows: below.len(),
-                    open: open.contains(&up),
-                    blocked,
-                },
+            let fold = Fold::from_states(
+                open.contains(&up),
+                below.iter().map(|&i| self.flat(i).state),
             );
+            self.folds.insert(up, fold);
         }
         let old = std::mem::take(&mut self.rows);
         let mut rows = Vec::with_capacity(old.len());
@@ -2024,7 +2231,7 @@ impl App {
                 _ if parent.contains_key(&item) => {}
                 _ => {
                     rows.push(item);
-                    descend(item, "", &children, &open, &mut rows, &mut self.tree);
+                    descend(item, &[], &children, &open, &mut rows, &mut self.tree);
                 }
             }
         }
@@ -3589,19 +3796,22 @@ impl App {
         self.draw_snooze(f, main);
     }
 
-    /// Rows the right side's header takes in `width`: the name line, its
-    /// work items' titles (at most `DETAIL_LINK_ROWS`), then the status
-    /// message wrapped to at most `DETAIL_MSG_ROWS`.
+    /// Rows the right side's header takes in `width`: the name line, an
+    /// optional parent breadcrumb, its work items' titles (at most
+    /// `DETAIL_LINK_ROWS`), then the status message wrapped to at most
+    /// `DETAIL_MSG_ROWS`.
     fn detail_rows(&self, width: u16) -> u16 {
         let Some(item) = self.selected_item() else {
             return 1;
         };
         let t = self.flat(item);
+        let crumb = u16::from(!self.lineage_of(item).is_empty());
         let titles = cells(titled(t.links).count());
         if t.msg.is_empty() {
-            return 1 + titles;
+            return 1 + crumb + titles;
         }
-        1 + titles
+        1 + crumb
+            + titles
             + cells(
                 preview::wrap(t.msg, (width as usize).saturating_sub(2).max(1))
                     .len()
@@ -3611,7 +3821,8 @@ impl App {
 
     /// The right side's header: the highlighted row's status, project and
     /// name, with its work items, host and age on the right (a plain tab's
-    /// folder), then its work items' titles and its whole status message.
+    /// folder), then its parent breadcrumb, work items' titles and whole
+    /// status message.
     fn draw_detail(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
         let Some(item) = self.selected_item() else {
@@ -3622,13 +3833,22 @@ impl App {
             return;
         };
         let t = self.flat(item);
+        let lineage = self.lineage_of(item);
+        let crumb = u16::from(!lineage.is_empty());
         let titles = cells(titled(t.links).count());
-        let [line, titles_area, msg_area] = Layout::vertical([
+        let [line, crumb_area, titles_area, msg_area] = Layout::vertical([
             Constraint::Length(1),
+            Constraint::Length(crumb),
             Constraint::Length(titles),
             Constraint::Min(0),
         ])
         .areas(area);
+        if !lineage.is_empty() {
+            f.render_widget(
+                self.lineage_line(&lineage, crumb_area.width as usize),
+                crumb_area,
+            );
+        }
         let lines: Vec<Line> = titled(t.links)
             .map(|l| self.title_line(l, home_repo(t.links), titles_area.width as usize))
             .collect();
@@ -3679,6 +3899,33 @@ impl App {
             .map(|l| Line::styled(format!("  {l}"), style))
             .collect();
         f.render_widget(Paragraph::new(lines), msg_area);
+    }
+
+    /// A child task's ancestor breadcrumb (`  ↳ root › parent`), clipped to
+    /// `width`, for the detail header.
+    fn lineage_line(&self, lineage: &[Item], width: usize) -> Line<'static> {
+        let p = &self.p;
+        let muted = Style::new().fg(p.muted);
+        let subtle = Style::new().fg(p.subtle);
+        let mut spans = vec![Span::styled("  ↳ ", muted)];
+        let mut room = width.saturating_sub(4);
+        for (i, &up) in lineage.iter().enumerate() {
+            if i > 0 {
+                if room <= 3 {
+                    break;
+                }
+                spans.push(Span::styled(" › ", muted));
+                room -= 3;
+            }
+            let clipped = preview::clip_width(self.flat(up).name, room);
+            let used = str_width(&clipped);
+            spans.push(Span::styled(clipped, subtle));
+            room = room.saturating_sub(used);
+            if room == 0 {
+                break;
+            }
+        }
+        Line::from(spans)
     }
 
     /// A work item's ref and title, clipped to `width`, for the headers.
@@ -4457,8 +4704,10 @@ impl App {
         let name_w = flat()
             .map(|i| {
                 let w = str_width(self.flat(i).name);
-                let guide = self.tree.get(&i).map_or(0, |g| str_width(&g.branch()));
+                let guide = self.tree.get(&i).map_or(0, Guide::width);
+                let fold = self.folds.get(&i).map_or(0, |f| str_width(&f.badge(tick)));
                 guide
+                    + fold
                     + if self.is_plain_tab(i) {
                         w.min(name_cap)
                     } else {
@@ -4934,6 +5183,16 @@ impl App {
         }
     }
 
+    /// A sidebar row's background and left edge: `row_style`, with a subtle
+    /// surface tint grouping unselected rows of an expanded subtree.
+    fn side_row_style(&self, item: Item, selected: bool) -> (Color, Span<'static>) {
+        if selected || !self.in_expanded_tree(item) {
+            return self.row_style(selected);
+        }
+        let bg = self.p.surface;
+        (bg, Span::styled(" ", Style::new().bg(bg)))
+    }
+
     /// A sidebar row on two lines: status, name, and how long it has been
     /// in that state (until it wakes, snoozed); then, under the name, its
     /// project and status message, with its uncommitted files on the right.
@@ -4941,7 +5200,7 @@ impl App {
     fn draw_side_row(&self, f: &mut Frame, r: Rect, item: Item, selected: bool, tick: usize) {
         let p = &self.p;
         let t = self.flat(item);
-        let (bg, edge) = self.row_style(selected);
+        let (bg, edge) = self.side_row_style(item, selected);
         f.buffer_mut().set_style(r, Style::new().bg(bg));
         let (glyph, color, _) = self.status_of(&t, item, tick);
         let hits = self.hits.get(&item).cloned().unwrap_or_default();
@@ -4960,25 +5219,35 @@ impl App {
         };
         // A row an agent spawned hangs off its spawner's (see `nest`).
         let guide = self.tree.get(&item);
-        let (branch, stem) = guide.map(|g| (g.branch(), g.stem())).unwrap_or_default();
-        let guide_style = Style::new().fg(p.muted).bg(bg);
-        let fold = self.fold_badge(item, bg);
-        let room = width.saturating_sub(
-            3 + str_width(&branch) + str_width(&when) + 1 + str_width(&fold.content),
-        );
-        let name_style = Style::new().fg(p.text).bg(bg);
+        let active = self.active_guide();
+        let guide_dim = Style::new().fg(p.hl_high).bg(bg);
+        let guide_lit = Style::new().fg(p.iris).bg(bg);
+        let branch_w = guide.map_or(0, Guide::width);
+        let avail = width.saturating_sub(3 + branch_w + str_width(&when) + 1);
+        let max_badge = avail.saturating_sub(str_width(t.name).min(10));
+        let fold = self.fold_badge(item, bg, tick, max_badge);
+        let fold_w: usize = fold.iter().map(|s| str_width(&s.content)).sum();
+        let room = avail.saturating_sub(fold_w);
+        let quiet_child =
+            !selected && guide.is_some() && t.ended.is_none() && matches!(t.state, "done" | "idle");
+        let name_style = Style::new()
+            .fg(if quiet_child { p.subtle } else { p.text })
+            .bg(bg);
         let name_style = if selected {
             name_style.add_modifier(Modifier::BOLD)
         } else {
             name_style
         };
-        let mut left = vec![
-            edge.clone(),
-            Span::styled(branch, guide_style),
-            Span::styled(format!("{glyph} "), Style::new().fg(color).bg(bg)),
-        ];
+        let mut left = vec![edge.clone()];
+        if let Some(g) = guide {
+            left.extend(g.branch_spans(active, guide_dim, guide_lit));
+        }
+        left.push(Span::styled(
+            format!("{glyph} "),
+            Style::new().fg(color).bg(bg),
+        ));
         left.extend(highlight(t.name, &hits.name, room, false, name_style, hl));
-        left.push(fold);
+        left.extend(fold);
         let line = Rect { height: 1, ..r };
         f.render_widget(Line::from(left), line);
         // A span, not a styled Line: a Line's style colours its whole row.
@@ -4986,32 +5255,66 @@ impl App {
         if r.height < 2 {
             return;
         }
-        // The second line, under the name: project · message, or a plain
-        // tab's folder.
-        let line = Rect {
+        let detail = Rect {
             y: r.y + 1,
             height: 1,
             ..r
         };
+        self.draw_side_row_detail(f, detail, item, &t, bg, edge);
+    }
+
+    /// A sidebar row's second line: tree stems, project, status message, and
+    /// uncommitted file count on the right.
+    fn draw_side_row_detail(
+        &self,
+        f: &mut Frame,
+        line: Rect,
+        item: Item,
+        t: &Flat<'_>,
+        bg: Color,
+        edge: Span<'static>,
+    ) {
+        let p = &self.p;
+        let hl = Style::new()
+            .fg(p.rose)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+        let muted = Style::new().fg(p.muted).bg(bg);
+        let guide_dim = Style::new().fg(p.hl_high).bg(bg);
+        let guide_lit = Style::new().fg(p.iris).bg(bg);
+        let guide = self.tree.get(&item);
+        let active = self.active_guide();
+        let branch_w = guide.map_or(0, Guide::width);
         let dirty = if t.dirty > 0 {
             format!("✎{} ", t.dirty)
         } else {
             String::new()
         };
-        let mut room = width.saturating_sub(3 + str_width(&stem) + str_width(&dirty) + 1);
-        let mut left = vec![
-            edge,
-            Span::styled(stem, guide_style),
-            Span::styled(self.drop_guide(item), guide_style),
-        ];
+        let mut room = (line.width as usize).saturating_sub(3 + branch_w + str_width(&dirty) + 1);
+        let mut left = vec![edge];
+        if let Some(g) = guide {
+            left.extend(g.stem_spans(active, guide_dim, guide_lit));
+        }
+        left.push(self.drop_guide_span(item, active, guide_dim, guide_lit));
         let push = |left: &mut Vec<Span<'static>>, spans: Vec<Span<'static>>, room: &mut usize| {
             *room = room.saturating_sub(spans.iter().map(|s| str_width(&s.content)).sum());
             left.extend(spans);
         };
         let (project, own) = self.project_of(item);
         if !project.is_empty() {
-            let style = Style::new().fg(p.iris).bg(bg);
-            let hits = if own { hits.second.as_slice() } else { &[] };
+            let proj_fg = if self.same_project_as_parent(item) {
+                p.subtle
+            } else {
+                p.iris
+            };
+            let style = Style::new().fg(proj_fg).bg(bg);
+            let hits = if own {
+                self.hits
+                    .get(&item)
+                    .map_or(&[][..], |h| h.second.as_slice())
+            } else {
+                &[]
+            };
             push(
                 &mut left,
                 highlight(&project, hits, room, false, style, hl),
@@ -5094,26 +5397,36 @@ impl App {
                     Style::new().bg(bg),
                 ));
             };
+        let proj_fg = if self.same_project_as_parent(item) {
+            p.muted
+        } else {
+            p.subtle
+        };
         column(
             &mut left,
             t.project,
             &hits.second,
             proj_w,
-            Style::new().fg(p.subtle).bg(bg),
+            Style::new().fg(proj_fg).bg(bg),
         );
         // A row an agent spawned hangs off its spawner's (see `nest`), its
         // guide in the name column.
-        let branch = self.tree.get(&item).map(Guide::branch).unwrap_or_default();
-        let branch_w = str_width(&branch);
-        left.push(Span::styled(branch, Style::new().fg(p.muted).bg(bg)));
+        let guide = self.tree.get(&item);
+        let branch_w = guide.map_or(0, Guide::width);
+        if let Some(g) = guide {
+            let dim = Style::new().fg(p.hl_high).bg(bg);
+            let lit = Style::new().fg(p.iris).bg(bg);
+            left.extend(g.branch_spans(self.active_guide(), dim, lit));
+        }
         // A spawner's fold badge follows its name, inside the column.
-        let fold = self.fold_badge(item, bg);
-        let fold_w = str_width(&fold.content);
+        let max_badge = name_w.saturating_sub(branch_w + str_width(t.name).min(10));
+        let fold = self.fold_badge(item, bg, tick, max_badge);
+        let fold_w: usize = fold.iter().map(|s| str_width(&s.content)).sum();
         let name_room = name_w.saturating_sub(branch_w + fold_w);
         let spans = highlight(t.name, &hits.name, name_room, false, name_style, hl);
         let used: usize = spans.iter().map(|s| str_width(&s.content)).sum();
         left.extend(spans);
-        left.push(fold);
+        left.extend(fold);
         left.push(Span::styled(
             " ".repeat(name_room.saturating_sub(used) + 2),
             Style::new().bg(bg),
@@ -5121,12 +5434,7 @@ impl App {
         if let Item::Tab(tab) = item
             && plain
         {
-            let used = 3
-                + proj_w
-                + 2
-                + branch_w
-                + str_width(t.name).min(name_w.saturating_sub(branch_w))
-                + 2;
+            let used = 3 + proj_w + 2 + branch_w + used + fold_w + 2;
             let right = self.tab_right(
                 tab,
                 &hits.dir,
@@ -5318,30 +5626,35 @@ impl App {
         row
     }
 
-    /// The badge after a spawner's name (see `Fold`), gold while a row
-    /// folded under it waits on a prompt; empty for any other row.
     /// The guide under a row's glyph on its second line: an unfolded
-    /// spawner's line drops from its glyph to its children's branches.
-    fn drop_guide(&self, item: Item) -> &'static str {
+    /// spawner's line drops from its glyph to its children's branches, lit
+    /// when the highlighted row descends from it.
+    fn drop_guide_span(
+        &self,
+        item: Item,
+        active: Option<&Guide>,
+        dim: Style,
+        lit: Style,
+    ) -> Span<'static> {
         if self.folds.get(&item).is_some_and(|f| f.open) {
-            "│ "
+            let on = Guide::target_for(active, item).is_some();
+            Span::styled("│ ", if on { lit } else { dim })
         } else {
-            "  "
+            Span::styled("  ", dim)
         }
     }
 
-    fn fold_badge(&self, item: Item, bg: Color) -> Span<'static> {
-        let p = &self.p;
+    /// The badge after a spawner's name (see `Fold`), empty for other rows.
+    fn fold_badge(
+        &self,
+        item: Item,
+        bg: Color,
+        tick: usize,
+        max_width: usize,
+    ) -> Vec<Span<'static>> {
         match self.folds.get(&item) {
-            Some(f) => {
-                let fg = if f.blocked && !f.open {
-                    p.gold
-                } else {
-                    p.muted
-                };
-                Span::styled(f.badge(), Style::new().fg(fg).bg(bg))
-            }
-            None => Span::raw(""),
+            Some(f) => f.spans(&self.p, bg, tick, max_width),
+            None => Vec::new(),
         }
     }
 
@@ -7204,9 +7517,9 @@ mod tests {
         assert_eq!(app.flat(Item::Tab(3)).state, "done");
         let branch = |t| app.tree.get(&Item::Tab(t)).map(Guide::branch);
         assert_eq!(branch(0), None);
-        assert_eq!(branch(1).as_deref(), Some("├ "));
-        assert_eq!(branch(2).as_deref(), Some("│ └ "));
-        assert_eq!(branch(3).as_deref(), Some("└ "));
+        assert_eq!(branch(1).as_deref(), Some("├╴"));
+        assert_eq!(branch(2).as_deref(), Some("│ ╰╴"));
+        assert_eq!(branch(3).as_deref(), Some("╰╴"));
         assert_eq!(branch(4), None);
     }
 
@@ -7215,7 +7528,7 @@ mod tests {
         let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
         let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
         let mut app = spawned();
-        // Folded by default: the lead stands for its three, one blocked.
+        // Folded by default: the lead stands for its three (1 blocked, 1 working, 1 done).
         assert_eq!(
             app.rows,
             vec![
@@ -7228,8 +7541,11 @@ mod tests {
             ]
         );
         let lead = app.folds[&Item::Tab(0)];
-        assert_eq!((lead.rows, lead.open, lead.blocked), (3, false, true));
-        assert_eq!(lead.badge(), " ▸3");
+        assert_eq!(
+            (lead.rows, lead.open, lead.blocked, lead.working, lead.done),
+            (3, false, 1, 1, 1)
+        );
+        assert_eq!(lead.badge(0), " ▸ ●1 ⠋1 ✓1");
         // ctrl-j passes from the lead to the next group's row, wrapping.
         app.selected = app.rows.iter().position(|&i| i == Item::Tab(0));
         app.key(ctrl('j'));
@@ -7237,11 +7553,12 @@ mod tests {
         // A folded row asked for highlights its spawner.
         app.select_key(app.key_of(Item::Tab(2)));
         assert_eq!(app.selected_item(), Some(Item::Tab(0)));
-        // Right lists the children; the kid keeps its own folded.
+        // Right lists the children; the lead keeps its count and the kid keeps its own folded.
         app.key(plain(KeyCode::Right));
         assert_eq!(&app.rows[3..6], &[Item::Tab(0), Item::Tab(1), Item::Tab(3)]);
         assert_eq!(app.selected_item(), Some(Item::Tab(0)));
-        assert_eq!(app.folds[&Item::Tab(1)].badge(), " ▸1");
+        assert_eq!(app.folds[&Item::Tab(0)].badge(0), " ▾3");
+        assert_eq!(app.folds[&Item::Tab(1)].badge(0), " ▸ ⠋1");
         // Right again moves into them, and on the kid unfolds its own.
         app.key(plain(KeyCode::Right));
         assert_eq!(app.selected_item(), Some(Item::Tab(1)));
@@ -7260,6 +7577,131 @@ mod tests {
         app.query = "s".into();
         app.refilter();
         assert!(app.rows.contains(&Item::Tab(3)));
+    }
+
+    #[test]
+    fn tree_sidebar_renders_surface_tint_active_branch_and_project_hierarchy() {
+        let mut app = App::new((String::new(), String::new()), View::Inbox);
+        app.follow = false;
+        app.now = 1000;
+        app.deliver(|app| {
+            (app.sessions, app.tabs) = parse_rows(concat!(
+                "S\t-\tlocal\ts\tdemo\n",
+                "T\tlead\tworking\tlead\n",
+                "T\tkid\tblocked\tkid\n",
+                "T\tgrand\tworking\tgrand\n",
+                "T\tsib\tdone\tsib\n",
+                "T\tother\tworking\tother\n",
+            ));
+            app.tasks = parse_tasks(&serde_json::json!([
+                {"session_id":"s", "window_id":"lead", "name":"lead", "project":"alpha", "status":"working", "status_msg":"leading"},
+                {"session_id":"s", "window_id":"kid", "name":"kid", "project":"alpha", "status":"blocked", "status_msg":"waiting", "parent_window":"lead"},
+                {"session_id":"s", "window_id":"grand", "name":"grand", "project":"alpha", "status":"working", "status_msg":"running", "parent_window":"kid"},
+                {"session_id":"s", "window_id":"sib", "name":"sib", "project":"beta", "status":"done", "status_msg":"ready", "parent_window":"lead"},
+                {"session_id":"s", "window_id":"other", "name":"other", "project":"gamma", "status":"working", "status_msg":"solo"}
+            ]).to_string()).unwrap();
+            app.load = Load::Ready;
+            app.tasks_load = Tasks::Ready;
+        });
+        app.unfolded = (0..app.tabs.len())
+            .filter_map(|t| app.key_of(Item::Tab(t)))
+            .collect();
+        app.refilter();
+        // Highlight `sib` (last child of `lead`): active branch lights lead's drop,
+        // kid's vertical trunk `├` (not its `╴` arm), grand's ancestor `│`, and sib's `╰╴`.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(3));
+        let mut terminal = Terminal::new(TestBackend::new(140, 22)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row_text = |y: u16| -> String { (1..50).map(|x| buf[(x, y)].symbol()).collect() };
+        let find_y = |needle: &str| -> u16 {
+            (0..22u16)
+                .find(|&y| row_text(y).contains(needle))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing {needle} in:\n{}",
+                        (0..22).map(&row_text).collect::<Vec<_>>().join("\n")
+                    )
+                })
+        };
+        let find_x = |y: u16, needle: &str| -> u16 {
+            let line = row_text(y);
+            let byte = line
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing {needle} in {line:?}"));
+            1 + cells(line[..byte].chars().count())
+        };
+        let y_lead = find_y("lead ▾3");
+        let y_kid = find_y("├╴● kid ▾1");
+        let y_grand = find_y("│ ╰╴");
+        let y_sib = find_y("╰╴✓ sib");
+        let y_other = find_y("other");
+        // Expanded subtree uses surface tint; selected row uses overlay; unrelated root uses base.
+        assert_eq!(buf[(find_x(y_lead, "lead"), y_lead)].bg, app.p.surface);
+        assert_eq!(buf[(find_x(y_kid, "kid"), y_kid)].bg, app.p.surface);
+        assert_eq!(buf[(find_x(y_sib, "sib"), y_sib)].bg, app.p.overlay);
+        assert_eq!(buf[(find_x(y_other, "other"), y_other)].bg, app.p.base);
+        // Active-branch highlighting to `sib`.
+        assert_eq!(buf[(find_x(y_lead + 1, "│"), y_lead + 1)].fg, app.p.iris);
+        let x_kid_corner = find_x(y_kid, "├");
+        assert_eq!(buf[(x_kid_corner, y_kid)].fg, app.p.iris);
+        assert_eq!(buf[(x_kid_corner + 1, y_kid)].fg, app.p.hl_high);
+        assert_eq!(buf[(find_x(y_grand, "│"), y_grand)].fg, app.p.iris);
+        assert_eq!(buf[(find_x(y_grand, "╰"), y_grand)].fg, app.p.hl_high);
+        let x_sib_corner = find_x(y_sib, "╰");
+        assert_eq!(buf[(x_sib_corner, y_sib)].fg, app.p.iris);
+        assert_eq!(buf[(x_sib_corner + 1, y_sib)].fg, app.p.iris);
+        // Same-project child (`kid`, alpha) uses subtle; cross-project child (`sib`, beta) keeps iris.
+        assert_eq!(
+            buf[(find_x(y_kid + 1, "alpha"), y_kid + 1)].fg,
+            app.p.subtle
+        );
+        assert_eq!(buf[(find_x(y_sib + 1, "beta"), y_sib + 1)].fg, app.p.iris);
+        // Detail header shows the parent breadcrumb when `grand` is selected.
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(2));
+        assert_eq!(app.detail_rows(80), 3);
+        let mut detail = Terminal::new(TestBackend::new(80, 3)).unwrap();
+        detail.draw(|f| app.draw_detail(f, f.area())).unwrap();
+        let detail_text: String = detail
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(detail_text.contains("  ↳ lead › kid"), "{detail_text}");
+    }
+
+    #[test]
+    fn fold_badge_falls_back_to_urgency_count_when_narrow_and_flat_budgets_width() {
+        let p = Palette::load();
+        let f = Fold::from_states(false, ["error", "blocked", "working", "done"]);
+        assert_eq!(f.badge(0), " ▸ ✗1 ●1 ⠋1 ✓1");
+        // Wide enough: per-state colored spans.
+        let full = f.spans(&p, p.base, 0, 20);
+        assert_eq!(full.len(), 5);
+        assert_eq!(full[1].style.fg, Some(p.love));
+        assert_eq!(full[2].style.fg, Some(p.gold));
+        assert_eq!(full[3].style.fg, Some(p.foam));
+        assert_eq!(full[4].style.fg, Some(p.pine));
+        // Too narrow: compact urgency-tinted count (`love` for error).
+        let compact = f.spans(&p, p.base, 0, 6);
+        assert_eq!(compact.len(), 1);
+        assert_eq!(compact[0].content, " ▸4");
+        assert_eq!(compact[0].style.fg, Some(p.love));
+        // Flat view budgets fold badge width so parent names aren't clipped early.
+        let mut app = spawned();
+        app.quick = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect();
+        assert!(text.contains("lead ▸ ●1"), "{text}");
     }
 
     #[test]
