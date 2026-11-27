@@ -285,6 +285,15 @@ fn name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Bash script to verify `path` is a regular file and stream its bytes.
+///
+/// POSIX/bash `test -f` takes a single operand without `--` (passing `--`
+/// makes `test` fail with `binary operator expected`).
+fn remote_read_script(path: &str) -> String {
+    let quoted = sh_quote(path);
+    format!("test -f {quoted} && cat -- {quoted}\n")
+}
+
 /// The bytes of the regular file at `path` on `host`.
 fn read_file(host: &str, path: &str) -> ReadOutcome {
     if host == local_label() {
@@ -293,8 +302,7 @@ fn read_file(host: &str, path: &str) -> ReadOutcome {
         }
         return std::fs::read(path).map_or(ReadOutcome::Missing, ReadOutcome::Found);
     }
-    let quoted = sh_quote(path);
-    let Some(out) = host_bash(host, &format!("test -f -- {quoted} && cat -- {quoted}\n")) else {
+    let Some(out) = host_bash(host, &remote_read_script(path)) else {
         return ReadOutcome::Unreachable;
     };
     if !out.status.success() {
@@ -523,6 +531,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn remote_read_script_reads_regular_files_and_rejects_dirs_or_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "switchyard-images-test-{}-{}",
+            std::process::id(),
+            now()
+        ));
+        let spaced_dir = root.join("Copied Screenshots");
+        std::fs::create_dir_all(&spaced_dir).unwrap();
+        let file = spaced_dir.join("Screenshot 2026-11-27 at 08.30.30.png");
+        let payload = b"\x89PNG\r\n\x1a\nfake-image-bytes";
+        std::fs::write(&file, payload).unwrap();
+        let quoted_file = root.join("it's a -shot.png");
+        std::fs::write(&quoted_file, b"quoted").unwrap();
+        let dir_path = root.join("dir.png");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        let missing = root.join("missing.png");
+
+        let run_bash = |path: &std::path::Path| {
+            let script = remote_read_script(path.to_str().unwrap());
+            let mut child = Command::new("bash")
+                .arg("-s")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(script.as_bytes())
+                .unwrap();
+            child.wait_with_output().unwrap()
+        };
+
+        let out = run_bash(&file);
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, payload);
+
+        let out = run_bash(&quoted_file);
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.stdout, b"quoted");
+
+        let out = run_bash(&dir_path);
+        assert!(!out.status.success());
+        assert_eq!(out.stdout, b"");
+
+        let out = run_bash(&missing);
+        assert!(!out.status.success());
+        assert_eq!(out.stdout, b"");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
