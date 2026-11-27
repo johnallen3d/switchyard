@@ -2648,11 +2648,11 @@ impl App {
 
     /// Close the reply box once its message is sent, dropping the draft
     /// (`switchyard task act message` also removes the prompt file).
-    fn sent_reply(&mut self) -> Option<Reply> {
-        let r = self.reply.take()?;
-        r.prompt.discard();
-        self.drafts.remove(&r.key);
-        Some(r)
+    fn sent_reply(&mut self) {
+        if let Some(r) = self.reply.take() {
+            r.prompt.discard();
+            self.drafts.remove(&r.key);
+        }
     }
 
     /// The prompt Claude Code suggests next to the reply box's agent, while
@@ -2676,9 +2676,7 @@ impl App {
     /// The reply box's Enter once the message is sent (`switchyard task act
     /// message` also removes the prompt file).
     fn finish_reply(&mut self) {
-        if let Some(r) = self.sent_reply() {
-            self.note = Some(Toast::info(format!("sent to {}", r.label)));
-        }
+        self.sent_reply();
     }
 
     /// Edit the reply box's message in `$VISUAL` or `$EDITOR` (ctrl-g), then
@@ -6472,14 +6470,20 @@ impl App {
         };
         let label = r.label.clone();
         self.busy(term, format!("sending to {label}…"));
-        self.note = Some(match standalone::message(&pick, &text) {
-            Ok(msg) => {
-                self.sent_reply();
-                Toast::info(msg)
-            }
-            Err(e) => Toast::error(format!("{label}: {e}")),
-        });
+        self.finish_send_reply(&label, standalone::message(&pick, &text));
         true
+    }
+
+    /// Settle a standalone reply send: close the box and clear the progress
+    /// toast on success, or keep the box and show the error on failure.
+    fn finish_send_reply(&mut self, label: &str, result: Result<String, String>) {
+        self.note = match result {
+            Ok(_) => {
+                self.sent_reply();
+                None
+            }
+            Err(e) => Some(Toast::error(format!("{label}: {e}"))),
+        };
     }
 
     /// The snooze prompt's Enter: save the snooze; other keys (false) edit
@@ -7857,13 +7861,25 @@ mod tests {
             help_text(&app)
         );
         // Enter, typed back by the config once the message is sent, closes
-        // the box with a toast.
+        // the box without a toast.
         app.key(plain(KeyCode::Enter));
         assert!(app.reply.is_none());
+        assert!(app.note.is_none());
+        // Standalone send clears its progress toast on success and shows an
+        // error while keeping the reply box on failure.
+        app.key(plain(KeyCode::Tab));
+        app.key(KeyEvent::from(KeyCode::Char('y')));
+        app.note = Some(Toast::progress("sending to /woke…"));
+        app.finish_send_reply("/woke", Err("disconnected".into()));
+        assert_eq!(app.reply.as_ref().unwrap().prompt.text(), "y");
         assert_eq!(
             app.note.as_ref().map(|n| (n.text.as_str(), n.is_error())),
-            Some(("sent to /woke", false))
+            Some(("/woke: disconnected", true))
         );
+        app.note = Some(Toast::progress("sending to /woke…"));
+        app.finish_send_reply("/woke", Ok("sent to /woke".into()));
+        assert!(app.reply.is_none());
+        assert!(app.note.is_none());
         // Tab leaves an empty box, but not one with a message.
         app.key(plain(KeyCode::Tab));
         app.key(KeyEvent::from(KeyCode::Char('x')));
