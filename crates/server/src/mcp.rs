@@ -51,7 +51,7 @@ use switchyard_core::naming::{
     HARNESSES, default_harness, harness_spec, models, name_char, split_harness,
 };
 use switchyard_core::rex::local_label;
-use switchyard_core::tasks::{in_window, live_tasks, load_tasks};
+use switchyard_core::tasks::{in_window, live_tasks, load_tasks, set_handoff};
 use switchyard_core::{actions, transcript};
 
 use crate::api;
@@ -84,7 +84,7 @@ working in a Git worktree of a catalog project on one of John's hosts. Tasks are
 list_tasks shows the open ones with live status (working, idle, blocked on a prompt, scheduled to resume itself by a timer or background job, at wake_at when known, ...). \
 list_projects shows the catalog projects you can spawn into; \
 spawn_task starts a task with a first prompt; read_task shows what its agent has been saying; \
-message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes); \
+message_task types text into its tab; stop_task archives it (refused while it has uncommitted changes; accepts an optional handoff summary); \
 resume_task reopens an archived task (by PROJECT/NAME or by session_id + store). \
 search_threads searches past agent transcripts in Atuin Threads (keeping personal and work stores separate) and maps hits back to Switchyard tasks; \
 read_thread reads a specific Atuin thread's normalized transcript (requiring an explicit store). \
@@ -556,18 +556,34 @@ fn tools() -> Value {
                 "required": ["text"],
             },
         },
-        {
-            "name": "stop_task",
-            "description": "Archive a task: close its tab and (for worktree projects) remove its worktree \
-    (refused while a worktree has uncommitted changes). For worktree = false in-place projects, \
-    closes the tab and marks the task archived without checking Git status or removing the folder.",
-            "inputSchema": { "type": "object", "properties": { "task": task }, "required": ["task"] },
-            "annotations": { "destructiveHint": true },
-        },
+        stop_task_tool(&task),
         search_threads_tool(),
         read_thread_tool(),
         resume_task_tool(),
     ])
+}
+
+fn stop_task_tool(task: &Value) -> Value {
+    json!({
+        "name": "stop_task",
+        "description": "Archive a task: close its tab and (for worktree projects) remove its worktree \
+    (refused while a worktree has uncommitted changes). For worktree = false in-place projects, \
+    closes the tab and marks the task archived without checking Git status or removing the folder. \
+    Pass optional handoff to record your final handoff summary directly in this call instead of \
+    writing a long text reply beforehand.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": task,
+                "handoff": {
+                    "type": "string",
+                    "description": "Optional final handoff summary to record on the archived task and echo in the result.",
+                },
+            },
+            "required": ["task"],
+        },
+        "annotations": { "destructiveHint": true },
+    })
 }
 
 fn search_threads_tool() -> Value {
@@ -673,13 +689,7 @@ fn call(name: &str, args: &Value, caller: &Caller, endpoint: &Endpoint) -> Resul
             actions::message(host, session, window, text).map(|msg| json!({ "message": msg }))
         }
         "message_parent" => message_parent(args, caller, endpoint),
-        "stop_task" => {
-            let (task, _) = find_open(str_arg(args, "task")?, endpoint)?;
-            let (host, session, window) = tab(&task);
-            let result = actions::act("archive", host, session, window);
-            let _ = endpoint.asks.refresh.send("mcp");
-            result.map(|msg| json!({ "message": msg }))
-        }
+        "stop_task" => stop_task(args, endpoint),
         "search_threads" => search_threads(args, endpoint),
         "read_thread" => read_thread(args, endpoint),
         "resume_task" => resume_task(args, endpoint),
@@ -1098,6 +1108,44 @@ fn find_archived_task(lookup: ResumeLookup<'_>, tasks: &[Value]) -> Result<Value
                 .ok_or_else(|| format!("no archived task for {} session {sid}", store.label()))
         }
     }
+}
+
+fn stop_task(args: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+    let (task, _) = find_open(str_arg(args, "task")?, endpoint)?;
+    stop_task_with(
+        &task,
+        opt_arg(args, "handoff"),
+        |host, session, window| actions::act("archive", host, session, window),
+        |t, handoff| {
+            if let Err(e) = set_handoff(t, handoff) {
+                crate::log(&format!("stop_task: handoff save failed: {e}"));
+            }
+        },
+        || {
+            let _ = endpoint.asks.refresh.send("mcp");
+        },
+    )
+}
+
+fn stop_task_with(
+    task: &Value,
+    handoff: Option<&str>,
+    archive: impl FnOnce(&str, &str, &str) -> Result<String, String>,
+    record_handoff: impl FnOnce(&Value, &str),
+    refresh: impl FnOnce(),
+) -> Result<Value, String> {
+    let (host, session, window) = tab(task);
+    let result = archive(host, session, window);
+    if result.is_ok()
+        && let Some(text) = handoff
+    {
+        record_handoff(task, text);
+    }
+    refresh();
+    result.map(|msg| match handoff {
+        Some(text) => json!({ "message": msg, "handoff": text }),
+        None => json!({ "message": msg }),
+    })
 }
 
 /// Send text to the agent that spawned the caller's task, found from the
@@ -2121,6 +2169,12 @@ mod tests {
             spawn["inputSchema"]["required"],
             json!(["project", "prompt"])
         );
+        let stop = tools.iter().find(|t| t["name"] == "stop_task").unwrap();
+        assert_eq!(stop["inputSchema"]["required"], json!(["task"]));
+        assert_eq!(
+            stop["inputSchema"]["properties"]["handoff"]["type"],
+            "string"
+        );
         let search = tools
             .iter()
             .find(|t| t["name"] == "search_threads")
@@ -2727,5 +2781,77 @@ mod tests {
                 "for args {args}: expected error containing {expected:?}, got {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn stop_task_records_and_echoes_optional_handoff() {
+        let task = json!({
+            "project": "marvin",
+            "name": "tab-stops",
+            "host": "omarchy",
+            "session_id": "s1",
+            "window_id": "w1",
+            "created_at": 100,
+        });
+
+        // With handoff: archives, saves handoff, refreshes, and echoes handoff.
+        let mut recorded = None;
+        let mut refreshed = false;
+        let out = stop_task_with(
+            &task,
+            Some("Merged efb1972 and closed #1582."),
+            |h, s, w| {
+                assert_eq!((h, s, w), ("omarchy", "s1", "w1"));
+                Ok("archived marvin/tab-stops".into())
+            },
+            |t, text| {
+                recorded = Some((
+                    t["window_id"].as_str().unwrap().to_string(),
+                    text.to_string(),
+                ));
+            },
+            || refreshed = true,
+        )
+        .unwrap();
+        assert!(refreshed);
+        assert_eq!(
+            recorded,
+            Some(("w1".into(), "Merged efb1972 and closed #1582.".into()))
+        );
+        assert_eq!(
+            out,
+            json!({
+                "message": "archived marvin/tab-stops",
+                "handoff": "Merged efb1972 and closed #1582.",
+            })
+        );
+
+        // Without handoff: omits handoff from result and does not write it.
+        let mut called_record = false;
+        let out = stop_task_with(
+            &task,
+            None,
+            |_, _, _| Ok("archived marvin/tab-stops".into()),
+            |_, _| called_record = true,
+            || {},
+        )
+        .unwrap();
+        assert!(!called_record);
+        assert_eq!(out, json!({ "message": "archived marvin/tab-stops" }));
+
+        // On archive refusal: does not record handoff, still refreshes, returns error.
+        let mut called_record = false;
+        let mut refreshed = false;
+        let err = stop_task_with(
+            &task,
+            Some("should not save"),
+            |_, _, _| Err("uncommitted changes".into()),
+            |_, _| called_record = true,
+            || refreshed = true,
+        )
+        .unwrap_err();
+        assert!(!called_record);
+        assert!(refreshed);
+        assert_eq!(err, "uncommitted changes");
     }
 }

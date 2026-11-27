@@ -263,6 +263,25 @@ fn save_record_at(path: &Path, task: &serde_json::Value) -> Result<(), String> {
     })
 }
 
+/// Record `handoff` on `task`'s entry in the registry (matched by
+/// `same_task`), leaving every other record untouched.
+///
+/// # Errors
+///
+/// Fails as `update_tasks` does.
+pub fn set_handoff(task: &serde_json::Value, handoff: &str) -> Result<(), String> {
+    set_handoff_at(&tasks_path(), task, handoff)
+}
+
+fn set_handoff_at(path: &Path, task: &serde_json::Value, handoff: &str) -> Result<(), String> {
+    update_at(path, |tasks| {
+        if let Some(entry) = tasks.iter_mut().find(|t| same_task(t, task)) {
+            entry["handoff"] = handoff.into();
+        }
+        Ok(())
+    })
+}
+
 /// Whether `task` was spawned in `window`. Matched on the window alone:
 /// Rex window IDs are unique across servers, but a host's label
 /// (`hostname -s`) can change under a task when macOS takes its name from
@@ -1288,6 +1307,9 @@ fn commit_checked_at(
             if !newer["ended_at"].is_null() && !orphan_gone {
                 task["ended_at"] = newer["ended_at"].clone();
                 task["ended_reason"] = newer["ended_reason"].clone();
+                if let Some(handoff) = newer.get("handoff").filter(|v| !v.is_null()) {
+                    task["handoff"] = handoff.clone();
+                }
             }
             keep_unlinked(task, newer);
         }
@@ -1581,6 +1603,29 @@ mod tests {
         assert_eq!(saved.len(), 2);
         assert_eq!(saved[0]["ended_reason"], "archived");
         assert_eq!(saved[0]["pinned"], true);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn set_handoff_records_summary_and_survives_commit_checked() {
+        let path = registry("handoff");
+        let original = task("a", 1);
+        save_at(&path, std::slice::from_ref(&original), true).unwrap();
+        let mut checked = vec![original.clone()];
+        checked[0]["ended_at"] = 40.into();
+        checked[0]["ended_reason"] = "tab closed".into();
+
+        let mut archived = original.clone();
+        archived["ended_at"] = 50.into();
+        archived["ended_reason"] = "archived".into();
+        save_record_at(&path, &archived).unwrap();
+        set_handoff_at(&path, &original, "Committed abc123 and closed #42.").unwrap();
+
+        let merged = commit_checked_at(&path, checked, 60).unwrap();
+        assert_eq!(merged[0]["ended_reason"], "archived");
+        assert_eq!(merged[0]["handoff"], "Committed abc123 and closed #42.");
+        let saved = load_at(&path).unwrap();
+        assert_eq!(saved[0]["handoff"], "Committed abc123 and closed #42.");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

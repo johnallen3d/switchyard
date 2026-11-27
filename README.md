@@ -155,7 +155,7 @@ are refused.
 | `read_task`      | Status and the last transcript entries                   |
 | `message_task`   | Type text into the agent's tab (not while it's blocked)  |
 | `message_parent` | From a spawned task: send text to its spawner (Rex tab or callback URL) |
-| `stop_task`      | Archive (refused with uncommitted changes)               |
+| `stop_task`      | Archive (refused with uncommitted changes; optional `handoff`) |
 
 Tasks are named `PROJECT/NAME`. `spawn_task` records the calling agent as
 the new task's parent when it knows how to reach it:
