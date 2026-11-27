@@ -13,5 +13,6 @@ pub mod popup;
 pub mod prompt_box;
 pub mod protocol;
 pub mod slash;
+pub mod toast;
 
 pub use palette::Palette;

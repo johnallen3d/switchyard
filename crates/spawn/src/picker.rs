@@ -60,6 +60,7 @@ use switchyard_ui::fuzzy::score_fields;
 use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
 use switchyard_ui::prompt_box::{self, PromptBox, place_cursor, text_field, text_key};
 use switchyard_ui::protocol::{Title, clear_title, hex};
+use switchyard_ui::toast::{self, Toast};
 
 /// How long the prompt must stay unchanged before the model is asked to
 /// name it (see `sync_suggestion`).
@@ -298,9 +299,9 @@ struct App {
     /// Run from a shell rather than in the config's float: Enter reaches the
     /// picker, which opens the pick itself (see `standalone_launch`).
     standalone: bool,
-    /// The last standalone launch's progress or failure (and whether it
-    /// failed), shown in the footer until the next key.
-    note: Option<(String, bool)>,
+    /// The last standalone launch's progress or failure, shown as a floating
+    /// toast notification until dismissed, replaced, or expired.
+    note: Option<Toast>,
     /// Printed once the picker has closed: a launch that couldn't show its tab.
     exit_note: Option<String>,
     started: Instant,
@@ -1296,6 +1297,9 @@ impl App {
         if let Some((fields, bounds)) = self.item_menu.card {
             self.draw_item_menu(f, fields, bounds);
         }
+        if let Some(note) = &self.note {
+            toast::draw(f, &self.p, inner, note, tick(self.started), None);
+        }
     }
 
     /// The work item menu, over the list (`bounds`) up to the form's fields:
@@ -1987,17 +1991,6 @@ impl App {
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
-        if let Some((msg, failed)) = &self.note {
-            let spans = vec![
-                Span::raw(" "),
-                Span::styled(
-                    msg.clone(),
-                    Style::new().fg(if *failed { p.love } else { p.pine }),
-                ),
-            ];
-            f.render_widget(Line::from(spans), area);
-            return;
-        }
         let ready = !self.pick().is_empty();
         let mut hints: Vec<(&str, &str, Color)> = Vec::new();
         if self.confirm_close {
@@ -2151,40 +2144,37 @@ pub fn run_standalone(kind: Kind) -> io::Result<()> {
 
 /// Enter's pick from a shell: the chosen project or folder's session, or
 /// agent work, opened here as the config's actions do. Ok(true) when it
-/// launched and the picker should close; failures stay in the footer.
+/// launched and the picker should close; failures show as a toast.
 fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool> {
     if app.kind == Kind::Session {
         return standalone_open(term, app);
     }
     app.save_prompt();
     let Some(path) = app.target_path() else {
-        app.note = Some(("pick a project or Git folder first".into(), true));
+        app.note = Some(Toast::error("pick a project or Git folder first"));
         return Ok(false);
     };
     let name = app.launch_name();
     let names_from = app.names_from().filter(|_| name.is_empty());
     if let Some(problem) = name_problem(&name).filter(|_| names_from.is_none()) {
-        app.note = Some((problem.into(), true));
+        app.note = Some(Toast::error(problem));
         return Ok(false);
     }
     let prompt_ref = match app.prompt.saved_ref() {
         Some("") => None,
         Some(r) => Some(r.to_string()),
         None => {
-            app.note = Some(("the prompt couldn't be saved".into(), true));
+            app.note = Some(Toast::error("the prompt couldn't be saved"));
             return Ok(false);
         }
     };
     let item = app.item_text();
     let host = app.agent_host().to_string();
     let label = folders::home_relative(&path);
-    app.note = Some((
-        match names_from {
-            Some(from) => format!("Naming from the {from} and spawning in {label} on {host}…"),
-            None => format!("Spawning {label}/{name} on {host}…"),
-        },
-        false,
-    ));
+    app.note = Some(Toast::progress(match names_from {
+        Some(from) => format!("Naming from the {from} and spawning in {label} on {host}…"),
+        None => format!("Spawning {label}/{name} on {host}…"),
+    }));
     term.draw(|f| app.draw(f))?;
     match launch(
         &host,
@@ -2203,7 +2193,7 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
         }
         Err(e) => {
             log(&format!("standalone launch of {label}/{name} failed: {e}"));
-            app.note = Some((e, true));
+            app.note = Some(Toast::error(e));
             Ok(false)
         }
     }
@@ -2213,14 +2203,14 @@ fn standalone_launch(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bo
 /// session action does. Ok(true) when it opened and the picker should close.
 fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool> {
     let Some(path) = app.target_path() else {
-        app.note = Some(("pick a project or folder first".into(), true));
+        app.note = Some(Toast::error("pick a project or folder first"));
         return Ok(false);
     };
     let host = app.session_host().to_string();
-    app.note = Some((
-        format!("Opening {} on {host}…", folders::home_relative(&path)),
-        false,
-    ));
+    app.note = Some(Toast::progress(format!(
+        "Opening {} on {host}…",
+        folders::home_relative(&path)
+    )));
     term.draw(|f| app.draw(f))?;
     match folders::open_on(&host, &path) {
         Ok((host, session)) => {
@@ -2231,7 +2221,7 @@ fn standalone_open(term: &mut DefaultTerminal, app: &mut App) -> io::Result<bool
             log(&format!(
                 "standalone session in {path} on {host} failed: {e}"
             ));
-            app.note = Some((e, true));
+            app.note = Some(Toast::error(e));
             Ok(false)
         }
     }
@@ -2243,9 +2233,16 @@ fn picker_loop(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.sync_commands();
         app.sync_items();
         app.sync_suggestion();
+        if app.note.as_ref().is_some_and(|n| n.expired(Instant::now())) {
+            app.note = None;
+        }
         term.draw(|f| app.draw(f))?;
         app.report()?;
-        let wait = if app.waiting() || app.listing_items() || app.suggesting() {
+        let wait = if app.waiting()
+            || app.listing_items()
+            || app.suggesting()
+            || app.note.as_ref().is_some_and(Toast::is_progress)
+        {
             Duration::from_millis(90)
         } else {
             Duration::from_millis(250)

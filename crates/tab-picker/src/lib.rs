@@ -175,6 +175,7 @@ use switchyard_ui::glyphs::{ICON_SEARCH, SPINNER, tick};
 use switchyard_ui::popup;
 use switchyard_ui::prompt_box::{self, PromptBox};
 use switchyard_ui::protocol::{self, hex};
+use switchyard_ui::toast::{self, Toast};
 
 const ICON_SESSION: &str = "\u{f0bdf}"; // nf-md-console_line
 const ICON_INBOX: &str = "\u{f0e27}"; // nf-md-inbox_full
@@ -895,9 +896,10 @@ struct App {
     /// Hosts whose tabs the last rows lack or have from earlier.
     failed: Vec<String>,
     tasks_load: Tasks,
-    /// The last standalone action's outcome (and whether it failed), shown
-    /// in the footer until the next key.
-    note: Option<(String, bool)>,
+    /// The last standalone action's outcome, refusal, or in-progress status,
+    /// shown as a floating toast notification in the top-right corner so it
+    /// never blocks the footer's keybind hints.
+    note: Option<Toast>,
     /// The picker's data, as pastes (see `standalone::Feed`).
     feed: Option<standalone::Feed>,
     /// A standalone archive running on its own thread, so the picker stays
@@ -1121,7 +1123,7 @@ impl App {
             "note" if self.fed => {
                 self.fed_pick = None;
                 protocol::clear_title();
-                self.note = Some((body.trim().to_string(), true));
+                self.note = Some(Toast::error(body.trim()));
             }
             _ => {}
         }
@@ -1626,7 +1628,7 @@ impl App {
     fn open_projects(&mut self) {
         let projects = self.archive_projects();
         if projects.is_empty() {
-            self.note = Some(("no ended tasks name a project".into(), true));
+            self.note = Some(Toast::error("no ended tasks name a project"));
             return;
         }
         self.projects = Some(projects::Chooser::new(projects, self.project.clone()));
@@ -2280,13 +2282,13 @@ impl App {
     }
 
     /// Open the work items float (ctrl-b) on the highlighted task's links,
-    /// even just one; the footer says why when there are none.
+    /// even just one; a toast says why when there are none.
     fn open_items(&mut self) {
         if self.view == View::Usage {
             return;
         }
         let Some(t) = self.selected_task() else {
-            self.note = Some(("highlight a task to act on its work items".into(), true));
+            self.note = Some(Toast::error("highlight a task to act on its work items"));
             return;
         };
         let (label, profile, links) = (t.label(), t.profile.clone(), chooser_links(&t.links));
@@ -2299,7 +2301,7 @@ impl App {
                 self.moved();
                 self.items = Some(i);
             }
-            None => self.note = Some((format!("{label} has no linked work items"), true)),
+            None => self.note = Some(Toast::error(format!("{label} has no linked work items"))),
         }
     }
 
@@ -2319,7 +2321,7 @@ impl App {
                 None
             }
             items::Outcome::Refuse(why) => {
-                self.note = Some((why, true));
+                self.note = Some(Toast::error(why));
                 None
             }
             run => Some(run),
@@ -2327,21 +2329,20 @@ impl App {
     }
 
     /// Open the switch-harness float (ctrl-e) for the highlighted task, in
-    /// Inbox or Archive; the footer says why when it can't be switched.
+    /// Inbox or Archive; a toast says why when it can't be switched.
     fn open_harness(&mut self) {
         if !matches!(self.view, View::Inbox | View::Archive) {
             return;
         }
         let Some(t) = self.selected_task() else {
-            self.note = Some(("highlight a task to switch its harness".into(), true));
+            self.note = Some(Toast::error("highlight a task to switch its harness"));
             return;
         };
         let label = t.label();
         if t.is_orphan() {
-            self.note = Some((
-                format!("{label} is an orphan worktree with no agent session to continue"),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{label} is an orphan worktree with no agent session to continue"
+            )));
             return;
         }
         let source = if t.harness.is_empty() {
@@ -2350,22 +2351,16 @@ impl App {
             t.harness.clone()
         };
         if switchyard_core::atuin::store_program(&t.profile).is_none() {
-            self.note = Some((
-                format!(
-                    "Atuin doesn't capture the {} profile, so {label} can't continue in another harness",
-                    t.profile
-                ),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "Atuin doesn't capture the {} profile, so {label} can't continue in another harness",
+                t.profile
+            )));
             return;
         }
         if switchyard_core::atuin::harness_name(&source).is_none() {
-            self.note = Some((
-                format!(
-                    "Atuin doesn't capture {source} sessions, so {label} can't continue in another harness"
-                ),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "Atuin doesn't capture {source} sessions, so {label} can't continue in another harness"
+            )));
             return;
         }
         let (model, ended) = (t.model.clone(), t.ended.is_some());
@@ -2393,7 +2388,7 @@ impl App {
                 None
             }
             harness::Outcome::Refuse(why) => {
-                self.note = Some((why, true));
+                self.note = Some(Toast::error(why));
                 None
             }
             run @ harness::Outcome::Switch(_) => Some(run),
@@ -2401,30 +2396,28 @@ impl App {
     }
 
     /// Open the move-host float (ctrl-h) for the highlighted task, in Inbox or
-    /// Archive; the footer says why when it can't be moved.
+    /// Archive; a toast says why when it can't be moved.
     fn open_move_host(&mut self) {
         if !matches!(self.view, View::Inbox | View::Archive) {
             return;
         }
         let Some(t) = self.selected_task() else {
-            self.note = Some(("highlight a task to move it to another host".into(), true));
+            self.note = Some(Toast::error("highlight a task to move it to another host"));
             return;
         };
         let label = t.label();
         if t.is_orphan() {
-            self.note = Some((
-                format!("{label} is an orphan worktree with no agent session to move"),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{label} is an orphan worktree with no agent session to move"
+            )));
             return;
         }
         if !t.worktree.is_empty()
             && t.worktree.trim_end_matches('/') == t.repo.trim_end_matches('/')
         {
-            self.note = Some((
-                format!("{label} is in the primary checkout, not a task worktree"),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{label} is in the primary checkout, not a task worktree"
+            )));
             return;
         }
         let source = if t.harness.is_empty() {
@@ -2433,13 +2426,13 @@ impl App {
             t.harness.clone()
         };
         if let Err(why) = switchyard_core::atuin::move_plan(&t.profile, &source) {
-            self.note = Some((format!("{label}: {why}"), true));
+            self.note = Some(Toast::error(format!("{label}: {why}")));
             return;
         }
         let projects = match switchyard_core::hosts::catalog() {
             Ok(p) => p,
             Err(e) => {
-                self.note = Some((e, true));
+                self.note = Some(Toast::error(e));
                 return;
             }
         };
@@ -2447,16 +2440,17 @@ impl App {
             switchyard_core::folders::home_relative(&p.path)
                 == switchyard_core::folders::home_relative(&t.repo)
         }) else {
-            self.note = Some((
-                format!("{label} isn't a catalog project, so it can't be moved to another host"),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{label} isn't a catalog project, so it can't be moved to another host"
+            )));
             return;
         };
         let current_host = t.host.clone();
         let targets = switchyard_core::hosts::other_compatible(&project, &current_host);
         if targets.is_empty() {
-            self.note = Some((format!("no other compatible host for {label}"), true));
+            self.note = Some(Toast::error(format!(
+                "no other compatible host for {label}"
+            )));
             return;
         }
         let (dirty, ended) = (t.dirty, t.ended.is_some());
@@ -2610,7 +2604,7 @@ impl App {
             return;
         };
         if self.preview_want().is_none() {
-            self.note = Some(("highlight an agent to message it".into(), true));
+            self.note = Some(Toast::error("highlight an agent to message it"));
             return;
         }
         let Some(key) = self.selected_key() else {
@@ -2618,10 +2612,9 @@ impl App {
         };
         let label = self.selected_label();
         if self.flat(item).state == "blocked" {
-            self.note = Some((
-                format!("{label} is waiting on a prompt; answer it in its tab"),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{label} is waiting on a prompt; answer it in its tab"
+            )));
             return;
         }
         self.moved();
@@ -2684,7 +2677,7 @@ impl App {
     /// message` also removes the prompt file).
     fn finish_reply(&mut self) {
         if let Some(r) = self.sent_reply() {
-            self.note = Some((format!("sent to {}", r.label), false));
+            self.note = Some(Toast::info(format!("sent to {}", r.label)));
         }
     }
 
@@ -2923,11 +2916,11 @@ impl App {
                 }
                 search::Outcome::Copy(text, note) => {
                     self.copied = Some(text);
-                    self.note = Some((note, false));
+                    self.note = Some(Toast::info(note));
                     return;
                 }
                 search::Outcome::Refuse(why) => {
-                    self.note = Some((why, true));
+                    self.note = Some(Toast::error(why));
                     return;
                 }
                 search::Outcome::Stay | search::Outcome::GoOrResume(_) => return,
@@ -2950,7 +2943,11 @@ impl App {
             self.armed = Armed::No;
             return;
         }
+        let was_armed = self.armed != Armed::No;
         self.armed = Armed::No;
+        if was_armed && k.code == KeyCode::Esc {
+            return;
+        }
         if self.view == View::Usage && self.usage_key(k) {
             return;
         }
@@ -2991,7 +2988,7 @@ impl App {
             } else {
                 "no agent here: ctrl-x archives agent tabs"
             };
-            self.note = Some((why.into(), true));
+            self.note = Some(Toast::error(why));
         }
         self.armed = match self.armed {
             _ if !self.armable() => Armed::No,
@@ -3019,7 +3016,7 @@ impl App {
         }
         self.armed = Armed::No;
         if self.preview_want().is_none() {
-            self.note = Some(("highlight an agent to interrupt it".into(), true));
+            self.note = Some(Toast::error("highlight an agent to interrupt it"));
             return;
         }
         let Some(item) = self.selected_item() else {
@@ -3031,29 +3028,30 @@ impl App {
                 self.armed = Armed::Interrupt;
                 None
             }
-            "blocked" => Some((
-                format!("{label} is waiting on a prompt; answer it in its tab"),
-                true,
-            )),
-            _ => Some((format!("{label} isn't working: nothing to interrupt"), true)),
+            "blocked" => Some(Toast::error(format!(
+                "{label} is waiting on a prompt; answer it in its tab"
+            ))),
+            _ => Some(Toast::error(format!(
+                "{label} isn't working: nothing to interrupt"
+            ))),
         };
     }
 
     /// ctrl-y: copy where the highlighted agent's session log is, as
     /// `host:`, `session:` (the harness's session ID) and `log:` (its path
-    /// on that host) lines, and say so in the footer; a note says why when
+    /// on that host) lines, and show a toast; a toast says why when
     /// there's none.
     fn copy_log(&mut self) {
         let Some(want) = self.preview_want() else {
-            self.note = Some(("highlight an agent to copy its log path".into(), true));
+            self.note = Some(Toast::error("highlight an agent to copy its log path"));
             return;
         };
         let Some(pv) = self.preview.as_ref().filter(|pv| pv.pane == want) else {
-            self.note = Some(("its transcript hasn't loaded yet".into(), true));
+            self.note = Some(Toast::error("its transcript hasn't loaded yet"));
             return;
         };
         let Some(log) = pv.log.clone() else {
-            self.note = Some(("no session log path for this agent".into(), true));
+            self.note = Some(Toast::error("no session log path for this agent"));
             return;
         };
         let host = pv.agent.as_ref().map(|a| a.host.clone());
@@ -3061,7 +3059,10 @@ impl App {
         let host_line = host.as_ref().map(|h| format!("host: {h}\n"));
         let text = format!("{}session: {id}\nlog: {log}", host_line.unwrap_or_default());
         let parts: Vec<&str> = host.as_deref().into_iter().chain([id]).collect();
-        self.note = Some((format!("copied {} and log path", parts.join(" · ")), false));
+        self.note = Some(Toast::info(format!(
+            "copied {} and log path",
+            parts.join(" · ")
+        )));
         self.copied = Some(text);
     }
 
@@ -3166,7 +3167,7 @@ impl App {
                 self.query.pop();
                 self.refilter();
             }
-            KeyCode::Esc if self.searching => self.clear_search(),
+            KeyCode::Esc => self.list_esc(),
             KeyCode::Char('?') if !ctrl && !alt => self.help = Some(help::Help::default()),
             // `/` focuses the search box; until then, letters do nothing.
             KeyCode::Char('/') if !ctrl && !alt && !self.searching => {
@@ -3206,6 +3207,16 @@ impl App {
             KeyCode::Home => self.edge(false),
             KeyCode::End => self.edge(true),
             _ => {}
+        }
+    }
+
+    /// Escape in a list view: leave search first, else dismiss a non-progress
+    /// notification toast.
+    fn list_esc(&mut self) {
+        if self.searching {
+            self.clear_search();
+        } else if self.note.as_ref().is_some_and(|n| !n.is_progress()) {
+            self.note = None;
         }
     }
 
@@ -3283,7 +3294,7 @@ impl App {
     fn enter_work_scrollback(&mut self, k: Option<KeyEvent>) {
         let link = self.work.selected_link();
         let (Some(link), Some((lines, nav))) = (link, self.transcript_text()) else {
-            self.note = Some(("nothing here to scroll through yet".into(), true));
+            self.note = Some(Toast::error("nothing here to scroll through yet"));
             return;
         };
         if lines.is_empty() {
@@ -3310,7 +3321,7 @@ impl App {
             return self.enter_work_scrollback(k);
         }
         let (Some(pane), Some((lines, nav))) = (self.preview_want(), self.transcript_text()) else {
-            self.note = Some(("nothing here to scroll through".into(), true));
+            self.note = Some(Toast::error("nothing here to scroll through"));
             return;
         };
         if lines.is_empty() {
@@ -3411,8 +3422,8 @@ impl App {
             self.open_reply();
         }
         // Why there is no reply box, if there is none, after the copy.
-        let why = self.note.take().map(|(n, _)| format!(" · {n}"));
-        self.note = Some((
+        let why = self.note.take().map(|n| format!(" · {}", n.text));
+        self.note = Some(Toast::from_note(
             format!("copied {what}{}", why.as_deref().unwrap_or_default()),
             why.is_some(),
         ));
@@ -3464,9 +3475,13 @@ impl App {
             self.draw_stacked(f, content);
         }
         self.draw_footer_in_border(f);
-        // The slash-command menu goes over everything but the keys float.
+        // The slash-command menu goes over everything but toasts and the keys float.
         if let (Some((card, bounds)), Some(r)) = (self.reply_card, &mut self.reply) {
             r.prompt.draw_menu(f, &self.p, card, bounds);
+        }
+        if let Some(note) = &self.note {
+            let dismiss = self.esc_dismisses_toast().then_some("esc");
+            toast::draw(f, &self.p, inner, note, tick(self.started), dismiss);
         }
         if self.help.is_some() {
             let sections = self.help_sections();
@@ -3474,6 +3489,37 @@ impl App {
             if let Some(h) = &mut self.help {
                 h.draw(f, &p, inner, &sections);
             }
+        }
+    }
+
+    /// Whether plain Escape currently dismisses a visible toast (rather than
+    /// closing a modal, search, reply box, scrollback, armed action, or the
+    /// quick float).
+    fn esc_dismisses_toast(&self) -> bool {
+        !self.quick
+            && self.help.is_none()
+            && self.scrollback.is_none()
+            && self.items.is_none()
+            && self.harness.is_none()
+            && self.move_host.is_none()
+            && self.projects.is_none()
+            && self.snooze.is_none()
+            && self.reply.is_none()
+            && !self.searching
+            && self.armed == Armed::No
+            && !(self.view == View::Work
+                && (self.work.chooser.is_some() || self.work.armed_item().is_some()))
+            && !(self.view == View::Search && self.search.typing)
+    }
+
+    /// Drop the active toast once its TTL has elapsed.
+    fn expire_note(&mut self) {
+        if self
+            .note
+            .as_ref()
+            .is_some_and(|n| n.expired(Instant::now()))
+        {
+            self.note = None;
         }
     }
 
@@ -5317,13 +5363,13 @@ impl App {
                 ("⌃D ⌃U", "half a page"),
                 ("gg ⌃G G", "first, last"),
                 ("/", "search"),
-                ("esc", "leave the search"),
+                ("esc", "leave the search or dismiss a notification"),
                 ("⌃W ⌥⌫", "delete a word"),
             ]);
         } else {
             moving.extend([
                 ("/", "search"),
-                ("esc", "leave the search"),
+                ("esc", "leave the search or dismiss a notification"),
                 ("⌃W ⌥⌫", "delete a word"),
             ]);
             // Inbox's ctrl-u scrolls the transcript instead.
@@ -5628,14 +5674,6 @@ impl App {
 
     fn draw_footer(&self, f: &mut Frame, area: Rect) {
         let p = &self.p;
-        if let Some((msg, failed)) = &self.note {
-            let style = Style::new().fg(if *failed { p.love } else { p.pine });
-            f.render_widget(
-                Line::from(vec![Span::raw(" "), Span::styled(msg.clone(), style)]),
-                area,
-            );
-            return;
-        }
         if let Some(h) = &self.help {
             return self.draw_hints(f, area, &h.hints());
         }
@@ -5811,8 +5849,8 @@ impl App {
                     self.refilter();
                 }
                 self.note = Some(match r {
-                    Ok(msg) => (msg, false),
-                    Err(e) => (e, true),
+                    Ok(msg) => Toast::info(msg),
+                    Err(e) => Toast::error(e),
                 });
                 self.refetch();
             }
@@ -5820,6 +5858,9 @@ impl App {
             Err(TryRecvError::Disconnected) => {
                 self.archiving = None;
                 self.gone = None;
+                if self.note.as_ref().is_some_and(Toast::is_progress) {
+                    self.note = Some(Toast::error("archive stopped unexpectedly"));
+                }
                 self.refetch();
             }
         }
@@ -5885,7 +5926,6 @@ impl App {
         if !matches!(k.code, KeyCode::Enter) {
             return false;
         }
-        self.note = None;
         if self.inbox_enter(k) {
             return true;
         }
@@ -5894,8 +5934,8 @@ impl App {
         };
         let label = self.selected_label();
         let done = |r: Result<(), String>, msg: String| match r {
-            Ok(()) => (msg, false),
-            Err(e) => (e, true),
+            Ok(()) => Toast::info(msg),
+            Err(e) => Toast::error(e),
         };
         let note = match pick.action.as_str() {
             // As the config types ctrl-x for `ask`: on to "are you sure".
@@ -5906,13 +5946,12 @@ impl App {
             "archive" | "force-archive" => {
                 self.armed = Armed::No;
                 if self.archiving.is_some() {
-                    self.note = Some((
-                        "one archive at a time: wait for this one to finish".into(),
-                        true,
+                    self.note = Some(Toast::error(
+                        "one archive at a time: wait for this one to finish",
                     ));
                     return true;
                 }
-                let note = (format!("Archiving {label} on {}…", pick.host), false);
+                let note = Toast::progress(format!("Archiving {label} on {}…", pick.host));
                 // The row goes now; the archive takes a moment to run.
                 self.hide_for_archive();
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -5932,9 +5971,9 @@ impl App {
                         self.query.clear();
                         self.set_view(View::Inbox);
                         self.launched = Some(((session, window), Instant::now()));
-                        (format!("resumed {label} on {host}"), false)
+                        Toast::info(format!("resumed {label} on {host}"))
                     }
-                    Err(e) => (e, true),
+                    Err(e) => Toast::error(e),
                 }
             }
             _ => {
@@ -5962,7 +6001,7 @@ impl App {
             return false;
         }
         if self.query.is_empty() {
-            self.note = Some(("⌘⏎ jumps to the highlighted tab".into(), false));
+            self.note = Some(Toast::info("⌘⏎ jumps to the highlighted tab"));
         } else {
             self.clear_search();
         }
@@ -5984,31 +6023,31 @@ impl App {
             Some((t.profile.clone(), reference, pr.name(None)))
         }) {
             self.note = Some(match standalone::review_float(&["pr", &profile, &pr]) {
-                Ok(()) => (format!("reviewing {name} in tuicr"), false),
-                Err(e) => (e, true),
+                Ok(()) => Toast::info(format!("reviewing {name} in tuicr")),
+                Err(e) => Toast::error(e),
             });
             return;
         }
         let Some(want) = self.preview_want() else {
-            self.note = Some(("highlight an agent to review its changes".into(), true));
+            self.note = Some(Toast::error("highlight an agent to review its changes"));
             return;
         };
         let label = self.selected_label();
         self.note = Some(
             match standalone::review_float(&["task", &want.target, &want.session, &want.window]) {
-                Ok(()) => (format!("reviewing {label} in tuicr"), false),
-                Err(e) => (e, true),
+                Ok(()) => Toast::info(format!("reviewing {label} in tuicr")),
+                Err(e) => Toast::error(e),
             },
         );
     }
 
     /// Enter on an armed interrupt: press Escape in the agent's tab; the
     /// outcome to show.
-    fn interrupt(&mut self, pick: &standalone::Pick, label: &str) -> (String, bool) {
+    fn interrupt(&mut self, pick: &standalone::Pick, label: &str) -> Toast {
         self.armed = Armed::No;
         match standalone::interrupt(pick) {
-            Ok(msg) => (msg, false),
-            Err(e) => (format!("{label}: {e}"), true),
+            Ok(msg) => Toast::info(msg),
+            Err(e) => Toast::error(format!("{label}: {e}")),
         }
     }
 
@@ -6030,7 +6069,7 @@ impl App {
         match outcome {
             work::Outcome::Pass => return false,
             work::Outcome::Stay => {}
-            work::Outcome::Refuse(why) => self.note = Some((why, true)),
+            work::Outcome::Refuse(why) => self.note = Some(Toast::error(why)),
             work::Outcome::Arm => self.note = None,
             work::Outcome::Act {
                 action,
@@ -6040,8 +6079,8 @@ impl App {
             } => self.act_on_pr(action, &item, &url, &name, term),
             work::Outcome::Open(url) => {
                 self.note = Some(match standalone::open_url(&url) {
-                    Ok(()) => (format!("opened {url}"), false),
-                    Err(e) => (e, true),
+                    Ok(()) => Toast::info(format!("opened {url}")),
+                    Err(e) => Toast::error(e),
                 });
             }
             work::Outcome::Go(to) => {
@@ -6052,8 +6091,8 @@ impl App {
                     window: to.window,
                 };
                 self.note = Some(match standalone::go(&pick) {
-                    Ok(()) => (format!("showed {}", to.label), false),
-                    Err(e) => (e, true),
+                    Ok(()) => Toast::info(format!("showed {}", to.label)),
+                    Err(e) => Toast::error(e),
                 });
             }
             work::Outcome::Scroll(k) => {
@@ -6072,8 +6111,8 @@ impl App {
             work::Outcome::Launch { path, url, name } => self.launch(path, url, name),
             work::Outcome::Review { profile, url, name } => {
                 self.note = Some(match standalone::review_float(&["pr", &profile, &url]) {
-                    Ok(()) => (format!("reviewing {name} in tuicr"), false),
-                    Err(e) => (e, true),
+                    Ok(()) => Toast::info(format!("reviewing {name} in tuicr")),
+                    Err(e) => Toast::error(e),
                 });
             }
         }
@@ -6107,9 +6146,9 @@ impl App {
             match standalone::item_action(action, item, "", &profile, url) {
                 Ok(done) => {
                     self.work.load(true);
-                    (done, false)
+                    Toast::info(done)
                 }
-                Err(e) => (e, true),
+                Err(e) => Toast::error(e),
             },
         );
     }
@@ -6118,10 +6157,12 @@ impl App {
     /// claude, named from the item (see core's `launch`).
     fn launch(&mut self, path: String, url: String, name: String) {
         if !switchyard_core::config::has_control_plane() {
-            self.note = Some(("no control plane configured to start sessions".into(), true));
+            self.note = Some(Toast::error(
+                "no control plane configured to start sessions",
+            ));
             return;
         }
-        self.note = Some((format!("Starting {name}…"), false));
+        self.note = Some(Toast::progress(format!("Starting {name}…")));
         self.work.starting.insert(url.clone());
         // Inbox is where the new session will show: go there now, with the
         // Work view's search cleared, and highlight it when it lists.
@@ -6178,15 +6219,15 @@ impl App {
             self.note = Some(match r {
                 Some(Ok((host, session, window))) => {
                     self.launched = Some(((session, window), Instant::now()));
-                    (format!("started {name} on {host}"), false)
+                    Toast::info(format!("started {name} on {host}"))
                 }
                 Some(Err(e)) => {
                     self.work.starting.remove(&url);
-                    (format!("{name}: {e}"), true)
+                    Toast::error(format!("{name}: {e}"))
                 }
                 None => {
                     self.work.starting.remove(&url);
-                    (format!("{name}: the launch went away"), true)
+                    Toast::error(format!("{name}: the launch went away"))
                 }
             });
             self.focus_launched();
@@ -6204,7 +6245,7 @@ impl App {
         self.note_work_missed();
     }
 
-    /// Say in the footer when an item the Work view was asked to show
+    /// Show a toast when an item the Work view was asked to show
     /// isn't among its project's open ones.
     fn note_work_missed(&mut self) {
         if let Some(l) = self.work.missed.take() {
@@ -6214,10 +6255,10 @@ impl App {
             } else {
                 "open work items"
             };
-            self.note = Some((
-                format!("{} isn't among {project}'s {what}", l.name(None)),
-                true,
-            ));
+            self.note = Some(Toast::error(format!(
+                "{} isn't among {project}'s {what}",
+                l.name(None)
+            )));
         }
     }
 
@@ -6248,9 +6289,9 @@ impl App {
                 self.note = Some(match standalone::open_url(&url) {
                     Ok(()) => {
                         self.items = None;
-                        (format!("opened {url}"), false)
+                        Toast::info(format!("opened {url}"))
                     }
-                    Err(e) => (e, true),
+                    Err(e) => Toast::error(e),
                 });
             }
             Some(items::Outcome::Show(link)) => self.show_in_work(link),
@@ -6272,7 +6313,7 @@ impl App {
                             i.show(thread);
                         }
                     }
-                    Err(e) => self.note = Some((e, true)),
+                    Err(e) => self.note = Some(Toast::error(e)),
                 }
             }
             Some(items::Outcome::Run { action, item, body }) => {
@@ -6295,14 +6336,14 @@ impl App {
                 match standalone::item_action(action, &item, &body, &profile, &url) {
                     Ok(msg) => {
                         self.items = None;
-                        self.note = Some((msg.replace(&item.name(), &name), false));
+                        self.note = Some(Toast::info(msg.replace(&item.name(), &name)));
                         self.refetch();
                     }
                     Err(e) => {
                         if let Some(i) = &mut self.items {
                             i.failed(action, &body);
                         }
-                        self.note = Some((e, true));
+                        self.note = Some(Toast::error(e));
                     }
                 }
             }
@@ -6337,14 +6378,16 @@ impl App {
                         feed.preview(None);
                     }
                 }
-                self.note = Some((format!("continued {label} in {spec} on {host}"), false));
+                self.note = Some(Toast::info(format!(
+                    "continued {label} in {spec} on {host}"
+                )));
                 self.refetch();
             }
             Err(e) => {
                 if let Some(h) = &mut self.harness {
                     h.failed();
                 }
-                self.note = Some((e, true));
+                self.note = Some(Toast::error(e));
             }
         }
     }
@@ -6376,14 +6419,14 @@ impl App {
                 if let Some(feed) = &self.feed {
                     feed.preview(None);
                 }
-                self.note = Some((format!("moved {label} to {host}"), false));
+                self.note = Some(Toast::info(format!("moved {label} to {host}")));
                 self.refetch();
             }
             Err(e) => {
                 if let Some(m) = &mut self.move_host {
                     m.failed();
                 }
-                self.note = Some((e, true));
+                self.note = Some(Toast::error(e));
             }
         }
     }
@@ -6399,9 +6442,9 @@ impl App {
         self.note = Some(match standalone::pin(&pick) {
             Ok(msg) => {
                 self.toggle_pin();
-                (msg, false)
+                Toast::info(msg)
             }
-            Err(e) => (e, true),
+            Err(e) => Toast::error(e),
         });
         self.refetch();
     }
@@ -6432,9 +6475,9 @@ impl App {
         self.note = Some(match standalone::message(&pick, &text) {
             Ok(msg) => {
                 self.sent_reply();
-                (msg, false)
+                Toast::info(msg)
             }
-            Err(e) => (format!("{label}: {e}"), true),
+            Err(e) => Toast::error(format!("{label}: {e}")),
         });
         true
     }
@@ -6462,11 +6505,11 @@ impl App {
                 } else {
                     msg
                 };
-                (msg, false)
+                Toast::info(msg)
             }
             Err(e) => {
                 self.snooze = None;
-                (format!("{label}: {e}"), true)
+                Toast::error(format!("{label}: {e}"))
             }
         });
         self.refetch();
@@ -6498,7 +6541,7 @@ impl App {
                 // A failure stays, so it can be read.
                 match r {
                     Ok(()) => return true,
-                    Err(e) => self.note = Some((e, true)),
+                    Err(e) => self.note = Some(Toast::error(e)),
                 }
             }
             KeyCode::Char(c) if !ctrl && !alt => {
@@ -6536,7 +6579,10 @@ impl App {
         let mut out = io::stdout();
         let _ = write!(out, "\x1b]2;{}:{pick}\x07", fed::PICK_TITLE).and_then(|()| out.flush());
         self.fed_pick = Some(Instant::now());
-        self.note = Some((format!("Jumping to {}…", self.selected_label()), false));
+        self.note = Some(Toast::progress(format!(
+            "Jumping to {}…",
+            self.selected_label()
+        )));
     }
 
     /// A fed float's pick the config host hasn't answered in time.
@@ -6544,7 +6590,7 @@ impl App {
         if self.fed_pick.is_some_and(|t| t.elapsed() > FED_ANSWER) {
             self.fed_pick = None;
             protocol::clear_title();
-            self.note = Some(("The Mac didn't answer the jump".into(), true));
+            self.note = Some(Toast::error("The Mac didn't answer the jump"));
         }
     }
 
@@ -6557,9 +6603,9 @@ impl App {
         }
     }
 
-    /// Show `msg` in the footer while a slow action runs.
+    /// Show `msg` in a progress toast while a slow action runs.
     fn busy(&mut self, term: &mut DefaultTerminal, msg: String) {
-        self.note = Some((msg, false));
+        self.note = Some(Toast::progress(msg));
         let _ = term.draw(|f| self.draw(f));
     }
 
@@ -6570,26 +6616,23 @@ impl App {
         let page = usize::try_from(self.page()).unwrap_or(1);
         match self.search.key(k, &self.tasks, page) {
             search::Outcome::Pass => return false,
-            search::Outcome::Stay => self.note = None,
+            search::Outcome::Stay => {}
             search::Outcome::RunSearch => {
-                self.note = None;
                 let stores = self.search_stores();
                 self.search.start(stores);
             }
             search::Outcome::FocusTask(idx) => {
-                self.note = None;
                 self.focus_task_from_search(idx);
             }
             search::Outcome::GoOrResume(idx) => {
-                self.note = None;
                 self.go_or_resume_from_search(idx, term);
             }
             search::Outcome::Copy(text, note) => {
                 self.copied = Some(text);
-                self.note = Some((note, false));
+                self.note = Some(Toast::info(note));
             }
             search::Outcome::Refuse(why) => {
-                self.note = Some((why, true));
+                self.note = Some(Toast::error(why));
             }
         }
         true
@@ -6622,13 +6665,10 @@ impl App {
         }
         self.follow = false;
         self.refilter_to(Some(key));
-        self.note = Some((
-            format!(
-                "showing {label} in {}",
-                if ended { "Archive" } else { "Inbox" }
-            ),
-            false,
-        ));
+        self.note = Some(Toast::info(format!(
+            "showing {label} in {}",
+            if ended { "Archive" } else { "Inbox" }
+        )));
     }
 
     /// Jump directly to a mapped open task's Rex tab, or resume a mapped ended
@@ -6652,15 +6692,15 @@ impl App {
                     self.query.clear();
                     self.set_view(View::Inbox);
                     self.launched = Some(((session, window), Instant::now()));
-                    (format!("resumed {label} on {host}"), false)
+                    Toast::info(format!("resumed {label} on {host}"))
                 }
-                Err(e) => (e, true),
+                Err(e) => Toast::error(e),
             });
             self.refetch();
         } else {
             self.note = Some(match standalone::go(&pick) {
-                Ok(()) => (format!("showed {label}"), false),
-                Err(e) => (e, true),
+                Ok(()) => Toast::info(format!("showed {label}")),
+                Err(e) => Toast::error(e),
             });
         }
     }
@@ -6695,6 +6735,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.search.poll();
         app.ask_preview();
         app.sync_commands();
+        app.expire_note();
         let before = app.now;
         app.now = now();
         // A snooze ran out: back to its group.
@@ -6709,6 +6750,7 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
         app.save_reply();
         let animate = app.archiving.is_some()
             || !app.launching.is_empty()
+            || app.note.as_ref().is_some_and(Toast::is_progress)
             || (app.view == View::Work && app.work.loading())
             || app.search.loading()
             || matches!(app.load, Load::Waiting)
@@ -6731,7 +6773,6 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             Event::Key(k) if k.kind != KeyEventKind::Release => {
                 let k = app.list_letter(k);
                 if !app.standalone_key(k, term) {
-                    app.note = None;
                     app.key(k);
                     if std::mem::take(&mut app.edit_requested) {
                         app.edit_reply(term)?;
@@ -6865,7 +6906,7 @@ fn picker(mut app: App) -> io::Result<()> {
     let result = run(&mut term, &mut app);
     // Never leave an archive half done: wait for one still running.
     if let Some(rx) = app.archiving.take() {
-        app.note = Some(("Finishing the archive…".into(), false));
+        app.note = Some(Toast::progress("Finishing the archive…"));
         let _ = term.draw(|f| app.draw(f));
         let _ = rx.recv();
     }
@@ -7744,8 +7785,8 @@ mod tests {
             Some("host: box\nsession: x\nlog: /l/x.jsonl")
         );
         assert_eq!(
-            app.note,
-            Some(("copied box · x and log path".into(), false))
+            app.note.as_ref().map(|n| (n.text.as_str(), n.is_error())),
+            Some(("copied box · x and log path", false))
         );
         // Pi's logs carry a timestamp before the ID.
         assert_eq!(log_session_id("/p/2026-11-20T09-00_abc-1.jsonl"), "abc-1");
@@ -7816,10 +7857,13 @@ mod tests {
             help_text(&app)
         );
         // Enter, typed back by the config once the message is sent, closes
-        // the box with a note.
+        // the box with a toast.
         app.key(plain(KeyCode::Enter));
         assert!(app.reply.is_none());
-        assert_eq!(app.note, Some(("sent to /woke".into(), false)));
+        assert_eq!(
+            app.note.as_ref().map(|n| (n.text.as_str(), n.is_error())),
+            Some(("sent to /woke", false))
+        );
         // Tab leaves an empty box, but not one with a message.
         app.key(plain(KeyCode::Tab));
         app.key(KeyEvent::from(KeyCode::Char('x')));
@@ -7839,7 +7883,7 @@ mod tests {
         assert!(
             app.note
                 .as_ref()
-                .is_some_and(|(n, failed)| *failed && n.contains("waiting on a prompt"))
+                .is_some_and(|n| n.is_error() && n.text.contains("waiting on a prompt"))
         );
     }
 
@@ -8098,7 +8142,7 @@ mod tests {
         app.key(ctrl_b);
         assert!(app.items.is_none());
         assert_eq!(
-            app.note.as_ref().map(|n| n.0.as_str()),
+            app.note.as_ref().map(|n| n.text.as_str()),
             Some("/none has no linked work items")
         );
         app.selected = app.rows.iter().position(|&i| i == Item::Task(0));
@@ -8858,15 +8902,23 @@ mod tests {
         app.select_key(Some(("s1".into(), "w2".into())));
         app.key(ctrl_e);
         assert!(app.harness.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
-        assert!(*err && msg.contains("agy"), "{msg}");
+        let note = app.note.as_ref().unwrap();
+        assert!(
+            note.is_error() && note.text.contains("agy"),
+            "{}",
+            note.text
+        );
 
         // Task c (notes profile): refuses with a clear note.
         app.select_key(Some(("s1".into(), "w3".into())));
         app.key(ctrl_e);
         assert!(app.harness.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
-        assert!(*err && msg.contains("notes"), "{msg}");
+        let note = app.note.as_ref().unwrap();
+        assert!(
+            note.is_error() && note.text.contains("notes"),
+            "{}",
+            note.text
+        );
     }
 
     #[test]
@@ -8891,32 +8943,45 @@ mod tests {
         app.select_key(Some(("s1".into(), "w1".into())));
         app.key(ctrl_h);
         assert!(app.move_host.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
+        let note = app.note.as_ref().unwrap();
         assert!(
-            *err && msg.contains("atuin-work") && msg.contains("not synced"),
-            "{msg}"
+            note.is_error() && note.text.contains("atuin-work") && note.text.contains("not synced"),
+            "{}",
+            note.text
         );
 
         // Antigravity task: refuses clearly.
         app.select_key(Some(("s1".into(), "w2".into())));
         app.key(ctrl_h);
         assert!(app.move_host.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
-        assert!(*err && msg.contains("agy"), "{msg}");
+        let note = app.note.as_ref().unwrap();
+        assert!(
+            note.is_error() && note.text.contains("agy"),
+            "{}",
+            note.text
+        );
 
         // Notes profile: refuses clearly.
         app.select_key(Some(("s1".into(), "w3".into())));
         app.key(ctrl_h);
         assert!(app.move_host.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
-        assert!(*err && msg.contains("notes"), "{msg}");
+        let note = app.note.as_ref().unwrap();
+        assert!(
+            note.is_error() && note.text.contains("notes"),
+            "{}",
+            note.text
+        );
 
         // Primary checkout: refuses clearly.
         app.select_key(Some(("s1".into(), "w4".into())));
         app.key(ctrl_h);
         assert!(app.move_host.is_none());
-        let (msg, err) = app.note.as_ref().unwrap();
-        assert!(*err && msg.contains("primary checkout"), "{msg}");
+        let note = app.note.as_ref().unwrap();
+        assert!(
+            note.is_error() && note.text.contains("primary checkout"),
+            "{}",
+            note.text
+        );
     }
 
     #[test]
@@ -9003,5 +9068,59 @@ mod tests {
         assert!(app.view == View::Search);
         app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL));
         assert!(app.view == View::Archive);
+    }
+
+    #[test]
+    fn toast_floats_without_blocking_footer_hints_and_dismisses_on_esc() {
+        let mut app = inbox();
+        app.note = Some(Toast::info(
+            "archived marvin/18-48-58-png-what-does-this-gap-indicate (merged)",
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String { (0..110).map(|x| buf[(x, y)].symbol()).collect() };
+        let screen: String = (0..24).map(row).collect::<Vec<_>>().join("\n");
+        let footer = row(23);
+
+        // Footer keybind hints stay visible while the toast floats in the top-right.
+        assert!(
+            footer.contains("⌘1-5 views") && footer.contains("? keys"),
+            "{footer}"
+        );
+        assert!(!footer.contains("archived marvin"), "{footer}");
+        assert!(screen.contains("✓ Notice"), "{screen}");
+        assert!(screen.contains("esc dismiss"), "{screen}");
+        assert!(
+            screen.contains("archived")
+                && screen.contains("marvin/18-48-58-png-what-does-this-gap-indicate"),
+            "{screen}"
+        );
+
+        // Plain Escape dismisses an info/error toast.
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.note.is_none());
+
+        // Progress toasts stay visible through Escape and don't show a dismiss hint.
+        app.note = Some(Toast::progress("Archiving demo on mac…"));
+        terminal.draw(|f| app.draw(f)).unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (0..24)
+            .map(|y| (0..110).map(|x| buf[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Working"), "{screen}");
+        assert!(!screen.contains("esc dismiss"), "{screen}");
+        app.key(KeyEvent::from(KeyCode::Esc));
+        assert!(app.note.is_some());
+
+        // Expired toasts drop on `expire_note`.
+        app.note = Some(Toast::new(
+            "old notice",
+            toast::Kind::Info,
+            Instant::now().checked_sub(toast::INFO_TTL).unwrap(),
+        ));
+        app.expire_note();
+        assert!(app.note.is_none());
     }
 }
