@@ -1,11 +1,12 @@
 //! Names unnamed work at launch. `launch` asks for a name when the picker
 //! left it blank: from the work item's title when there is one and its
-//! tracker can say it, otherwise from the prompt. The name comes from
-//! macOS's on-device Foundation Model through Apple's `fm` CLI (preinstalled
-//! from macOS 27; its license must have been accepted once with
-//! `sudo fm license`). It runs where `launch` does, the config host (the
-//! Mac). No other model is tried: when `fm` is missing, fails, is slow or
-//! answers with something unusable, a work item's title, or else the
+//! tracker can say it, otherwise from the prompt. On macOS, the name first
+//! comes from the on-device Foundation Model through Apple's `fm` CLI
+//! (preinstalled from macOS 27; its license must have been accepted once with
+//! `sudo fm license`). When `fm` is unavailable or fails — including on a
+//! Linux control plane — `name_work` falls back to an ephemeral, toolless
+//! `claude -p --model haiku` call with structured JSON output. When neither
+//! model gives a usable grounded name, a work item's title, or else the
 //! prompt's first words, becomes the name as it is (slugged). The picker
 //! has already closed by then, so a launch never fails for want of a name
 //! unless the text has nothing to name it from.
@@ -22,8 +23,9 @@
 //!   slug (not a prefix or a generic word like `fix` or `issue`) appears in
 //!   the text, near enough (see `same_word`).
 //!
-//! The picker also asks for a name as the prompt is typed (`suggest_name`),
-//! so Enter rarely waits on the model at launch.
+//! On macOS, the picker also asks the on-device model for a name as the
+//! prompt is typed (`suggest_name`), so Enter rarely waits on the model at
+//! launch.
 
 use std::process::Command;
 use std::time::Duration;
@@ -36,6 +38,10 @@ use crate::naming::{name_char, name_problem};
 /// How long one `fm` call may take; a warm call can take 4 seconds, and a
 /// cold one longer.
 const FM_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long one `claude -p` naming call may take.
+const CLAUDE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Fast model alias for `claude -p` fallback naming.
+const CLAUDE_MODEL: &str = "haiku";
 /// How long a work item's title lookup may take.
 const TITLE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Prompt characters the model sees; its context is a few thousand tokens.
@@ -79,7 +85,7 @@ as CSV\" -> feature / csv-report-export.";
 /// The structured output `fm respond --schema` must produce, as
 /// `fm schema object --name WorkName --string prefix … --string slug …`
 /// writes it.
-const SCHEMA: &str = r#"{
+const FM_SCHEMA: &str = r#"{
   "title": "WorkName",
   "type": "object",
   "additionalProperties": false,
@@ -87,6 +93,18 @@ const SCHEMA: &str = r#"{
   "x-order": ["prefix", "slug"],
   "properties": {
     "prefix": {"type": "string", "description": "one of: feature, fix, chore, docs, refactor"},
+    "slug": {"type": "string", "description": "2 to 5 lowercase kebab-case words naming the specific change"}
+  }
+}"#;
+
+/// Standard JSON Schema for `claude -p --json-schema` (without `fm`'s
+/// `x-order` extension).
+const CLAUDE_SCHEMA: &str = r#"{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prefix", "slug"],
+  "properties": {
+    "prefix": {"type": "string", "enum": ["feature", "fix", "chore", "docs", "refactor"]},
     "slug": {"type": "string", "description": "2 to 5 lowercase kebab-case words naming the specific change"}
   }
 }"#;
@@ -106,14 +124,14 @@ pub fn name_work(title: Option<&str>, prompt: &str) -> Option<String> {
         })
 }
 
-/// The model's name for work described by `prompt`, for the picker to
-/// offer as it is typed; None when the prompt isn't `nameable`, off the
+/// The on-device model's name for work described by `prompt`, for the picker
+/// to offer as it is typed; None when the prompt isn't `nameable`, off the
 /// Mac, or when the model gives nothing `grounded`.
 #[must_use]
 pub fn suggest_name(prompt: &str) -> Option<String> {
     let prompt = prompt.trim();
     if nameable(prompt) {
-        suggest(prompt)
+        suggest_fm(prompt)
     } else {
         None
     }
@@ -140,8 +158,9 @@ pub fn nameable(prompt: &str) -> bool {
 }
 
 /// `text`'s prose: its words with fenced code blocks, links, paths (any
-/// word with a slash), slash commands and `@file` mentions dropped, and
-/// backticks and leading list marks stripped.
+/// word with a slash, including backslash-escaped or quoted paths with
+/// spaces), slash commands and `@file` mentions dropped, and backticks and
+/// leading list marks stripped.
 fn prose(text: &str) -> String {
     let mut words = Vec::new();
     let mut fenced = false;
@@ -153,7 +172,7 @@ fn prose(text: &str) -> String {
         if fenced {
             continue;
         }
-        for word in line.split_whitespace() {
+        for word in line_tokens(line) {
             let word = word.trim_matches('`');
             if word.contains('/') || word.contains('\\') || word.starts_with('@') {
                 continue;
@@ -167,6 +186,61 @@ fn prose(text: &str) -> String {
         }
     }
     words.join(" ")
+}
+
+/// Split `line` on unescaped whitespace while keeping shell-escaped spaces
+/// (`\ `) and quoted path tokens (`'/path with spaces'`, `"/path ..."`) intact
+/// so paths with spaces don't leak trailing filename fragments into `prose`.
+fn line_tokens(line: &str) -> Vec<&str> {
+    let mut tokens = Vec::new();
+    let mut chars = line.char_indices().peekable();
+    while let Some(&(start, first)) = chars.peek() {
+        if first.is_whitespace() {
+            chars.next();
+            continue;
+        }
+        if let Some(end) = quoted_path_end(line, start, first) {
+            tokens.push(&line[start..end]);
+            while chars.peek().is_some_and(|&(idx, _)| idx < end) {
+                chars.next();
+            }
+            continue;
+        }
+        let mut end = line.len();
+        while let Some((idx, ch)) = chars.next() {
+            if ch == '\\' {
+                if chars.peek().is_some_and(|&(_, next)| next.is_whitespace()) {
+                    chars.next();
+                }
+                continue;
+            }
+            if ch.is_whitespace() {
+                end = idx;
+                break;
+            }
+        }
+        tokens.push(&line[start..end]);
+    }
+    tokens
+}
+
+/// Byte end (exclusive) of a quoted path token starting at `start` with
+/// `quote` (`'` or `"`), when the quoted text begins like a filesystem path
+/// and closes on the same line.
+fn quoted_path_end(line: &str, start: usize, quote: char) -> Option<usize> {
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &line[start + quote.len_utf8()..];
+    let looks_like_path = rest.starts_with('/')
+        || rest.starts_with("~/")
+        || rest.starts_with("./")
+        || rest.starts_with("../");
+    if !looks_like_path {
+        return None;
+    }
+    let close = rest.find(quote)?;
+    Some(start + quote.len_utf8() + close + quote.len_utf8())
 }
 
 /// `text`'s words, lowercased and split at anything but letters and
@@ -249,8 +323,16 @@ fn card_account(link: &Value) -> Option<String> {
         .map(String::from)
 }
 
-/// Ask the on-device model to name work described by `text`.
+/// Ask an available model to name work described by `text`: macOS's on-device
+/// `fm` first, then `claude -p --model haiku` when `fm` is unavailable or
+/// gives no usable answer.
 fn suggest(text: &str) -> Option<String> {
+    suggest_fm(text).or_else(|| suggest_claude(text))
+}
+
+/// Ask macOS's on-device Foundation Model (`fm`) to name work described by
+/// `text`.
+fn suggest_fm(text: &str) -> Option<String> {
     if !cfg!(target_os = "macos") {
         return None;
     }
@@ -261,7 +343,7 @@ fn suggest(text: &str) -> Option<String> {
         "switchyard-name-schema-{}.json",
         std::process::id()
     ));
-    std::fs::write(&schema, SCHEMA).ok()?;
+    std::fs::write(&schema, FM_SCHEMA).ok()?;
     let mut cmd = Command::new("fm");
     cmd.args([
         "respond",
@@ -278,6 +360,37 @@ fn suggest(text: &str) -> Option<String> {
     parse(&out?).filter(|name| grounded(name, &text))
 }
 
+/// Ask `claude -p --model haiku` (ephemeral, toolless, structured JSON) to
+/// name work described by `text`, for Linux control planes or when `fm`
+/// didn't answer.
+fn suggest_claude(text: &str) -> Option<String> {
+    let text: String = text.chars().take(MAX_INPUT_CHARS).collect();
+    let mut cmd = Command::new("claude");
+    cmd.env_remove("CLAUDECODE").args([
+        "-p",
+        "--model",
+        CLAUDE_MODEL,
+        "--effort",
+        "low",
+        "--no-session-persistence",
+        "--tools",
+        "",
+        "--disable-slash-commands",
+        "--strict-mcp-config",
+        "--setting-sources",
+        "user",
+        "--system-prompt",
+        INSTRUCTIONS,
+        "--output-format",
+        "json",
+        "--json-schema",
+        CLAUDE_SCHEMA,
+    ]);
+    // The text goes in on stdin, so one starting with `-` stays text.
+    let out = bounded_output(&mut cmd, Some(&text), CLAUDE_TIMEOUT)?;
+    parse_claude(&out).filter(|name| grounded(name, &text))
+}
+
 /// A work item's title as a feature name, for when the model can't name it.
 fn title_name(title: &str) -> Option<String> {
     Some(slug(title)).filter(|s| !s.is_empty() && name_problem(s).is_none())
@@ -290,11 +403,28 @@ fn prompt_name(prompt: &str) -> Option<String> {
     title_name(&prose(prompt))
 }
 
+/// The work name in `claude --output-format json --json-schema`'s envelope.
+fn parse_claude(answer: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(answer.trim()).ok()?;
+    if v["is_error"].as_bool() == Some(true) {
+        return None;
+    }
+    if v["structured_output"].is_object() {
+        return parse_value(&v["structured_output"]);
+    }
+    v["result"].as_str().and_then(parse)
+}
+
 /// The work name in `fm`'s JSON answer, cleaned up: a known prefix
 /// (`feature` otherwise) and a lowercase kebab-case slug, or None when
 /// there is no usable slug.
 fn parse(answer: &str) -> Option<String> {
     let v: Value = serde_json::from_str(answer.trim()).ok()?;
+    parse_value(&v)
+}
+
+/// Extract and validate `prefix` and `slug` from a parsed JSON object.
+fn parse_value(v: &Value) -> Option<String> {
     let prefix = v["prefix"]
         .as_str()
         .map(|p| p.trim().to_ascii_lowercase())
@@ -421,11 +551,76 @@ mod tests {
     }
 
     #[test]
+    fn claude_envelope_answers_become_names() {
+        assert_eq!(
+            parse_claude(
+                r#"{"is_error": false, "structured_output": {"prefix": "feature", "slug": "dashboard-horizontal-layout"}, "result": "ignored"}"#
+            )
+            .as_deref(),
+            Some("dashboard-horizontal-layout")
+        );
+        assert_eq!(
+            parse_claude(
+                r#"{"is_error": false, "structured_output": {"prefix": "fix", "slug": "archive-crash"}}"#
+            )
+            .as_deref(),
+            Some("fix/archive-crash")
+        );
+        // Falls back to `result` when `structured_output` is absent.
+        assert_eq!(
+            parse_claude(
+                r#"{"is_error": false, "result": "{\"prefix\": \"chore\", \"slug\": \"bump-deps\"}"}"#
+            )
+            .as_deref(),
+            Some("chore/bump-deps")
+        );
+        // Errors are rejected even if other fields are present.
+        assert_eq!(
+            parse_claude(
+                r#"{"is_error": true, "structured_output": {"prefix": "fix", "slug": "auth-error"}}"#
+            ),
+            None
+        );
+        assert_eq!(parse_claude("not json"), None);
+    }
+
+    #[test]
     fn prompt_names_skip_links_paths_and_code() {
         assert_eq!(
             prompt_name("see https://x.y/z and `@a/b.rs`\n```\ncode here\n```\nthe picker hangs")
                 .as_deref(),
             Some("see-and-the-picker-hangs")
+        );
+    }
+
+    #[test]
+    fn prompt_names_drop_escaped_and_quoted_paths_with_spaces() {
+        let escaped = "/Users/john.allen/Desktop/Screenshot\\ 2026-11-26\\ at\\ 18.48.58.png\n\n\
+                       what does this gap indicate?";
+        assert_eq!(
+            prompt_name(escaped).as_deref(),
+            Some("what-does-this-gap-indicate")
+        );
+        let single_quoted = "'/Users/john.allen/Desktop/Screenshot 2026-11-26 at 18.48.58.png' \
+                             what does this gap indicate?";
+        assert_eq!(
+            prompt_name(single_quoted).as_deref(),
+            Some("what-does-this-gap-indicate")
+        );
+        let double_quoted = "\"/Users/john.allen/Pictures/Photos Library.photoslibrary/a.jpeg\" \
+                             surely we can lay this dashboard out better";
+        assert_eq!(
+            prompt_name(double_quoted).as_deref(),
+            Some("surely-we-can-lay-this-dashboard-out")
+        );
+        // A prompt that is only an escaped screenshot path isn't nameable.
+        assert!(!nameable(
+            "/Users/john.allen/Desktop/Screenshot\\ 2026-11-26\\ at\\ 18.48.58.png"
+        ));
+        // Normal quoted prose and contractions survive.
+        assert_eq!(
+            prompt_name("don't break \"hello world\"").as_deref(),
+            Some("dont-break-hello-world")
         );
     }
 
