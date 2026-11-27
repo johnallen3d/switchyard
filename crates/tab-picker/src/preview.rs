@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use switchyard_core::transcript::PromptQuestion;
 use switchyard_ui::Palette;
 use switchyard_ui::draw::str_width;
 use switchyard_ui::protocol::DATA;
@@ -67,6 +68,9 @@ pub struct Preview {
     /// The agent's session log, as a path on its host, when the
     /// transcript says (ctrl-y copies it).
     pub log: Option<String>,
+    /// The pending `ask_question` prompt an `agy` agent is currently blocked
+    /// on, when live status confirms it is waiting on a question.
+    pub question: Option<Vec<PromptQuestion>>,
     entries: Result<Vec<(String, String)>, String>,
     drawn: Option<(u16, Drawn)>,
 }
@@ -195,6 +199,12 @@ pub fn parse(body: &str) -> Option<Preview> {
         .ok()
         .and_then(|v| v["log"].as_str())
         .map(String::from);
+    let question = v
+        .as_ref()
+        .ok()
+        .and_then(|v| v.get("question"))
+        .and_then(|q| serde_json::from_value::<Vec<PromptQuestion>>(q.clone()).ok())
+        .filter(|qs| !qs.is_empty());
     let entries = match v {
         Ok(v) => match v["error"].as_str() {
             Some(e) => Err(e.to_string()),
@@ -219,6 +229,7 @@ pub fn parse(body: &str) -> Option<Preview> {
         model,
         suggestion,
         log,
+        question,
         entries,
         drawn: None,
     })

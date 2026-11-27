@@ -40,7 +40,17 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// One question from an interactive agent prompt (`agy`'s `ask_question`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub multi_select: bool,
+}
 
 use crate::rex::{host_bash, local_label, rex_json, sh_quote};
 use crate::sessions::{agy_conversation_for_pid, newest_session_here, session_dir};
@@ -57,10 +67,12 @@ const BYTES: usize = 256 * 1024;
 /// A tab's agent pane, run as `rex [-S HOST] do -e SCRIPT --json --args
 /// '{"session":ID,"window":ID}'`: the tiled pane with the most urgent
 /// program status, as `host_rows.lua` picks a tab's, with its block, status,
-/// program, that program's process ID and the foreground process's
-/// directory; `{}` when no pane reports one. With `"screen":true` in the
-/// args, an idle or done pane also gives the end of its screen as escape
-/// sequences (`screen`), for `suggestion`.
+/// status kind, program, that program's process ID and the foreground
+/// process's directory; `{}` when no pane reports one. With `"screen":true` in
+/// the args, an idle or done pane also gives the end of its screen as escape
+/// sequences (`screen`), for `suggestion`, and a pane blocked on a `question`
+/// gives the end of its plain screen (`screen`), for answering `agy`'s
+/// `ask_question` prompt.
 const PANE_SCRIPT: &str = r#"
 local T = "com.superlogical.terminal"
 local urgency = { idle = 1, done = 2, working = 3, error = 4, blocked = 5 }
@@ -88,11 +100,18 @@ for _, w in ipairs((view and view.windows) or {}) do
     local fg = proc.foreground or proc.child or {}
     local r = best.record
     local screen
-    if rex.args.screen and (r.state == "idle" or r.state == "done") then
-      -- The end of the screen, styles and all: the total length first,
-      -- then only its last bytes.
+    local fmt = nil
+    if rex.args.screen then
+      if r.state == "idle" or r.state == "done" then
+        fmt = "vt"
+      elseif r.state == "blocked" and r.kind == "question" then
+        fmt = "plain"
+      end
+    end
+    if fmt ~= nil then
+      -- The end of the screen: the total length first, then only its last bytes.
       local head = rex.block.call(T, "format", { session_id = sid, block_id = best.block,
-        format = "vt", unwrap = true, max_bytes = 1 })
+        format = fmt, unwrap = true, max_bytes = 1 })
       if head and head.id and head.total then
         local tail = rex.block.call(T, "blob_read", { session_id = sid, block_id = best.block,
           id = head.id, offset = math.max(0, head.total - SCREEN_TAIL) })
@@ -101,7 +120,8 @@ for _, w in ipairs((view and view.windows) or {}) do
         screen = head.content
       end
     end
-    return { block = best.block, state = r.state or "", app = r.effective_app or r.app or "",
+    return { block = best.block, state = r.state or "", kind = r.kind or "",
+      app = r.effective_app or r.app or "",
       pid = (r.owner and r.owner.pid) or fg.pid or 0, cwd = fg.cwd or "", screen = screen }
   end
 end
@@ -115,6 +135,16 @@ error("tab not found", 0)
 /// Fails when Rex can't run the lookup or the tab isn't found.
 pub fn agent_pane(host: &str, session: &str, window: &str) -> Result<Value, String> {
     pane_lookup(host, session, window, false)
+}
+
+/// The agent pane of a tab on `host`, including the tail of its screen when
+/// idle/done (`vt`) or blocked on a question (`plain`).
+///
+/// # Errors
+///
+/// Fails when Rex can't run the lookup or the tab isn't found.
+pub fn pane_with_screen(host: &str, session: &str, window: &str) -> Result<Value, String> {
+    pane_lookup(host, session, window, true)
 }
 
 fn pane_lookup(host: &str, session: &str, window: &str, screen: bool) -> Result<Value, String> {
@@ -283,10 +313,18 @@ fn fetch_inner(host: &str, session: &str, window: &str) -> Result<Value, String>
     };
     if let Some(o) = v.as_object_mut() {
         o.insert("agent".into(), agent);
+        let last_question = o.remove("last_question");
         if harness == "claude"
             && let Some(s) = pane["screen"].as_str().and_then(suggestion)
         {
             o.insert("suggestion".into(), s.into());
+        }
+        if harness == "agy"
+            && pane["state"].as_str() == Some("blocked")
+            && pane["kind"].as_str() == Some("question")
+            && let Some(q) = last_question
+        {
+            o.insert("question".into(), q);
         }
     }
     Ok(v)
@@ -325,23 +363,26 @@ pub fn local(profile: &str, harness: &str, dir: &str, agent_session: &str, pid: 
         return json!({ "error": format!("no {harness} session log for {dir}") });
     };
     match read(&path, harness, started(profile, harness, dir, pid)) {
-        Ok((entries, tokens, model, wake, title)) => {
+        Ok(tail) => {
             let mut v = json!({
                 "harness": harness,
                 "log": path.display().to_string(),
-                "entries": entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
+                "entries": tail.entries.into_iter().map(|(kind, text)| json!({ "kind": kind, "text": text })).collect::<Vec<_>>(),
             });
-            if let Some(t) = tokens {
+            if let Some(t) = tail.tokens {
                 v["tokens"] = json!(t);
             }
-            if let Some(m) = model {
+            if let Some(m) = tail.model {
                 v["model"] = json!(m);
             }
-            if let Some((at, reason)) = wake {
+            if let Some((at, reason)) = tail.wake {
                 v["wake"] = json!({ "at": at, "reason": reason });
             }
-            if let Some(t) = title {
+            if let Some(t) = tail.title {
                 v["title"] = json!(t);
+            }
+            if let Some(q) = tail.question {
+                v["last_question"] = json!(q);
             }
             v
         }
@@ -473,15 +514,16 @@ fn newest_log(dir: &Path) -> Option<PathBuf> {
 }
 
 /// The last entries of a log, oldest first, the context its last turn used,
-/// the model it ran on, what it waits on to resume (see `wake`) and the
-/// session's title (see `title`).
-type Tail = (
-    Vec<(&'static str, String)>,
-    Option<u64>,
-    Option<String>,
-    Option<(u64, String)>,
-    Option<String>,
-);
+/// the model it ran on, what it waits on to resume (see `wake`), the
+/// session's title (see `title`), and any unanswered `agy` `ask_question`.
+struct Tail {
+    entries: Vec<(&'static str, String)>,
+    tokens: Option<u64>,
+    model: Option<String>,
+    wake: Option<(u64, String)>,
+    title: Option<String>,
+    question: Option<Vec<PromptQuestion>>,
+}
 
 fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
     let mut file = File::open(path)?;
@@ -497,13 +539,74 @@ fn read(path: &Path, harness: &str, since: u64) -> std::io::Result<Tail> {
     } else {
         &text
     };
-    Ok((
-        entries(text, harness),
-        tokens(text, harness),
-        model(text, harness),
-        wake(text, harness, since),
-        title(text, harness),
-    ))
+    Ok(Tail {
+        entries: entries(text, harness),
+        tokens: tokens(text, harness),
+        model: model(text, harness),
+        wake: wake(text, harness, since),
+        title: title(text, harness),
+        question: (harness == "agy")
+            .then(|| last_agy_question(text))
+            .flatten(),
+    })
+}
+
+/// The most recent unanswered `ask_question` call in an Antigravity log, if
+/// the agent's latest planner response asked one and no later user turn or
+/// planner response has followed it.
+#[must_use]
+pub fn last_agy_question(log: &str) -> Option<Vec<PromptQuestion>> {
+    let mut pending: Option<Vec<PromptQuestion>> = None;
+    for line in log.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match v["type"].as_str() {
+            Some("USER_INPUT") => pending = None,
+            Some("PLANNER_RESPONSE") => {
+                let asked = v["tool_calls"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .rev()
+                    .find(|c| c["name"] == "ask_question")
+                    .and_then(|c| parse_agy_questions(&c["args"]));
+                pending = asked;
+            }
+            _ => {}
+        }
+    }
+    pending
+}
+
+fn parse_agy_questions(args: &Value) -> Option<Vec<PromptQuestion>> {
+    let items = args["questions"].as_array()?;
+    let qs: Vec<PromptQuestion> = items
+        .iter()
+        .filter_map(|q| {
+            let question = q["question"].as_str()?.trim().to_string();
+            if question.is_empty() {
+                return None;
+            }
+            let options: Vec<String> = q["options"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if options.is_empty() {
+                return None;
+            }
+            let multi_select = q["is_multi_select"].as_bool().unwrap_or(false);
+            Some(PromptQuestion {
+                question,
+                options,
+                multi_select,
+            })
+        })
+        .collect();
+    (!qs.is_empty()).then_some(qs)
 }
 
 /// A Claude session's title: the last one given with `/rename`, else the
@@ -925,14 +1028,18 @@ fn push_text(out: &mut Vec<(&'static str, String)>, kind: &'static str, text: &s
 
 /// A tool call in a line, or a question for John in full.
 fn push_tool(out: &mut Vec<(&'static str, String)>, name: &str, input: &Value) {
-    if name == "AskUserQuestion" {
+    if name == "AskUserQuestion" || name == "ask_question" {
         let mut text = String::new();
         for q in input["questions"].as_array().into_iter().flatten() {
             text.push_str(q["question"].as_str().unwrap_or(""));
             for o in q["options"].as_array().into_iter().flatten() {
-                let _ = write!(text, "\n  - {}", o["label"].as_str().unwrap_or(""));
-                if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
-                    let _ = write!(text, ": {d}");
+                if let Some(opt) = o.as_str() {
+                    let _ = write!(text, "\n  - {opt}");
+                } else {
+                    let _ = write!(text, "\n  - {}", o["label"].as_str().unwrap_or(""));
+                    if let Some(d) = o["description"].as_str().filter(|d| !d.is_empty()) {
+                        let _ = write!(text, ": {d}");
+                    }
                 }
             }
             text.push('\n');
@@ -1391,6 +1498,71 @@ mod tests {
         assert_eq!(found, Some(log_stale));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agy_ask_question_renders_as_ask_and_tracks_pending_question() {
+        let ask_step = json!({
+            "step_index": 1,
+            "source": "MODEL",
+            "type": "PLANNER_RESPONSE",
+            "status": "DONE",
+            "content": "Two design questions:",
+            "tool_calls": [{
+                "name": "ask_question",
+                "args": {
+                    "questions": [
+                        {
+                            "question": "Pick one",
+                            "options": ["(Recommended) Alpha", "Beta"],
+                            "is_multi_select": false
+                        },
+                        {
+                            "question": "Pick many",
+                            "options": ["One", "Two"],
+                            "is_multi_select": true
+                        }
+                    ]
+                }
+            }]
+        })
+        .to_string();
+
+        assert_eq!(
+            entries(&ask_step, "agy"),
+            vec![
+                ("assistant", "Two design questions:".to_string()),
+                (
+                    "ask",
+                    "Pick one\n  - (Recommended) Alpha\n  - Beta\nPick many\n  - One\n  - Two"
+                        .to_string()
+                ),
+            ]
+        );
+        assert_eq!(
+            last_agy_question(&ask_step),
+            Some(vec![
+                PromptQuestion {
+                    question: "Pick one".into(),
+                    options: vec!["(Recommended) Alpha".into(), "Beta".into()],
+                    multi_select: false,
+                },
+                PromptQuestion {
+                    question: "Pick many".into(),
+                    options: vec!["One".into(), "Two".into()],
+                    multi_select: true,
+                },
+            ])
+        );
+
+        // Once the planner responds again (or a user message follows), the
+        // earlier ask_question is no longer pending.
+        let answered = format!(
+            "{ask_step}\n{}\n{}",
+            json!({"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "content": "A1: Alpha"}),
+            json!({"step_index": 3, "source": "MODEL", "type": "PLANNER_RESPONSE", "status": "DONE", "content": "Got it."}),
+        );
+        assert_eq!(last_agy_question(&answered), None);
     }
 
     fn with_claude_config<T>(root: &Path, f: impl FnOnce() -> T) -> T {

@@ -134,6 +134,7 @@ mod model;
 mod move_host;
 mod preview;
 mod projects;
+mod question;
 mod scrollback;
 mod search;
 mod snooze;
@@ -926,6 +927,24 @@ fn help_popup_sections() -> Vec<help::Section> {
             ],
         ),
         Section::new(
+            "Question card",
+            &[
+                ("↑↓ j k ⌃P ⌃N", "move between options"),
+                ("1-9", "pick option (or toggle in multi-select)"),
+                ("space", "toggle option in multi-select, or open write-in"),
+                ("⏎", "advance, submit, or open write-in"),
+                ("← → h l", "previous, next question"),
+                ("s", "skip the question (asks first)"),
+                ("⇧↑↓ PgUp PgDn", "scroll the transcript"),
+                ("⌃V", "scroll back, then back here"),
+                ("⌃J ⌃K", "leave for the list, next or previous"),
+                ("⌃U ⌃D", "leave for scrollback, half a page"),
+                ("⌃X", "leave and arm an archive"),
+                ("⌃S", "collapse or expand the sidebar"),
+                ("esc ⇥", "leave, keeping your draft"),
+            ],
+        ),
+        Section::new(
             "Snooze prompt",
             &[
                 ("⏎", "snooze (empty: wake)"),
@@ -1037,6 +1056,11 @@ struct App {
     /// The reply box while Tab has moved into it; Enter sends, Escape
     /// leaves it. Unfocused, it is drawn from `idle`.
     reply: Option<Reply>,
+    /// The interactive question card while Tab has focused a pending `agy`
+    /// `ask_question` prompt.
+    question: Option<question::QuestionCard>,
+    /// Unsubmitted question drafts, by agent, kept when leaving the card.
+    question_drafts: HashMap<Key, question::QuestionCard>,
     /// The reply box as drawn while it doesn't have focus.
     idle: PromptBox,
     /// Messages typed into the reply box but neither sent nor cleared, by
@@ -1176,6 +1200,8 @@ impl App {
             move_host: None,
             snooze: None,
             reply: None,
+            question: None,
+            question_drafts: HashMap::new(),
             idle: PromptBox::new(),
             drafts: HashMap::new(),
             commands: HashMap::new(),
@@ -1235,6 +1261,9 @@ impl App {
                 return;
             }
             if self.view == View::Search && self.search.paste(text) {
+                return;
+            }
+            if self.question.as_mut().is_some_and(|q| q.paste(text)) {
                 return;
             }
             if let Some(r) = &mut self.reply {
@@ -1313,6 +1342,7 @@ impl App {
                 && self.move_host.is_none()
                 && self.snooze.is_none()
                 && self.reply.is_none()
+                && self.question.is_none()
             {
                 self.clear_search();
             }
@@ -1326,6 +1356,7 @@ impl App {
             || self.move_host.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
+            || self.question.is_some()
         {
             return;
         }
@@ -1419,6 +1450,19 @@ impl App {
                 self.close_reply();
             }
         }
+        // The question card stays on its agent while it's still blocked.
+        if let Some(key) = self.question.as_ref().map(|q| q.key.clone()) {
+            if self.selected_key().as_ref() != Some(&key) {
+                self.select_key(Some(key.clone()));
+            }
+            let still_blocked = self.selected_key().as_ref() == Some(&key)
+                && self
+                    .selected_item()
+                    .is_some_and(|i| self.flat(i).state == "blocked");
+            if !still_blocked {
+                self.close_question(false);
+            }
+        }
         self.focus_launched();
     }
 
@@ -1439,6 +1483,7 @@ impl App {
             || self.move_host.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
+            || self.question.is_some()
         {
             return;
         }
@@ -2804,8 +2849,25 @@ impl App {
         }
     }
 
-    /// Open the reply box on the highlighted agent in Inbox. An agent waiting
-    /// on a prompt is refused: the message would answer it.
+    /// Pending `agy` `ask_question` prompt for the highlighted agent, while
+    /// it is blocked and its loaded preview carries one.
+    fn pending_question(&self) -> Option<&[switchyard_core::transcript::PromptQuestion]> {
+        let item = self.selected_item()?;
+        if self.flat(item).state != "blocked" {
+            return None;
+        }
+        let want = self.preview_want()?;
+        self.preview
+            .as_ref()
+            .filter(|pv| pv.pane == want)?
+            .question
+            .as_deref()
+            .filter(|qs| !qs.is_empty())
+    }
+
+    /// Open the reply box on the highlighted agent in Inbox, or the question
+    /// card when an `agy` agent is blocked on an `ask_question` prompt. Any
+    /// other blocked prompt is refused: a message would answer it blindly.
     fn open_reply(&mut self) {
         let Some(item) = self.selected_item() else {
             return;
@@ -2819,6 +2881,18 @@ impl App {
         };
         let label = self.selected_label();
         if self.flat(item).state == "blocked" {
+            if let Some(questions) = self.pending_question().map(ToOwned::to_owned) {
+                self.moved();
+                let card = match self.question_drafts.remove(&key) {
+                    Some(mut draft) if draft.same_questions(&questions) => {
+                        draft.label = label;
+                        draft
+                    }
+                    _ => question::QuestionCard::new(key, label, questions),
+                };
+                self.question = Some(card);
+                return;
+            }
             self.note = Some(Toast::error(format!(
                 "{label} is waiting on a prompt; answer it in its tab"
             )));
@@ -2836,6 +2910,76 @@ impl App {
             history: history::History::default(),
             taken: None,
         });
+    }
+
+    /// Close the question card, keeping its draft when `keep_draft` is true.
+    fn close_question(&mut self, keep_draft: bool) {
+        if let Some(card) = self.question.take() {
+            if keep_draft {
+                self.question_drafts.insert(card.key.clone(), card);
+            } else {
+                self.question_drafts.remove(&card.key);
+            }
+        }
+    }
+
+    /// Route a key into the focused question card. Returns the response when
+    /// John confirms all answers or confirms skipping.
+    fn question_key(&mut self, k: KeyEvent) -> Option<switchyard_core::actions::QuestionResponse> {
+        let page = self.page();
+        let outcome = self.question.as_mut()?.key(k, page);
+        match outcome {
+            question::Outcome::Stay => None,
+            question::Outcome::Leave => {
+                self.close_question(true);
+                None
+            }
+            question::Outcome::Submit(resp) => Some(resp),
+            question::Outcome::MoveList(delta) => {
+                self.close_question(true);
+                self.wrap_step(delta);
+                None
+            }
+            question::Outcome::ScrollPreview(delta) => {
+                self.scroll_preview(delta);
+                None
+            }
+            question::Outcome::Scrollback(key) => {
+                if key.is_some() {
+                    self.close_question(true);
+                }
+                self.enter_scrollback(key);
+                None
+            }
+            question::Outcome::ToggleSidebar => {
+                if self.view == View::Inbox {
+                    self.expanded = !self.expanded;
+                }
+                None
+            }
+            question::Outcome::ArmArchive => {
+                self.close_question(true);
+                self.arm_archive();
+                None
+            }
+        }
+    }
+
+    /// Non-standalone completion of a submitted question card (mirrors
+    /// `finish_reply`).
+    fn finish_question(&mut self, resp: &switchyard_core::actions::QuestionResponse) {
+        if let Some(card) = self.question.take() {
+            self.question_drafts.remove(&card.key);
+            let msg = match resp {
+                switchyard_core::actions::QuestionResponse::Skip => {
+                    format!("skipped question on {}", card.label)
+                }
+                switchyard_core::actions::QuestionResponse::Answers { .. } => {
+                    format!("answered {}", card.label)
+                }
+            };
+            self.note = Some(Toast::info(msg));
+        }
     }
 
     /// Close the reply box, keeping its message as the agent's draft (see
@@ -3100,6 +3244,12 @@ impl App {
         if self.scrollback.is_some() {
             return self.scrollback_key(k);
         }
+        if self.question.is_some() {
+            if let Some(resp) = self.question_key(k) {
+                self.finish_question(&resp);
+            }
+            return;
+        }
         if self.reply.is_some() {
             return self.reply_key(k);
         }
@@ -3175,6 +3325,7 @@ impl App {
             || self.projects.is_some()
             || self.snooze.is_some()
             || self.reply.is_some()
+            || self.question.is_some()
             || (self.view == View::Work && self.work.chooser.is_some())
             || (self.view == View::Search && self.search.typing)
         {
@@ -3559,7 +3710,7 @@ impl App {
         // entered from, else a new one on the highlighted agent.
         if matches!(k.code, KeyCode::Tab | KeyCode::BackTab) && self.view == View::Inbox {
             self.leave_scrollback();
-            if self.reply.is_none() {
+            if self.reply.is_none() && self.question.is_none() {
                 self.open_reply();
             }
             return;
@@ -3623,7 +3774,7 @@ impl App {
         self.copied = Some(text);
         self.leave_scrollback();
         self.note = None;
-        if self.view == View::Inbox && self.reply.is_none() {
+        if self.view == View::Inbox && self.reply.is_none() && self.question.is_none() {
             self.open_reply();
         }
         // Why there is no reply box, if there is none, after the copy.
@@ -3710,6 +3861,7 @@ impl App {
             && self.projects.is_none()
             && self.snooze.is_none()
             && self.reply.is_none()
+            && self.question.is_none()
             && !self.searching
             && self.armed == Armed::No
             && !(self.view == View::Work
@@ -3762,14 +3914,17 @@ impl App {
             main
         };
         let head_h = self.detail_rows(main.width);
-        let rows = match &self.reply {
-            Some(r) => r.prompt.rows(main.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
-            None => 1,
-        };
+        let max_card = main.height.saturating_sub(head_h + 4);
         let card_h = if self.reply_hidden() {
             0
+        } else if let Some(q) = &self.question {
+            q.desired_height(main.width, max_card)
         } else {
-            (rows + prompt_box::CHROME_ROWS).min(main.height.saturating_sub(head_h + 4))
+            let rows = match &self.reply {
+                Some(r) => r.prompt.rows(main.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
+                None => 1,
+            };
+            (rows + prompt_box::CHROME_ROWS).min(max_card)
         };
         let [head, rule, pane, _, card] = Layout::vertical([
             Constraint::Length(head_h),
@@ -3786,7 +3941,11 @@ impl App {
         self.draw_detail(f, head);
         draw::rule(f, &p, rule);
         self.draw_transcript(f, pane);
-        if card_h > prompt_box::CHROME_ROWS {
+        if self.question.is_some() {
+            if card_h >= prompt_box::CHROME_ROWS + 2 {
+                self.draw_question(f, card);
+            }
+        } else if card_h > prompt_box::CHROME_ROWS {
             self.draw_reply(f, card, card_h - prompt_box::CHROME_ROWS);
         }
         self.draw_projects(f, main);
@@ -3962,11 +4121,16 @@ impl App {
             && !self.reply_hidden()
             && body.height >= prompt_box::CHROME_ROWS + 4
         {
-            let rows = match &self.reply {
-                Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
-                None => 1,
+            let max_card = body.height.saturating_sub(3);
+            let h = if let Some(q) = &self.question {
+                q.desired_height(body.width, max_card)
+            } else {
+                let rows = match &self.reply {
+                    Some(r) => r.prompt.rows(body.width, REPLY_MIN_ROWS, REPLY_MAX_ROWS),
+                    None => 1,
+                };
+                (rows + prompt_box::CHROME_ROWS).min(max_card)
             };
-            let h = (rows + prompt_box::CHROME_ROWS).min(body.height.saturating_sub(3));
             let [rest, card] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(h)]).areas(body);
             reply_card = Some((card, h.saturating_sub(prompt_box::CHROME_ROWS)));
@@ -4014,7 +4178,11 @@ impl App {
             self.draw_list(f, body);
         }
         if let Some((card, rows)) = reply_card {
-            self.draw_reply(f, card, rows);
+            if self.question.is_some() {
+                self.draw_question(f, card);
+            } else {
+                self.draw_reply(f, card, rows);
+            }
         }
         // Over the reply box, so their backdrop dims it too.
         self.draw_projects(f, body);
@@ -4036,7 +4204,7 @@ impl App {
         if self.expanded {
             return Some((Rect { height: 0, ..body }, body));
         }
-        let replying = self.reply.is_some();
+        let replying = self.reply.is_some() || self.question.is_some();
         if body.height < if replying { 12 } else { 15 } {
             return None;
         }
@@ -4241,13 +4409,49 @@ impl App {
     /// Whether the reply box gives way: nothing is highlighted (such as a
     /// search with no matches), so there is no one to message.
     fn reply_hidden(&self) -> bool {
-        self.reply.is_none() && self.selected_item().is_none()
+        self.reply.is_none() && self.question.is_none() && self.selected_item().is_none()
+    }
+
+    /// Draw the focused `agy` question card.
+    fn draw_question(&mut self, f: &mut Frame, card: Rect) {
+        let p = self.p;
+        let tokens = self.tokens_label();
+        let corners = self.corners.as_ref();
+        if let Some(q) = &mut self.question {
+            q.draw(f, &p, card, tokens.as_deref(), corners);
+        }
+    }
+
+    /// Draw the unfocused bottom card for an `agy` agent waiting on a
+    /// question; returns true when one was drawn.
+    fn draw_pending_question(&self, f: &mut Frame, card: Rect) -> bool {
+        if self.reply.is_some() {
+            return false;
+        }
+        let Some(questions) = self.pending_question() else {
+            return false;
+        };
+        let label = self.selected_label();
+        let tokens = self.tokens_label();
+        question::draw_unfocused(
+            f,
+            &self.p,
+            card,
+            &label,
+            questions,
+            tokens.as_deref(),
+            self.corners.as_ref(),
+        );
+        true
     }
 
     /// The reply box: the prompt box with a chip row naming the agent it
     /// goes to, filled brighter and barred in iris while it has focus.
     /// Unfocused, it says what Tab would do.
     fn draw_reply(&mut self, f: &mut Frame, card: Rect, rows: u16) {
+        if self.draw_pending_question(f, card) {
+            return;
+        }
         let p = self.p;
         let blocked = self
             .selected_item()
@@ -5527,6 +5731,8 @@ impl App {
         // Where John is goes first.
         let here = if self.scrollback.is_some() {
             Some("Scrollback")
+        } else if self.question.is_some() {
+            Some("Question card")
         } else if self.reply.is_some() {
             Some("Reply box")
         } else if self.snooze.is_some() {
@@ -5611,7 +5817,14 @@ impl App {
             ));
         }
         if self.preview_want().is_some() {
-            row.push(("⇥", "message the agent"));
+            row.push((
+                "⇥",
+                if self.pending_question().is_some() {
+                    "answer the agent's question"
+                } else {
+                    "message the agent"
+                },
+            ));
             row.push(("⌃U ⌃D", "scroll back, half a page"));
             row.push((
                 "⌃L",
@@ -5991,6 +6204,12 @@ impl App {
         if let Some(sb) = &self.scrollback {
             return self.draw_scrollback_footer(f, area, sb);
         }
+        if let Some(q) = &self.question {
+            let hints = q.hints(p);
+            let (spans, _) = draw::hints(p, &hints, area.width as usize);
+            f.render_widget(Line::from(spans), area);
+            return;
+        }
         if let Some(r) = &self.reply {
             let ghost = self.reply_suggestion().is_some();
             let ready = ghost || (!r.prompt.text().is_empty() && r.prompt.saved_ok);
@@ -6216,6 +6435,11 @@ impl App {
             return false;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        // The question card handles every key while open; submitting drives
+        // `agy`'s live prompt and keeps the card on failure.
+        if self.question.is_some() {
+            return self.send_question(k, term);
+        }
         // The reply box's Enter sends the message; other keys edit it. A
         // failed send keeps the box, so the message isn't lost.
         if self.reply.is_some() {
@@ -6760,6 +6984,43 @@ impl App {
         self.refetch();
     }
 
+    /// Drive the focused question card in standalone mode: navigate locally,
+    /// and submit answers or skip over `standalone::answer`. A failed submit
+    /// keeps the card open so John's selections and write-in aren't lost.
+    fn send_question(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
+        let Some(resp) = self.question_key(k) else {
+            return true;
+        };
+        let Some(pick) = standalone::parse_pick(&self.pick()) else {
+            return true;
+        };
+        let label = self
+            .question
+            .as_ref()
+            .map_or_else(|| self.selected_label(), |q| q.label.clone());
+        let doing = match resp {
+            switchyard_core::actions::QuestionResponse::Skip => {
+                format!("Skipping question on {label}…")
+            }
+            switchyard_core::actions::QuestionResponse::Answers { .. } => {
+                format!("Answering {label}…")
+            }
+        };
+        self.busy(term, doing);
+        self.note = Some(match standalone::answer(&pick, &resp) {
+            Ok(msg) => {
+                self.close_question(false);
+                self.refetch();
+                if let Some(feed) = &self.feed {
+                    feed.preview(self.preview_want());
+                }
+                Toast::info(msg)
+            }
+            Err(e) => Toast::error(format!("{label}: {e}")),
+        });
+        true
+    }
+
     /// The reply box's Enter: send the message; other keys (false) edit
     /// it. A failed send keeps the box, so the message isn't lost.
     fn send_reply(&mut self, k: KeyEvent, term: &mut DefaultTerminal) -> bool {
@@ -7108,6 +7369,10 @@ fn run(term: &mut DefaultTerminal, app: &mut App) -> io::Result<()> {
             Event::Paste(text)
                 if app.fed && protocol::data(&text).is_some()
                     || app.reply.is_some()
+                    || app
+                        .question
+                        .as_ref()
+                        .is_some_and(question::QuestionCard::is_writing)
                     || (app.view == View::Search && app.search.typing)
                     || app
                         .items
@@ -8343,6 +8608,93 @@ mod tests {
                 .as_ref()
                 .is_some_and(|n| n.is_error() && n.text.contains("waiting on a prompt"))
         );
+    }
+
+    #[test]
+    fn question_card_answers_blocked_agy_prompt_and_keeps_draft() {
+        let plain = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let mut app = inbox_with_lifecycle();
+        // Tab(1) is blocked ("waiting on a prompt").
+        app.selected = app.rows.iter().position(|&i| i == Item::Tab(1));
+        let pane = app.preview_want().unwrap();
+        let body = format!(
+            "{}preview\n{}\n{}",
+            protocol::DATA,
+            pane.header(),
+            serde_json::json!({
+                "harness": "agy",
+                "entries": [{"kind": "ask", "text": "Which layout?"}],
+                "question": [
+                    {
+                        "question": "Which layout?",
+                        "options": ["(Recommended) Inline", "Separate"],
+                        "multi_select": false
+                    },
+                    {
+                        "question": "Extras?",
+                        "options": ["Badge", "Tooltip"],
+                        "multi_select": true
+                    }
+                ]
+            })
+        );
+        app.paste(&body);
+        assert!(app.pending_question().is_some());
+
+        let screen = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        };
+
+        // Unfocused card advertises answering the question instead of refusing.
+        let unfocused = screen(&mut app);
+        assert!(unfocused.contains("Tab to answer"), "{unfocused}");
+        assert!(unfocused.contains("2 questions"), "{unfocused}");
+
+        // Tab focuses the interactive question card (not the reply box).
+        app.key(plain(KeyCode::Tab));
+        assert!(app.question.is_some());
+        assert!(app.reply.is_none());
+        let focused = screen(&mut app);
+        assert!(focused.contains("Question 1/2"), "{focused}");
+        assert!(focused.contains("(Recommended) Inline"), "{focused}");
+        assert!(focused.contains("Write-in…"), "{focused}");
+
+        // Pick option 1 -> advances to step 2; Escape leaves and preserves draft.
+        app.key(plain(KeyCode::Char('1')));
+        assert_eq!(app.question.as_ref().unwrap().progress(), (2, 2));
+        app.key(plain(KeyCode::Esc));
+        assert!(app.question.is_none());
+
+        // Re-opening restores step 2.
+        app.key(plain(KeyCode::Tab));
+        assert_eq!(app.question.as_ref().unwrap().progress(), (2, 2));
+
+        // Toggle option 1 and submit -> closes card, drops draft, shows toast.
+        app.key(plain(KeyCode::Char('1')));
+        app.key(plain(KeyCode::Enter));
+        assert!(app.question.is_none());
+        assert!(app.question_drafts.is_empty());
+        assert!(
+            app.note
+                .as_ref()
+                .is_some_and(|n| !n.is_error() && n.text.starts_with("answered "))
+        );
+
+        // If the agent stops being blocked while the card is open, deliver() closes it.
+        app.key(plain(KeyCode::Tab));
+        assert!(app.question.is_some());
+        app.deliver(|a| {
+            a.tabs[1].state = State::Working;
+        });
+        assert!(app.question.is_none());
     }
 
     #[test]

@@ -136,6 +136,7 @@ fn dispatch(cmd: &str, body: &Value, endpoint: &Endpoint) -> Result<Value, Strin
             rpc_action(cmd, body, endpoint)
         }
         "message" => rpc_message(body),
+        "answer" => rpc_answer(body, endpoint),
         "unlink" => rpc_unlink(body, endpoint),
         _ => Err(format!("unknown rpc command: {cmd}")),
     }
@@ -257,6 +258,15 @@ fn rpc_message(body: &Value) -> Result<Value, String> {
             actions::message(host, session, window, text)?
         }
     };
+    Ok(json!({ "result": result }))
+}
+
+fn rpc_answer(body: &Value, endpoint: &Endpoint) -> Result<Value, String> {
+    let (host, session, window) = tab_fields(body)?;
+    let response: actions::QuestionResponse = serde_json::from_value(body["response"].clone())
+        .map_err(|e| format!("invalid answer response: {e}"))?;
+    let result = actions::answer_question(host, session, window, &response)?;
+    let _ = endpoint.asks.refresh.send("refresh");
     Ok(json!({ "result": result }))
 }
 

@@ -343,6 +343,14 @@ pub fn message(p: &Pick, text: &str) -> Result<String, String> {
     )
 }
 
+/// Answer (or skip) a pending `agy` `ask_question` prompt in the pick's tab.
+pub fn answer(p: &Pick, response: &actions::QuestionResponse) -> Result<String, String> {
+    logged(
+        "answer",
+        actions::answer_question(&p.host, &p.session, &p.window, response),
+    )
+}
+
 /// Interrupt the pick's agent; Ok is the outcome to show.
 pub fn interrupt(p: &Pick) -> Result<String, String> {
     logged(

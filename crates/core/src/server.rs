@@ -648,6 +648,27 @@ pub fn remote_interrupt(host: &str, session: &str, window: &str) -> Result<Strin
     reply_string(&reply, "result")
 }
 
+/// Run `actions::answer_question` through the remote control plane.
+///
+/// # Errors
+///
+/// Fails when the remote control plane can't be reached or answering fails.
+pub fn remote_answer(
+    host: &str,
+    session: &str,
+    window: &str,
+    response: &crate::actions::QuestionResponse,
+) -> Result<String, String> {
+    let reply = remote_rpc(&json!({
+        "cmd": "answer",
+        "host": host,
+        "session": session,
+        "window": window,
+        "response": response,
+    }))?;
+    reply_string(&reply, "result")
+}
+
 /// Run `actions::switch_harness` through the remote control plane.
 ///
 /// # Errors

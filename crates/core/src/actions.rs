@@ -62,6 +62,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use crate::hosts::catalog;
 use crate::images::carry_from;
 use crate::launch::launch;
@@ -952,6 +954,296 @@ pub fn interrupt(host: &str, session: &str, window: &str) -> Result<String, Stri
     }
     rex(host, &["send-key", "-s", session, "-b", block, "escape"])?;
     Ok(format!("interrupted {label}"))
+}
+
+/// One answer to a question in an interactive `agy` `ask_question` prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    /// 0-based preset option indices to select (at most 1 for single-select;
+    /// empty when answering single-select purely via `write_in`).
+    #[serde(default)]
+    pub selected: Vec<usize>,
+    /// Optional custom write-in text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write_in: Option<String>,
+    /// Whether this question uses multi-select checkboxes (`space` toggles).
+    #[serde(default)]
+    pub multi_select: bool,
+    /// Number of preset options (`Write-in...` sits at index `option_count`).
+    pub option_count: usize,
+}
+
+/// What to submit to an `agy` `ask_question` prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuestionResponse {
+    Answers { answers: Vec<QuestionAnswer> },
+    Skip,
+}
+
+/// Short settle between key bursts while driving `agy`'s question UI.
+const QUESTION_KEY_SETTLE: Duration = Duration::from_millis(80);
+/// Short settle between questions so `agy` renders the next screen before
+/// we inspect it.
+const QUESTION_STEP_SETTLE: Duration = Duration::from_millis(120);
+
+/// Parsed state of `agy`'s live `Question` prompt from a plain screen capture.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct AgyQuestionScreen {
+    question_num: Option<usize>,
+    question_total: Option<usize>,
+    cursor: Option<usize>,
+    checked: Vec<usize>,
+    last_index: Option<usize>,
+    write_in_open: bool,
+}
+
+/// Parse the last `Question` widget visible in a plain terminal capture of
+/// `agy`.
+fn parse_agy_question_screen(screen: &str) -> AgyQuestionScreen {
+    let lines: Vec<&str> = screen.lines().collect();
+    let start = lines
+        .iter()
+        .rposition(|l| l.trim() == "Question")
+        .unwrap_or_else(|| lines.len().saturating_sub(40));
+    let mut state = AgyQuestionScreen::default();
+    for raw in &lines[start..] {
+        let trimmed = raw.trim();
+        if trimmed == "Your answer:" {
+            state.write_in_open = true;
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("Question ")
+            && let Some((nums, _)) = rest.split_once(':')
+            && let Some((cur, total)) = nums.split_once('/')
+            && let (Ok(c), Ok(t)) = (cur.trim().parse::<usize>(), total.trim().parse::<usize>())
+        {
+            state.question_num = Some(c);
+            state.question_total = Some(t);
+            continue;
+        }
+        let (is_cursor, rest) = match trimmed.strip_prefix('>') {
+            Some(r) => (true, r.trim_start()),
+            None => (false, trimmed),
+        };
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits > 0
+            && rest[digits..].starts_with(". ")
+            && let Ok(num) = rest[..digits].parse::<usize>()
+            && num > 0
+        {
+            let idx = num - 1;
+            if is_cursor {
+                state.cursor = Some(idx);
+            }
+            let body = &rest[digits + 2..];
+            if body.starts_with("[x]") || body.starts_with("[X]") {
+                state.checked.push(idx);
+            }
+            state.last_index = Some(state.last_index.map_or(idx, |m| m.max(idx)));
+        }
+    }
+    state
+}
+
+/// Sanitize write-in text into single-line chunks safe to type into `agy`'s
+/// `Your answer:` input.
+fn sanitize_write_in(text: &str) -> Vec<String> {
+    let collapsed = text.replace("\r\n", " ").replace(['\n', '\r', '\t'], " ");
+    let mut chunks = Vec::new();
+    let mut chunk = String::new();
+    for c in collapsed.trim().chars() {
+        if c.is_control() {
+            continue;
+        }
+        if chunk.len() + c.len_utf8() > TYPE_CHUNK {
+            chunks.push(std::mem::take(&mut chunk));
+        }
+        chunk.push(c);
+    }
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
+
+fn send_keys(host: &str, session: &str, block: &str, keys: &[&str]) -> Result<(), String> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["send-key", "-s", session, "-b", block];
+    args.extend_from_slice(keys);
+    rex(host, &args)?;
+    Ok(())
+}
+
+fn move_cursor(
+    host: &str,
+    session: &str,
+    block: &str,
+    from: usize,
+    to: usize,
+) -> Result<(), String> {
+    if to == from {
+        return Ok(());
+    }
+    let (key, count) = if to > from {
+        ("down", to - from)
+    } else {
+        ("up", from - to)
+    };
+    let keys = vec![key; count];
+    send_keys(host, session, block, &keys)
+}
+
+fn send_write_in(host: &str, session: &str, block: &str, chunks: &[String]) -> Result<(), String> {
+    send_keys(host, session, block, &["enter"])?;
+    std::thread::sleep(QUESTION_KEY_SETTLE);
+    for chunk in chunks {
+        rex(host, &["send", "-s", session, "-b", block, "--", chunk])?;
+    }
+    std::thread::sleep(TYPE_SETTLE);
+    send_keys(host, session, block, &["enter"])
+}
+
+fn verify_agy_question_pane(
+    host: &str,
+    session: &str,
+    window: &str,
+    label: &str,
+) -> Result<(String, AgyQuestionScreen), String> {
+    let pane = crate::transcript::pane_with_screen(host, session, window)?;
+    let block = pane["block"]
+        .as_str()
+        .filter(|b| !b.is_empty())
+        .ok_or("no agent in that tab")?;
+    let app = pane["app"].as_str().unwrap_or("");
+    if !matches!(app, "antigravity" | "agy") {
+        return Err(format!(
+            "{label} is not an Antigravity agent; answer it in its tab"
+        ));
+    }
+    if pane["state"].as_str() != Some("blocked") || pane["kind"].as_str() != Some("question") {
+        return Err(format!("{label} is no longer waiting on a question"));
+    }
+    let screen = parse_agy_question_screen(pane["screen"].as_str().unwrap_or(""));
+    Ok((block.to_string(), screen))
+}
+
+/// Answer (or skip) an `agy` agent's pending `ask_question` prompt in `window`
+/// on `host` by driving its live question TUI through Rex.
+///
+/// # Errors
+///
+/// Fails when the tab or agent pane can't be found, the agent is no longer
+/// blocked on an `agy` `ask_question` prompt, an answer is invalid, or Rex
+/// refuses the keys.
+pub fn answer_question(
+    host: &str,
+    session: &str,
+    window: &str,
+    response: &QuestionResponse,
+) -> Result<String, String> {
+    if crate::server::remote_url().is_some() {
+        return crate::server::remote_answer(host, session, window, response);
+    }
+    let label = load_tasks()
+        .ok()
+        .and_then(|tasks| {
+            tasks
+                .iter()
+                .find(|t| t["ended_at"].is_null() && in_window(t, window))
+                .map(label_of)
+        })
+        .unwrap_or_else(|| "the agent".into());
+    let (block, mut screen) = verify_agy_question_pane(host, session, window, &label)?;
+    if screen.write_in_open {
+        send_keys(host, session, &block, &["escape"])?;
+        std::thread::sleep(QUESTION_KEY_SETTLE);
+        screen = verify_agy_question_pane(host, session, window, &label)?.1;
+    }
+    match response {
+        QuestionResponse::Skip => {
+            send_keys(host, session, &block, &["escape"])?;
+            Ok(format!("skipped question for {label}"))
+        }
+        QuestionResponse::Answers { answers } => {
+            if answers.is_empty() {
+                return Err("no answers to submit".into());
+            }
+            if let Some(cur_q) = screen.question_num
+                && cur_q > 1
+            {
+                let backs = vec!["left"; cur_q - 1];
+                send_keys(host, session, &block, &backs)?;
+                std::thread::sleep(QUESTION_STEP_SETTLE);
+            }
+            for (i, ans) in answers.iter().enumerate() {
+                let (_, cur_screen) = if i == 0 && screen.question_num.unwrap_or(1) == 1 {
+                    (block.clone(), screen.clone())
+                } else {
+                    verify_agy_question_pane(host, session, window, &label)?
+                };
+                apply_agy_answer(host, session, &block, ans, &cur_screen)?;
+                if i + 1 < answers.len() {
+                    std::thread::sleep(QUESTION_STEP_SETTLE);
+                }
+            }
+            Ok(format!("answered {label}"))
+        }
+    }
+}
+
+fn apply_agy_answer(
+    host: &str,
+    session: &str,
+    block: &str,
+    ans: &QuestionAnswer,
+    screen: &AgyQuestionScreen,
+) -> Result<(), String> {
+    let write_in_idx = screen.last_index.unwrap_or(ans.option_count);
+    let mut cur = screen.cursor.unwrap_or(0);
+    let write_in = ans
+        .write_in
+        .as_deref()
+        .map(sanitize_write_in)
+        .filter(|c| !c.is_empty());
+
+    if ans.multi_select {
+        for idx in 0..ans.option_count {
+            let want = ans.selected.contains(&idx);
+            let have = screen.checked.contains(&idx);
+            if want != have {
+                move_cursor(host, session, block, cur, idx)?;
+                cur = idx;
+                send_keys(host, session, block, &["space"])?;
+                std::thread::sleep(Duration::from_millis(40));
+            }
+        }
+        if let Some(chunks) = write_in {
+            move_cursor(host, session, block, cur, write_in_idx)?;
+            send_write_in(host, session, block, &chunks)?;
+        } else {
+            if cur >= write_in_idx {
+                move_cursor(host, session, block, cur, 0)?;
+            }
+            send_keys(host, session, block, &["enter"])?;
+        }
+        return Ok(());
+    }
+
+    if let Some(chunks) = write_in {
+        move_cursor(host, session, block, cur, write_in_idx)?;
+        send_write_in(host, session, block, &chunks)
+    } else if let Some(&opt) = ans.selected.first() {
+        if opt >= write_in_idx {
+            return Err(format!("option {} out of range", opt + 1));
+        }
+        move_cursor(host, session, block, cur, opt)?;
+        send_keys(host, session, block, &["enter"])
+    } else {
+        Err("no option selected for question".into())
+    }
 }
 
 /// `message` with the text of a prompt file (`LABEL:ID`, see `prompts`),
@@ -2001,5 +2293,60 @@ mod tests {
         assert!(closed && cleaned && saved);
         assert!(note_file.is_file());
         std::fs::remove_dir_all(notes).unwrap();
+    }
+
+    #[test]
+    fn parses_agy_question_screen_states() {
+        let single = "\
+? Pick one
+Question
+────────────────────────────────────────
+Question 1/2: Pick one
+> 1. (Recommended) Alpha
+  2. Beta
+  3. Write-in...
+  ↑/↓ Navigate · → Next · enter Select · esc Skip";
+        assert_eq!(
+            parse_agy_question_screen(single),
+            AgyQuestionScreen {
+                question_num: Some(1),
+                question_total: Some(2),
+                cursor: Some(0),
+                checked: Vec::new(),
+                last_index: Some(2),
+                write_in_open: false,
+            }
+        );
+
+        let multi_write_in = "\
+Question
+────────────────────────────────────────
+Question 2/2: Pick many
+  1. [x] One
+  2. [ ] Two
+> 3. Write-in...
+  Your answer:
+  extra
+  enter Submit All · esc Back";
+        assert_eq!(
+            parse_agy_question_screen(multi_write_in),
+            AgyQuestionScreen {
+                question_num: Some(2),
+                question_total: Some(2),
+                cursor: Some(2),
+                checked: vec![0],
+                last_index: Some(2),
+                write_in_open: true,
+            }
+        );
+    }
+
+    #[test]
+    fn sanitize_write_in_collapses_newlines_and_strips_controls() {
+        assert_eq!(
+            sanitize_write_in("  line one\nline\ttwo\x1b[31m!  "),
+            vec!["line one line two[31m!".to_string()]
+        );
+        assert_eq!(sanitize_write_in("  \n\t  "), Vec::<String>::new());
     }
 }
